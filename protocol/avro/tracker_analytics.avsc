@@ -1,0 +1,20 @@
+{
+  "type": "record",
+  "name": "TrackerAnalytics",
+  "namespace": "hedging.posttrade.v1",
+  "doc": "Daily index-tracker analytics record (ADR-010). Topic: posttrade.tracker.analytics, key: book_id. Fractions _e9 = decimal * 1e9.",
+  "fields": [
+    {"name": "msg_id", "type": "string"},
+    {"name": "as_of_ns", "type": "long"},
+    {"name": "book_id", "type": "int"},
+    {"name": "benchmark_symbol", "type": "string"},
+    {"name": "kind", "type": {"type": "enum", "name": "TeKind", "symbols": ["EX_POST", "EX_ANTE"]}},
+    {"name": "tracking_error_ann_e9", "type": "long"},
+    {"name": "tracking_diff_e9", "type": "long"},
+    {"name": "cash_weight_e9", "type": "long"},
+    {"name": "cash_drag_e9", "type": "long"},
+    {"name": "n_obs", "type": "int"},
+    {"name": "window_start_ns", "type": "long"},
+    {"name": "window_end_ns", "type": "long"}
+  ]
+}

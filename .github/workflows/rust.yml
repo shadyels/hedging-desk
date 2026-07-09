@@ -1,0 +1,33 @@
+# Per-component CI job (ADR-007), path-filtered to delta-one/ + shared protocol/.
+# Gates match root CLAUDE.md: clippy -D warnings, cargo test, cargo fmt --check.
+name: rust
+
+on:
+  push:
+    branches: [main]
+    paths: ["delta-one/**", "protocol/proto/**", "protocol/refdata/**"]
+  pull_request:
+    paths: ["delta-one/**", "protocol/proto/**", "protocol/refdata/**"]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: delta-one
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.85.0"
+          components: clippy, rustfmt
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            delta-one/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('delta-one/Cargo.lock') }}
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test

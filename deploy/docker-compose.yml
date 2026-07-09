@@ -1,0 +1,47 @@
+# Local demo infrastructure (ADR-001, ADR-002).
+# Kafka env-var set follows the official apache/kafka image docs for KRaft
+# combined mode (https://hub.docker.com/r/apache/kafka/), which note that
+# overriding ANY configuration disables ALL defaults — hence the full set.
+# Dual listeners: containers reach the broker at kafka:29092, host-run
+# services (delta-one, EXO) at localhost:9092.
+services:
+  nats:
+    image: nats:2.11-alpine
+    # No -js flag: JetStream deliberately NOT enabled in Phase 1/2 (ADR-001).
+    command: ["--config", "/etc/nats/nats.conf"]
+    volumes:
+      - ./nats.conf:/etc/nats/nats.conf:ro
+    ports:
+      - "4222:4222"   # client (Rust/Python)
+      - "8222:8222"   # monitoring
+      - "9222:9222"   # WebSocket (UI via nats.ws)
+
+  kafka:
+    image: apache/kafka:3.9.0   # KRaft combined mode, no ZooKeeper
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:29092,PLAINTEXT_HOST://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"   # topics created explicitly by scripts/demo.sh
+    ports:
+      - "9092:9092"
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.8.0
+    depends_on: [kafka]
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:29092
+      # Compatibility level intentionally NOT set: BACKWARD is the registry
+      # default (Confluent docs), and ADR-002 additionally enforces it in CI.
+    ports:
+      - "8081:8081"

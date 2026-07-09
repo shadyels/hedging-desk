@@ -1,0 +1,43 @@
+# Phase 4 flagship scenario (docs/ARCHITECTURE.md "Extended storyline", ADR-009).
+# Deterministic; golden-file e2e like tracker-flow.
+scenario: advanced-hedging
+seed: 4242
+universe: ../../protocol/refdata/universe.json
+timeline:
+  - at_ms: 0
+    action: quote
+    instrument: AAPL
+    bid: 187.50
+    ask: 187.52
+  - at_ms: 500
+    action: quote_chain            # sim publishes the AAPL option chain (3001-3005)
+    underlying: AAPL
+  - at_ms: 1000
+    action: exo_book_event
+    book: EXO-SP
+    note: "structured product book initialised (autocallables + BRC)"
+  - at_ms: 5000
+    action: vol_regime             # sim shifts implied/realised vol regime
+    underlying: AAPL
+    vol_multiplier: 1.6
+  - at_ms: 6000
+    expect: risk_limit_alert       # vega warn/breach on d1.alerts.limits
+  - at_ms: 6500
+    expect: hedge_proposal         # exo.proposals.EXO-SP with option basket
+  - at_ms: 8000
+    action: ui_command             # scripted trader approval
+    command: proposal_approve
+  - at_ms: 8200
+    expect: option_orders_executed # legs over FIX vs sim acceptor, post-exposure < limit
+  - at_ms: 12000
+    action: rates_shift            # sim moves the rate curve; USD rho accumulates
+    parallel_bp: 25
+  - at_ms: 13000
+    expect: internal_transfer      # exo.transfers -> directed cross EXO-SP -> RATES-IR
+  - at_ms: 13500
+    expect: rates_hedge_executed   # RATES-IR external ZN/SR3 order via ordinary pipeline
+fill_model:
+  mode: partial
+  slices: 2
+  latency_ms: 20
+  reject_rate: 0.0

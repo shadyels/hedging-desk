@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/d1-core",
+  "crates/d1-netting",
+  "crates/d1-gateway-nats",
+  "crates/d1-gateway-fix",
+  "crates/d1-posttrade",
+  "crates/d1-analytics",
+  "crates/sim",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+
+[workspace.lints.clippy]
+# Hot-path contract enforcement (delta-one/CLAUDE.md). Non-hot modules may
+# carve out documented exceptions with #[allow] + justification comment.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+todo = "deny"
+dbg_macro = "deny"
+
+[workspace.lints.rust]
+unsafe_code = "deny"      # ADR-003: only d1-gateway-fix overrides, at crate level, with ADR reference
+missing_docs = "warn"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[profile.bench]
+inherits = "release"

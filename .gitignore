@@ -1,0 +1,23 @@
+# macOS
+.DS_Store
+
+# Rust (delta-one/, sim/)
+delta-one/target/
+**/*.rs.bk
+
+# Python (exo/)
+exo/.venv/
+**/__pycache__/
+*.pyc
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# TypeScript / UI
+ui/node_modules/
+ui/dist/
+ui/coverage/
+
+# Local env overrides
+.env
+.env.local

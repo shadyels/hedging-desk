@@ -1,0 +1,18 @@
+# Always-on schema-compat job (ADR-007): proto append-only lint + Avro
+# BACKWARD compatibility, regardless of which paths changed — a schema
+# consumed by all three components must be checked even when the diff
+# lands in one component's own directory (e.g. a Rust change that assumes
+# a new proto field).
+name: schema-compat
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  schema-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/schema-check.sh

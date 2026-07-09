@@ -1,0 +1,254 @@
+syntax = "proto3";
+package hedging.live.v1;
+
+import "common.proto";
+
+// ---- EXO -> Delta One ------------------------------------------------------
+
+message TargetPosition {
+  hedging.common.v1.Meta meta = 1;
+  uint32 book_id = 2;
+  hedging.common.v1.InstrumentRef instrument = 3;
+  sint64 target_qty_e2 = 4;        // absolute desired position, not a delta-order
+  uint64 as_of_ns = 5;             // valuation time this target derives from
+  sint64 band_qty_e2 = 6;          // no-trade band half-width used by EXO
+  hedging.common.v1.ValuationMeta valuation = 7;
+  string reason = 8;               // human-readable trigger, e.g. "autocall barrier proximity"
+}
+
+// ---- Delta One -> EXO / UI --------------------------------------------------
+
+enum OrdStatus {
+  ORD_STATUS_UNSPECIFIED = 0;
+  ORD_STATUS_NEW = 1;
+  ORD_STATUS_PARTIALLY_FILLED = 2;
+  ORD_STATUS_FILLED = 3;
+  ORD_STATUS_CANCELED = 4;
+  ORD_STATUS_REJECTED = 5;
+  ORD_STATUS_PENDING_CANCEL = 6;
+  ORD_STATUS_PENDING_REPLACE = 7;
+}
+
+message ExecutionReport {
+  hedging.common.v1.Meta meta = 1;
+  string cl_ord_id = 2;
+  string exec_id = 3;
+  uint32 book_id = 4;              // 0 = firm-level parent order pre-allocation
+  hedging.common.v1.InstrumentRef instrument = 5;
+  hedging.common.v1.Side side = 6;
+  OrdStatus status = 7;
+  sint64 last_qty_e2 = 8;
+  sint64 last_px_e9 = 9;
+  sint64 cum_qty_e2 = 10;
+  sint64 leaves_qty_e2 = 11;
+  string text = 12;                // reject reason etc.
+}
+
+message PositionSnapshot {
+  hedging.common.v1.Meta meta = 1;
+  uint32 book_id = 2;
+  message Line {
+    hedging.common.v1.InstrumentRef instrument = 1;
+    sint64 qty_e2 = 2;
+    sint64 avg_px_e9 = 3;
+    sint64 inflight_qty_e2 = 4;
+  }
+  repeated Line lines = 3;
+}
+
+message RiskSnapshot {
+  // Design decision: delta is HEDGED automatically; vega/gamma are MONITORED
+  // only (surfaced to UI/desk, never auto-executed). See docs/ARCHITECTURE.md.
+  hedging.common.v1.Meta meta = 1;
+  message NetGreeks {
+    hedging.common.v1.InstrumentRef underlying = 1;
+    sint64 firm_delta_qty_e2 = 2;   // hedgeable via Delta One
+    sint64 notional_e9 = 3;         // delta notional, underlying ccy
+    sint64 vega_e9 = 4;             // ccy per 1.00 vol point; monitored only
+    sint64 gamma_qty_e2 = 5;        // dDelta per 1% spot move; monitored only
+    bool greeks_flagged = 6;        // true if any MC std error breached config max
+    sint64 rho_e9 = 7;              // ccy per +1bp parallel rate shift; monitored + limited (ADR-008)
+    sint64 theta_e9 = 8;            // expected carry, ccy per calendar day; monitored only (ADR-008)
+    sint64 div_sens_e9 = 9;         // ccy per +1% absolute div-yield change; monitored only (ADR-008)
+  }
+  repeated NetGreeks greeks = 2;
+}
+
+message RiskLimitAlert {
+  // Tier-1 limit breach (ADR-008). Published by Delta One on d1.alerts.limits;
+  // limits are config-driven in delta-one/d1.toml, never hardcoded.
+  hedging.common.v1.Meta meta = 1;
+  hedging.common.v1.InstrumentRef underlying = 2;
+  enum Greek {
+    GREEK_UNSPECIFIED = 0;
+    GREEK_VEGA = 1;
+    GREEK_GAMMA = 2;
+    GREEK_RHO = 3;
+  }
+  Greek greek = 3;
+  sint64 value_e9 = 4;              // current firm-level exposure (vega/rho: ccy; gamma: qty_e2 semantics noted in text)
+  sint64 limit_e9 = 5;
+  bool breached = 6;                // false = warning threshold, true = hard limit
+}
+
+message InternalCrossNotice {
+  hedging.common.v1.Meta meta = 1;
+  string cross_id = 2;
+  hedging.common.v1.InstrumentRef instrument = 3;
+  uint32 buy_book_id = 4;
+  uint32 sell_book_id = 5;
+  sint64 qty_e2 = 6;
+  sint64 ref_px_e9 = 7;
+  string px_policy_id = 8;         // ADR-005 §4; compliance-visible
+}
+
+message ReconAlert {
+  hedging.common.v1.Meta meta = 1;
+  uint32 book_id = 2;
+  hedging.common.v1.InstrumentRef instrument = 3;
+  sint64 exo_view_qty_e2 = 4;
+  sint64 d1_view_qty_e2 = 5;
+  bool publishing_halted = 6;
+}
+
+message HealthStatus {
+  hedging.common.v1.Meta meta = 1;
+  string component = 2;
+  bool ok = 3;
+  map<string, string> detail = 4;  // free-form gauges for the UI health screen
+}
+
+
+// ---- Delta One -> UI: index-tracker analytics (ADR-010) ----------------------
+
+message TrackerAnalytics {
+  // Subject: d1.tracker.<book>. Fractions/returns use _e9 = decimal * 1e9
+  // (e.g. 35 bps annualized TE = 0.0035 -> 3500000).
+  hedging.common.v1.Meta meta = 1;
+  uint32 book_id = 2;
+  hedging.common.v1.InstrumentRef benchmark = 3;
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    KIND_EX_POST = 1;     // realized, from sampled return history (P1.M5 scope)
+    KIND_EX_ANTE = 2;     // model-predicted; future work (ADR-011 candidate)
+  }
+  Kind kind = 4;
+  sint64 tracking_error_ann_e9 = 5;   // annualized stdev of active returns
+  sint64 tracking_diff_e9 = 6;        // cumulative active return over the window
+  sint64 cash_weight_e9 = 7;          // average cash weight over the window
+  sint64 cash_drag_e9 = 8;            // avg cash weight x (bench return - cash return), window
+  uint32 n_obs = 9;
+  uint64 window_start_ns = 10;
+  uint64 window_end_ns = 11;
+  uint32 sampling_interval_s = 12;    // demo-time sampling; config in d1.toml [tracker]
+}
+
+// ---- EXO -> UI ---------------------------------------------------------------
+
+message ValuationSnapshot {
+  // Subject: exo.valuations.<book> (see protocol/nats-subjects.md)
+  hedging.common.v1.Meta meta = 1;
+  uint32 book_id = 2;
+  uint64 as_of_ns = 3;
+  hedging.common.v1.ValuationMeta valuation = 4;
+  message ProductLine {
+    string product_id = 1;          // desk trade id of the structured product
+    string product_type = 2;        // "autocallable" | "rc" | "brc" | "bonus" | "tarf" | "ptarf" | "barrier"
+    hedging.common.v1.InstrumentRef underlying = 3;
+    sint64 pv_e9 = 4;               // in product ccy
+    sint64 pv_std_err_e9 = 5;       // MC standard error; mandatory (exo/CLAUDE.md rule 6)
+    sint64 delta_qty_e2 = 6;
+    sint64 vega_e9 = 7;
+    sint64 gamma_qty_e2 = 8;
+    sint64 rho_e9 = 9;              // ccy per +1bp parallel rate shift
+    sint64 theta_e9 = 10;           // ccy per calendar day (expected carry)
+    sint64 div_sens_e9 = 11;        // ccy per +1% absolute div-yield change
+  }
+  repeated ProductLine lines = 5;
+  sint64 book_pv_e9 = 6;
+}
+
+message InternalTransferRequest {
+  // Directed internal risk transfer (ADR-009 mechanics note): instructs Delta
+  // One to book an ADR-005-style cross between two books by instruction,
+  // NOT via netting-cycle demand offsetting. Used for rho transfer to
+  // RATES-IR. D1 validates books/instrument/limits, books both legs at the
+  // configured reference-price policy, publishes InternalCrossNotice + Kafka.
+  hedging.common.v1.Meta meta = 1;
+  string transfer_id = 2;           // UUIDv7; idempotency key
+  hedging.common.v1.InstrumentRef instrument = 3;
+  uint32 from_book_id = 4;          // book shedding the risk (sells)
+  uint32 to_book_id = 5;            // book receiving the risk (buys)
+  sint64 qty_e2 = 6;
+  string reason = 7;                // e.g. "rho transfer: USD bucket breach"
+  hedging.common.v1.ValuationMeta valuation = 8;
+}
+
+message HedgeProposal {
+  // Tier-2 (ADR-009): EXO's optimizer output. A PROPOSAL, never an order.
+  // Execution happens only after trader approval via d1.cmd.proposal,
+  // validated and executed by Delta One like any other order flow.
+  hedging.common.v1.Meta meta = 1;
+  string proposal_id = 2;           // UUIDv7; idempotency + approval key
+  uint32 book_id = 3;
+  hedging.common.v1.InstrumentRef underlying = 4;
+  RiskLimitAlert.Greek target_greek = 5;   // which breach/exposure this addresses
+  message Leg {
+    hedging.common.v1.InstrumentRef instrument = 1;   // vanilla option (vega/gamma) or rate future (rho, RATES-IR)
+    hedging.common.v1.Side side = 2;
+    sint64 qty_e2 = 3;
+    sint64 limit_px_e9 = 4;         // optimizer's max acceptable price; D1 may improve, never worsen
+  }
+  repeated Leg legs = 6;
+  sint64 pre_exposure_e9 = 7;       // exposure before hedge (units per target_greek)
+  sint64 post_exposure_e9 = 8;      // modeled residual after hedge
+  sint64 est_cost_e9 = 9;           // modeled transaction cost of the basket
+  uint64 valid_until_ns = 10;       // stale proposals must be re-generated, never executed
+  hedging.common.v1.ValuationMeta valuation = 11;  // reproducibility (root invariant #7)
+}
+
+// ---- UI -> Delta One (request/reply) ----------------------------------------
+
+message CommandRequest {
+  hedging.common.v1.Meta meta = 1;
+  oneof cmd {
+    ManualOrder manual_order = 2;
+    KillSwitch kill_switch = 3;
+    ProposalDecision proposal_decision = 4;
+  }
+  message ProposalDecision {
+    string proposal_id = 1;
+    bool approve = 2;               // false = explicit reject (audited either way)
+    string operator = 3;
+    string reason = 4;              // mandatory on reject
+  }
+  message ManualOrder {
+    uint32 book_id = 1;
+    hedging.common.v1.InstrumentRef instrument = 2;
+    hedging.common.v1.Side side = 3;
+    sint64 qty_e2 = 4;
+    sint64 limit_px_e9 = 5;        // 0 = market (demo semantics)
+  }
+  message KillSwitch {
+    bool engage = 1;
+    string operator = 2;
+  }
+}
+
+message CommandAck {
+  hedging.common.v1.Meta meta = 1;
+  bool accepted = 2;
+  string reason = 3;               // mandatory when accepted == false
+  string cl_ord_id = 4;            // set for accepted manual orders
+}
+
+// ---- sim -> UI (display tape only; D1 ingests via its feed boundary) --------
+
+message Tick {
+  hedging.common.v1.Meta meta = 1;
+  hedging.common.v1.InstrumentRef instrument = 2;
+  sint64 bid_px_e9 = 3;
+  sint64 ask_px_e9 = 4;
+  sint64 last_px_e9 = 5;
+  uint64 exch_ts_ns = 6;
+}

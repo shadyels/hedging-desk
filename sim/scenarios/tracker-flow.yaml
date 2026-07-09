@@ -1,0 +1,36 @@
+# Flagship demo scenario (docs/ARCHITECTURE.md "Demo storyline").
+# Deterministic: same seed => byte-identical posttrade Kafka output (golden-file e2e test).
+scenario: tracker-flow
+seed: 42
+universe: ../../protocol/refdata/universe.json
+timeline:
+  - at_ms: 0
+    action: quote
+    instrument: AAPL
+    bid: 187.50
+    ask: 187.52
+  - at_ms: 1000
+    action: exo_book_event          # EXO portfolio loads: autocallable book short delta
+    book: EXO-SP
+    note: "structured product book initialised"
+  - at_ms: 5000
+    action: gap
+    instrument: AAPL
+    to_mid: 176.00                  # gaps through autocall barrier proximity zone
+  - at_ms: 5100
+    expect: exo_targets_republished # EXO delta jumps, new targets on exo.targets.EXO-SP.AAPL
+  - at_ms: 5200
+    expect: internal_cross          # netting: D1-CORE demand vs EXO-SP demand -> explicit cross
+  - at_ms: 5300
+    expect: external_residual_order # residual NewOrderSingle over FIX to sim acceptor
+  - at_ms: 9000
+    action: dividend               # feeds per-book cash -> cash drag (ADR-010)
+    instrument: AAPL
+    amount_per_share: 0.25
+  - at_ms: 15000
+    expect: tracker_analytics      # d1.tracker.D1-CORE publishes TE/TD/cash-drag
+fill_model:
+  mode: partial
+  slices: 3
+  latency_ms: 20
+  reject_rate: 0.0

@@ -1,0 +1,50 @@
+syntax = "proto3";
+package hedging.common.v1;
+
+// Fixed-point conventions (root CLAUDE.md invariant #1):
+//   price_e9: price * 10^9 as sint64  (e.g. 187.532100000 -> 187532100000)
+//   qty_e2:   quantity * 10^2 as sint64 (supports fractional sizes)
+// Timestamps: nanoseconds since Unix epoch, UTC, uint64.
+// Field numbers are append-only; removed numbers become `reserved`.
+
+message Meta {
+  string msg_id = 1;          // UUIDv7, producer-generated; consumers dedupe on this
+  string producer = 2;        // "exo" | "delta-one" | "ui" | "sim"
+  uint64 sent_ns = 3;
+  uint32 schema_version = 4;  // bump on additive change; breaking => new message
+}
+
+enum InstrumentClass {
+  INSTRUMENT_CLASS_UNSPECIFIED = 0;
+  INSTRUMENT_CLASS_EQUITY = 1;
+  INSTRUMENT_CLASS_INDEX = 2;
+  INSTRUMENT_CLASS_ETF = 3;
+  INSTRUMENT_CLASS_OPTION = 4;
+  INSTRUMENT_CLASS_FORWARD = 5;
+  INSTRUMENT_CLASS_FUTURE = 6;
+  INSTRUMENT_CLASS_FX_SPOT = 7;
+  INSTRUMENT_CLASS_FX_FORWARD = 8;
+  INSTRUMENT_CLASS_BOND = 9;
+}
+
+message InstrumentRef {
+  uint32 instrument_id = 1;   // canonical id from refdata/universe.json
+  string symbol = 2;          // display only; never key on this
+  InstrumentClass instrument_class = 3;  // named to avoid Python keyword collision (empirically verified breakage)
+  string currency = 4;        // ISO 4217
+}
+
+enum Side {
+  SIDE_UNSPECIFIED = 0;
+  SIDE_BUY = 1;
+  SIDE_SELL = 2;
+}
+
+message ValuationMeta {
+  // Root CLAUDE.md invariant #7: numbers without this block are invalid.
+  string model_id = 1;        // e.g. "heston-qe-v1"
+  string params_hash = 2;     // sha256 of canonical param serialization
+  uint64 seed = 3;
+  uint32 n_paths = 4;
+  string git_sha = 5;
+}

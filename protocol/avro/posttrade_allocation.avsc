@@ -1,0 +1,18 @@
+{
+  "type": "record",
+  "name": "Allocation",
+  "namespace": "hedging.posttrade.v1",
+  "doc": "Pro-rata allocation of an external fill back to books (ADR-005 s.5). Topic: posttrade.allocations, key: parent_cl_ord_id.",
+  "fields": [
+    {"name": "msg_id", "type": "string"},
+    {"name": "allocation_id", "type": "string"},
+    {"name": "booked_ns", "type": "long"},
+    {"name": "parent_cl_ord_id", "type": "string"},
+    {"name": "exec_id", "type": "string"},
+    {"name": "instrument_id", "type": "int"},
+    {"name": "book_id", "type": "int"},
+    {"name": "qty_e2", "type": "long"},
+    {"name": "px_e9", "type": "long"},
+    {"name": "netting_cycle_id", "type": "string"}
+  ]
+}

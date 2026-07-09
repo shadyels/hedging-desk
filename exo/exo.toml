@@ -1,0 +1,28 @@
+# EXO service configuration (single source; no env-var spelunking — exo/CLAUDE.md).
+[bus]
+nats_url = "nats://localhost:4222"
+
+[valuation]
+revaluation_interval_s = 5
+default_n_paths = 200_000
+seed_manifest = "run-manifests/"   # seeds come from manifests, never from time
+
+[rehedge]
+# no-trade band half-widths, per instrument class, in delta units (qty_e2)
+band_equity_qty_e2 = 50_000
+band_fx_qty_e2 = 1_000_000
+
+[greeks]
+bump_spot_rel = 0.001
+bump_vol_abs = 0.005
+max_rel_std_error = 0.02   # Greeks above this SE are published flagged, never silently
+
+[hedger]                 # Tier-2 optimizer (ADR-009); desk-visible, never hardcoded
+risk_weight_vega = 1.0   # diag(Lambda)
+risk_weight_gamma = 0.5
+cost_aversion_lambda = 0.1
+max_contracts_per_option_e2 = 500_000   # per-instrument liquidity cap
+proposal_validity_s = 120
+
+[rho_transfer]
+usd_bucket_threshold_e9 = 8_000_000_000_000   # transfer trigger, below the Tier-1 warn level in d1.toml

@@ -1,0 +1,27 @@
+# Per-component CI job (ADR-007), path-filtered to exo/ + shared protocol/.
+# Gates match root CLAUDE.md: ruff check, ruff format --check, mypy --strict, pytest.
+name: python
+
+on:
+  push:
+    branches: [main]
+    paths: ["exo/**", "protocol/proto/**", "protocol/refdata/**"]
+  pull_request:
+    paths: ["exo/**", "protocol/proto/**", "protocol/refdata/**"]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: exo
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+      - run: uv sync --all-extras --dev
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy --strict src
+      - run: uv run pytest

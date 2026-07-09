@@ -1,0 +1,19 @@
+{
+  "type": "record",
+  "name": "OrderAudit",
+  "namespace": "hedging.posttrade.v1",
+  "doc": "Every order state transition for compliance replay. Topic: posttrade.orders.audit, key: cl_ord_id.",
+  "fields": [
+    {"name": "msg_id", "type": "string"},
+    {"name": "ts_ns", "type": "long"},
+    {"name": "cl_ord_id", "type": "string"},
+    {"name": "instrument_id", "type": "int"},
+    {"name": "side", "type": {"type": "enum", "name": "AuditSide", "symbols": ["BUY", "SELL"]}},
+    {"name": "transition", "type": "string", "doc": "e.g. NEW->PARTIALLY_FILLED"},
+    {"name": "qty_e2", "type": "long"},
+    {"name": "cum_qty_e2", "type": "long"},
+    {"name": "leaves_qty_e2", "type": "long"},
+    {"name": "origin", "type": {"type": "enum", "name": "Origin", "symbols": ["NETTING_ENGINE", "MANUAL_UI", "SYSTEM"]}},
+    {"name": "detail", "type": ["null", "string"], "default": null}
+  ]
+}

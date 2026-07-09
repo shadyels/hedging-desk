@@ -1,0 +1,19 @@
+{
+  "type": "record",
+  "name": "InternalCross",
+  "namespace": "hedging.posttrade.v1",
+  "doc": "Explicit internal cross between two books (ADR-005). Topic: posttrade.crosses, key: cross_id. Both trade legs are also emitted on posttrade.trades with trade_kind=INTERNAL_CROSS_LEG.",
+  "fields": [
+    {"name": "msg_id", "type": "string"},
+    {"name": "cross_id", "type": "string"},
+    {"name": "booked_ns", "type": "long"},
+    {"name": "instrument_id", "type": "int"},
+    {"name": "symbol", "type": "string"},
+    {"name": "buy_book_id", "type": "int"},
+    {"name": "sell_book_id", "type": "int"},
+    {"name": "qty_e2", "type": "long"},
+    {"name": "ref_px_e9", "type": "long"},
+    {"name": "px_policy_id", "type": "string", "doc": "compliance-visible reference price policy, ADR-005 s.4"},
+    {"name": "netting_cycle_id", "type": "string", "doc": "lineage back to the netting cycle that generated the cross"}
+  ]
+}

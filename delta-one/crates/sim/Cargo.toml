@@ -1,0 +1,12 @@
+[package]
+name = "sim"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Populate only from the approved dependency table in delta-one/CLAUDE.md.
+# sim may additionally use serde/serde_yaml for scenario files (sim-only; never on hot path).

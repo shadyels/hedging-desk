@@ -1,0 +1,18 @@
+# Delta One configuration. Limits are Tier-1 risk controls (ADR-008):
+# firm-level per-underlying caps on monitored Greeks. Values below are DEMO
+# placeholders — a real desk sets these; they are config, never code.
+[bus]
+nats_url = "nats://localhost:4222"
+
+[limits.defaults]        # per underlying, firm level
+vega_warn_e9 = 50_000_000_000_000        # 50k ccy per vol point
+vega_hard_e9 = 100_000_000_000_000
+gamma_warn_qty_e2 = 2_000_000            # dDelta per 1% spot move
+gamma_hard_qty_e2 = 5_000_000
+rho_warn_e9 = 10_000_000_000_000         # 10k ccy per 1bp
+rho_hard_e9 = 25_000_000_000_000
+
+[tracker]                # ADR-010; ex-post analytics, off hot path
+sampling_interval_s = 60          # demo-time "day"; real deployment: end-of-day
+te_window_obs = 250               # rolling observations for TE/TD/cash-drag
+publish_interval_s = 60

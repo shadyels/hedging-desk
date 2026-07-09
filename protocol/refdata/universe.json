@@ -1,0 +1,199 @@
+{
+  "_doc": "Minimal demo universe (ROADMAP: enrich in Phase 4, not before). Canonical instrument_id / book_id source. Tick sizes and prices use e9 fixed point, quantities e2. Option chain and rate futures added for Tier-2 hedge proposals and rho transfer (ADR-008/009).",
+  "books": [
+    {
+      "book_id": 1,
+      "code": "D1-CORE",
+      "desc": "Delta One index tracker book",
+      "benchmark_symbol": "SPX"
+    },
+    {
+      "book_id": 2,
+      "code": "D1-ETF",
+      "desc": "Delta One ETF market-making book"
+    },
+    {
+      "book_id": 3,
+      "code": "EXO-SP",
+      "desc": "Exotics structured products book (equity)"
+    },
+    {
+      "book_id": 4,
+      "code": "EXO-FX",
+      "desc": "Exotics FX book (TARF/PTARF)"
+    },
+    {
+      "book_id": 5,
+      "code": "RATES-IR",
+      "desc": "Rates book - receives internal rho transfers (ADR-008, Phase 4)"
+    }
+  ],
+  "instruments": [
+    {
+      "instrument_id": 1001,
+      "symbol": "AAPL",
+      "class": "EQUITY",
+      "currency": "USD",
+      "tick_e9": 10000000,
+      "lot_e2": 100
+    },
+    {
+      "instrument_id": 1002,
+      "symbol": "MSFT",
+      "class": "EQUITY",
+      "currency": "USD",
+      "tick_e9": 10000000,
+      "lot_e2": 100
+    },
+    {
+      "instrument_id": 1003,
+      "symbol": "NESN",
+      "class": "EQUITY",
+      "currency": "CHF",
+      "tick_e9": 10000000,
+      "lot_e2": 100
+    },
+    {
+      "instrument_id": 2001,
+      "symbol": "SPX",
+      "class": "INDEX",
+      "currency": "USD",
+      "tick_e9": 10000000,
+      "lot_e2": 100
+    },
+    {
+      "instrument_id": 2002,
+      "symbol": "ESZ6",
+      "class": "FUTURE",
+      "currency": "USD",
+      "tick_e9": 250000000,
+      "lot_e2": 100,
+      "underlying_id": 2001,
+      "multiplier_e2": 5000
+    },
+    {
+      "instrument_id": 2003,
+      "symbol": "SPY",
+      "class": "ETF",
+      "currency": "USD",
+      "tick_e9": 10000000,
+      "lot_e2": 100,
+      "underlying_id": 2001
+    },
+    {
+      "instrument_id": 3001,
+      "symbol": "AAPL 261218 C200",
+      "class": "OPTION",
+      "currency": "USD",
+      "tick_e9": 10000000,
+      "lot_e2": 100,
+      "underlying_id": 1001,
+      "multiplier_e2": 10000
+    },
+    {
+      "instrument_id": 4001,
+      "symbol": "EURUSD",
+      "class": "FX_SPOT",
+      "currency": "USD",
+      "tick_e9": 100000,
+      "lot_e2": 100
+    },
+    {
+      "instrument_id": 5001,
+      "symbol": "UST 4.25 2035-05-15",
+      "class": "BOND",
+      "currency": "USD",
+      "tick_e9": 3906250,
+      "lot_e2": 100000,
+      "day_count": "ACT/ACT",
+      "settlement_lag_days": 1
+    },
+    {
+      "instrument_id": 2004,
+      "symbol": "ZNZ6",
+      "class": "FUTURE",
+      "currency": "USD",
+      "tick_e9": 15625000,
+      "lot_e2": 100,
+      "desc": "10Y UST note future",
+      "dv01_e9_DEMO_PLACEHOLDER": 65000000000,
+      "_note": "dv01 is a DEMO placeholder, not market data - real value is desk-calibrated"
+    },
+    {
+      "instrument_id": 2005,
+      "symbol": "SR3Z6",
+      "class": "FUTURE",
+      "currency": "USD",
+      "tick_e9": 2500000,
+      "lot_e2": 100,
+      "desc": "3M SOFR future",
+      "dv01_e9_DEMO_PLACEHOLDER": 25000000000,
+      "_note": "dv01 is a DEMO placeholder, not market data - real value is desk-calibrated"
+    },
+    {
+      "instrument_id": 3002,
+      "symbol": "AAPL 261218 P170",
+      "class": "OPTION",
+      "currency": "USD",
+      "tick_e9": 10000000,
+      "lot_e2": 100,
+      "underlying_id": 1001,
+      "multiplier_e2": 10000
+    },
+    {
+      "instrument_id": 3003,
+      "symbol": "AAPL 261218 P185",
+      "class": "OPTION",
+      "currency": "USD",
+      "tick_e9": 10000000,
+      "lot_e2": 100,
+      "underlying_id": 1001,
+      "multiplier_e2": 10000
+    },
+    {
+      "instrument_id": 3004,
+      "symbol": "AAPL 270319 C190",
+      "class": "OPTION",
+      "currency": "USD",
+      "tick_e9": 10000000,
+      "lot_e2": 100,
+      "underlying_id": 1001,
+      "multiplier_e2": 10000
+    },
+    {
+      "instrument_id": 3005,
+      "symbol": "AAPL 270319 P180",
+      "class": "OPTION",
+      "currency": "USD",
+      "tick_e9": 10000000,
+      "lot_e2": 100,
+      "underlying_id": 1001,
+      "multiplier_e2": 10000
+    }
+  ],
+  "conventions": {
+    "equity_settlement_lag_days": 1,
+    "fx_settlement_lag_days": 2,
+    "cross_px_policy_default": "ARRIVAL_MID",
+    "rho_hedge_instrument_ids": [
+      2004,
+      2005
+    ],
+    "cash_yield_annual_e9_DEMO_PLACEHOLDER": 40000000
+  },
+  "benchmarks": {
+    "SPX": {
+      "_note": "DEMO composition placeholder (2 names), not the real index - enriched in P4.M6",
+      "constituents": [
+        {
+          "instrument_id": 1001,
+          "weight_e9": 600000000
+        },
+        {
+          "instrument_id": 1002,
+          "weight_e9": 400000000
+        }
+      ]
+    }
+  }
+}
