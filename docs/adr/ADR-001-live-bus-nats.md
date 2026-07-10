@@ -6,13 +6,7 @@
 
 ## Context
 
-EXO publishes target positions and consumes executions/risk; the UI consumes
-live state and issues occasional commands. Candidate transports: Aeron, NATS,
-gRPC streaming, Kafka. Constraint that dominates the choice: our endpoints are
-**Rust and Python** (and TypeScript in a browser), and the bus is **not** on
-the 10–50 µs tick-to-trade path (that path is entirely in-process inside
-Delta One — see ADR-004). Cadence on this bus is per-rebalance/per-fill, i.e.
-milliseconds-to-seconds, thousands of msgs/sec at most.
+EXO publishes target positions and consumes executions/risk; the UI consumes live state and issues occasional commands. Candidate transports: Aeron, NATS, gRPC streaming, Kafka. Constraint that dominates the choice: our endpoints are **Rust and Python** (and TypeScript in a browser), and the bus is **not** on the 10–50 µs tick-to-trade path (that path is entirely in-process inside Delta One — see ADR-004). Cadence on this bus is per-rebalance/per-fill, i.e. milliseconds-to-seconds, thousands of msgs/sec at most.
 
 ## Options considered
 
@@ -25,9 +19,7 @@ milliseconds-to-seconds, thousands of msgs/sec at most.
 | Ops | Media driver per host to run, tune, monitor |
 | Browser/UI | No story; would need a separate gateway |
 
-**Pros:** unmatched latency headroom; strong finance pedigree.
-**Cons:** its advantage sits exactly where we don't need it; client maturity
-risk in *both* our languages; extra ops component; no UI path.
+**Pros:** unmatched latency headroom; strong finance pedigree. **Cons:** its advantage sits exactly where we don't need it; client maturity risk in *both* our languages; extra ops component; no UI path.
 
 ### B: NATS core
 | Dimension | Assessment |
@@ -39,16 +31,10 @@ risk in *both* our languages; extra ops component; no UI path.
 | Browser/UI | Native WebSocket support → UI subscribes directly via `nats.ws` |
 | Extras | Request/reply built-in (UI commands); JetStream available if we later want replayable target streams |
 
-**Pros:** first-party clients in all three of our languages; simplest ops;
-request/reply + pub/sub + WS in one system; trajectory is "on the route to
-standard" for cloud-native messaging.
-**Cons:** brokered hop (~tens of µs–ms) — irrelevant here by design; less
-finance-specific pedigree than Aeron.
+**Pros:** first-party clients in all three of our languages; simplest ops; request/reply + pub/sub + WS in one system; trajectory is "on the route to standard" for cloud-native messaging. **Cons:** brokered hop (~tens of µs–ms) — irrelevant here by design; less finance-specific pedigree than Aeron.
 
 ### C: gRPC streaming
-Universal but point-to-point: we'd hand-build pub/sub fan-out, reconnect, and
-UI fan-out that NATS gives for free. Higher latency than either alternative.
-Rejected.
+Universal but point-to-point: we'd hand-build pub/sub fan-out, reconnect, and UI fan-out that NATS gives for free. Higher latency than either alternative. Rejected.
 
 ### D: Kafka for the live plane
 Wrong tool: ms-level latency, heavy clients, partition semantics we don't
@@ -71,10 +57,5 @@ inter-process wire ever appears (would supersede this ADR).
 
 - Easier: one bus serves EXO, Delta One and the browser UI with first-party
   clients; demo ops is `docker compose up`.
-- Harder: if the bus ever *does* need single-digit-µs delivery (it shouldn't —
-  that would mean hot-path logic leaked out of Delta One), we would revisit
-  Aeron; the Protobuf-over-subjects abstraction keeps that swap contained in
-  the gateway crates/packages.
-- We accept dependence on third-party benchmark figures above as indicative
-  only; `just bench-bus` measures our actual deployment and the demo quotes
-  our own numbers, not vendors'.
+- Harder: if the bus ever *does* need single-digit-µs delivery (it shouldn't — that would mean hot-path logic leaked out of Delta One), we would revisit Aeron; the Protobuf-over-subjects abstraction keeps that swap contained in the gateway crates/packages.
+- We accept dependence on third-party benchmark figures above as indicative only; `just bench-bus` measures our actual deployment and the demo quotes our own numbers, not vendors'.

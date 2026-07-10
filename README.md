@@ -3,9 +3,7 @@
 Institutional hedging platform for index trackers and structured products.
 Demo/showcase system — fully self-contained (no real market connectivity).
 
-**If you are an AI agent or a new contributor: start with `CLAUDE.md` (root),
-then the CLAUDE.md of the component you're touching. The ADRs in `docs/adr/`
-are binding.**
+**If you are an AI agent or a new contributor: start with `CLAUDE.md` (root), then the CLAUDE.md of the component you're touching. The ADRs in `docs/adr/` are binding.**
 
 ## Quick start
 
