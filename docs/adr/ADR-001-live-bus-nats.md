@@ -1,8 +1,6 @@
 # ADR-001: NATS core for the live plane (EXO ↔ Delta One ↔ UI)
 
-**Status:** Accepted
-**Date:** 2026-07-05
-**Deciders:** desk lead
+**Status:** Accepted **Date:** 2026-07-05 **Deciders:** desk lead
 
 ## Context
 
@@ -37,25 +35,18 @@ EXO publishes target positions and consumes executions/risk; the UI consumes liv
 Universal but point-to-point: we'd hand-build pub/sub fan-out, reconnect, and UI fan-out that NATS gives for free. Higher latency than either alternative. Rejected.
 
 ### D: Kafka for the live plane
-Wrong tool: ms-level latency, heavy clients, partition semantics we don't
-want for live targets. It is the right tool for post-trade (ADR-002).
+Wrong tool: ms-level latency, heavy clients, partition semantics we don't want for live targets. It is the right tool for post-trade (ADR-002).
 
 ## Decision
 
-**NATS core** for the live plane. Protobuf payloads (ADR-004 §wire), subjects
-per `protocol/nats-subjects.md`. JetStream not enabled in Phase 1/2; revisit
-if replayable target history is demanded (ADR to supersede).
+**NATS core** for the live plane. Protobuf payloads (ADR-004 §wire), subjects per `protocol/nats-subjects.md`. JetStream not enabled in Phase 1/2; revisit if replayable target history is demanded (ADR to supersede).
 
 ## Post-decision context (2026-07-06)
 
-Desk confirmed: no in-house C++ libraries or C++ expertise. This removes the
-one scenario under which a C++ (+Aeron) engine would have been defensible;
-Rust + NATS reaffirmed. Aeron re-enters consideration only if a hot
-inter-process wire ever appears (would supersede this ADR).
+Desk confirmed: no in-house C++ libraries or C++ expertise. This removes the one scenario under which a C++ (+Aeron) engine would have been defensible; Rust + NATS reaffirmed. Aeron re-enters consideration only if a hot inter-process wire ever appears (would supersede this ADR).
 
 ## Consequences
 
-- Easier: one bus serves EXO, Delta One and the browser UI with first-party
-  clients; demo ops is `docker compose up`.
+- Easier: one bus serves EXO, Delta One and the browser UI with first-party clients; demo ops is `docker compose up`.
 - Harder: if the bus ever *does* need single-digit-µs delivery (it shouldn't — that would mean hot-path logic leaked out of Delta One), we would revisit Aeron; the Protobuf-over-subjects abstraction keeps that swap contained in the gateway crates/packages.
 - We accept dependence on third-party benchmark figures above as indicative only; `just bench-bus` measures our actual deployment and the demo quotes our own numbers, not vendors'.

@@ -1,7 +1,6 @@
 # CLAUDE.md — sim (market data generator + FIX counterparty)
 
-Everything fake lives here so nothing fake lives anywhere else.
-The demo is fully self-contained: no real connectivity.
+Everything fake lives here so nothing fake lives anywhere else. The demo is fully self-contained: no real connectivity.
 
 Code location: sim's Rust binary is the `sim` crate in the `delta-one/` Cargo workspace (ADR-007); this directory holds scenarios (`scenarios/`), golden outputs (`golden/`, created in P1.M4) and these rules.
 
@@ -15,5 +14,4 @@ Code location: sim's Rust binary is the `sim` crate in the `delta-one/` Cargo wo
 
 - Deterministic by default: every scenario has a seed; two runs of the same scenario produce byte-identical Kafka output (this is also the end-to-end regression test: `just demo` diffs the post-trade stream against a golden file).
 - The simulator may be sloppy about latency but never about protocol correctness: FIX session behavior (sequence numbers, resend, logon/logout) must be spec-correct, because Delta One's session handling is being tested against it.
-- No sim code may be imported by production crates/packages; dependency
-  direction is sim → protocol only.
+- No sim code may be imported by production crates/packages; dependency direction is sim → protocol only.

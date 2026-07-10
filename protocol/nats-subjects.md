@@ -1,8 +1,6 @@
 # NATS subject taxonomy (authoritative)
 
-A subject not in this file does not exist. Publishers use fully-qualified
-subjects; consumers may use wildcards. All payloads are Protobuf messages from
-`protocol/proto/` and include the `Meta` block.
+A subject not in this file does not exist. Publishers use fully-qualified subjects; consumers may use wildcards. All payloads are Protobuf messages from `protocol/proto/` and include the `Meta` block.
 
 | Subject | Publisher | Consumers | Payload | Cadence |
 |---|---|---|---|---|
@@ -24,6 +22,4 @@ subjects; consumers may use wildcards. All payloads are Protobuf messages from
 | `exo.health` | EXO | UI | `HealthStatus` | 1s heartbeat |
 | `sim.md.<instrument>` | sim | (Delta One ingests via its feed boundary, not via NATS — this subject exists only for UI display of the simulated tape) | `Tick` | streaming |
 
-Naming rules: lowercase, dot-separated, `<book>`/`<instrument>` tokens are the
-canonical ids from `refdata/universe.json`. Adding a subject requires updating
-this table in the same PR.
+Naming rules: lowercase, dot-separated, `<book>`/`<instrument>` tokens are the canonical ids from `refdata/universe.json`. Adding a subject requires updating this table in the same PR.

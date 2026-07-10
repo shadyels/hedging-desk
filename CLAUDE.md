@@ -1,7 +1,6 @@
 # CLAUDE.md — Desk Hedging Platform (root)
 
-Institutional hedging platform for index trackers and structured products.
-Monorepo, five phases:
+Institutional hedging platform for index trackers and structured products. Monorepo, five phases:
 
 - **Phase 1 — Delta One (`delta-one/`, Rust):** linear hedging, high volume, latency-sensitive. Owns firm-wide netting, execution, FIX, post-trade publishing.
 - **Phase 2 — EXO (`exo/`, Python):** exotics pricing (Monte Carlo, Heston / Heston-local-vol, PDE later). Computes target deltas per book and streams them to Delta One. EXO NEVER executes; it only publishes targets and consumes fills/risk.
@@ -9,8 +8,7 @@ Monorepo, five phases:
 - **Phase 4 — Advanced hedging & enrichment (MANDATORY, same depth):** Tier-2 hedge proposal engine, rho transfer to RATES-IR with external futures hedge (ADR-008/009), model depth (Heston-LV, PDE cross-check, synthetic-surface calibration), then universe enrichment at scale.
 - **Phase 5 — optional, externally gated:** proprietary venue FIX dialects, live-market-data calibration, JetStream, AI assistance (ADR-011: LLM decision support + deep-hedging research, both non-executing).
 
-**Before editing any component, read that component's own CLAUDE.md:**
-`delta-one/CLAUDE.md`, `exo/CLAUDE.md`, `ui/CLAUDE.md`, `protocol/CLAUDE.md`, `sim/CLAUDE.md`. They contain non-obvious invariants; this file only holds cross-cutting rules.
+**Before editing any component, read that component's own CLAUDE.md:** `delta-one/CLAUDE.md`, `exo/CLAUDE.md`, `ui/CLAUDE.md`, `protocol/CLAUDE.md`, `sim/CLAUDE.md`. They contain non-obvious invariants; this file only holds cross-cutting rules.
 
 ## Documentation map — read these files when indicated (they are NOT auto-loaded)
 
