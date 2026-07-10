@@ -89,6 +89,7 @@ Never benchmark or make latency claims from a debug build.
 
 ## Repo conventions
 
+- **Branch names:** `type/scope-description` (e.g. `feat/d1-netting`, `fix/exo-calibration`, `docs/adr-008`, `chore/hooks-n-conventions`). Use component names (d1, exo, ui, protocol, sim) or workflow types (feat, fix, chore, docs, refactor). Keep under 50 chars. Delete after merge.
 - Conventional Commits (`feat(d1-netting): ...`). One logical change per commit.
 - CI gates (all must pass before merge): `cargo clippy -- -D warnings`,`cargo test`, `cargo fmt --check`, `ruff check`, `ruff format --check`, `mypy --strict`, `pytest`, `tsc --noEmit`, `eslint`, schema-compat checks(`just schema-check`).
 - ADRs live in `docs/adr/`. Any decision that constrains another component (wire format, subject name, latency budget, model choice) requires an ADR before code. Existing ADRs are binding unless superseded.
@@ -102,3 +103,4 @@ Never benchmark or make latency claims from a debug build.
 - Put pricing logic in Delta One or execution logic in EXO.
 - Invent market conventions (day counts, settlement lags, tick sizes) — they are defined once in `protocol/` reference data and consumed everywhere.
 - Implement ahead of the current `docs/ROADMAP.md` milestone or widen the development universe before P4.M5 (milestone ordering discipline, not scope reduction).
+- Commit or push directly to `main`; all changes go via a `type/scope-description` branch and a reviewed PR.

@@ -4,6 +4,11 @@ set shell := ["bash", "-cu"]
 default:
     @just --list
 
+# --- repo setup ----------------------------------------------------------
+setup-hooks:
+    chmod +x scripts/git-hooks/*
+    git config core.hooksPath scripts/git-hooks
+
 # --- infra -------------------------------------------------------------
 up:
     docker compose -f deploy/docker-compose.yml up -d
