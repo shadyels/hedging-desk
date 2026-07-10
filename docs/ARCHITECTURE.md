@@ -1,7 +1,6 @@
 # Architecture
 
-Read together with the ADRs in `docs/adr/` (binding) and the per-component
-CLAUDE.md files.
+Read together with the ADRs in `docs/adr/` (binding) and the per-component CLAUDE.md files.
 
 ## Components and planes
 
@@ -25,10 +24,8 @@ CLAUDE.md files.
                               └────────────────┘
 ```
 
-- **Live plane:** NATS core pub/sub + request/reply (ADR-001). Not latency
-  critical by design (ADR-004).
-- **Execution plane:** FIX 4.4 via QuickFIX binding (ADR-003), demo
-  counterparty in `sim/`.
+- **Live plane:** NATS core pub/sub + request/reply (ADR-001). Not latency critical by design (ADR-004).
+- **Execution plane:** FIX 4.4 via QuickFIX binding (ADR-003), demo counterparty in `sim/`.
 - **Post-trade plane:** Kafka + Avro + Schema Registry (ADR-002).
 
 ## Delta One internal structure
@@ -47,9 +44,7 @@ execution decisions happen on the hot path at the next evaluation event.
 
 ## Latency budget
 
-Design targets (our own analysis; to be replaced by measured HDR-histogram
-numbers from `just bench` — no external latency figures are quoted for this
-system):
+Design targets (our own analysis; to be replaced by measured HDR-histogram numbers from `just bench` — no external latency figures are quoted for this system):
 
 | Stage (in-process) | Budget p99 |
 |---|---|
@@ -59,30 +54,18 @@ system):
 | Order build + emit to FIX ring | ≤ 10 µs |
 | **Tick → order-emit total** | **≤ 50 µs p99, ≤ 20 µs p50 target** |
 
-Off-path (informational, not part of the T2T claim): EXO full-book
-revaluation cadence in seconds; NATS delivery sub-millisecond; Kafka
-end-to-end milliseconds.
+Off-path (informational, not part of the T2T claim): EXO full-book revaluation cadence in seconds; NATS delivery sub-millisecond; Kafka end-to-end milliseconds.
 
 ## What is hedged vs what is monitored (Greeks policy — ADR-008)
 
-Per-Greek treatment ladder (full rationale and sources in ADR-008):
-**delta** is auto-hedged through the EXO→D1 target pipeline; **vega, gamma,
-rho** are monitored with Tier-1 firm-level per-underlying limits
-(`delta-one/d1.toml`) and alerting on `d1.alerts.limits` — never auto-traded;
-**theta** is monitored as expected carry (ccy/day, the P&L-explain mirror of
-gamma); **dividend sensitivity** is monitored. Phase 4 (MANDATORY, ADR-009): Tier-2
-full-optimizer hedge *proposals* for vega/gamma (human-approved via the UI
-command path, executed by Delta One) and directed rho *transfer* to RATES-IR
-with the external futures hedge generated through the ordinary pipeline.
-Tier-3 fully automated vol hedging remains explicitly rejected.
+Per-Greek treatment ladder (full rationale and sources in ADR-008): **delta** is auto-hedged through the EXO→D1 target pipeline; **vega, gamma, rho** are monitored with Tier-1 firm-level per-underlying limits (`delta-one/d1.toml`) and alerting on `d1.alerts.limits` — never auto-traded; **theta** is monitored as expected carry (ccy/day, the P&L-explain mirror of gamma); **dividend sensitivity** is monitored. Phase 4 (MANDATORY, ADR-009): Tier-2 full-optimizer hedge *proposals* for vega/gamma (human-approved via the UI command path, executed by Delta One) and directed rho *transfer* to RATES-IR with the external futures hedge generated through the ordinary pipeline. Tier-3 fully automated vol hedging remains explicitly rejected.
 
 ## Failure and reconciliation model
 
 - At-least-once everywhere off the hot path; dedupe on `msg_id` (UUIDv7).
 - Order state machine keyed by `ClOrdID`; FIX session recovery per QuickFIX
   (sequence/resend) tested against `sim/`.
-- EXO↔D1 position reconciliation: EXO halts target publication per book on
-  divergence and alerts (`exo.alerts.recon`), see `exo/CLAUDE.md` rule 5.
+- EXO↔D1 position reconciliation: EXO halts target publication per book on divergence and alerts (`exo.alerts.recon`), see `exo/CLAUDE.md` rule 5.
 - UI treats disconnect as stale: full-board grey-out + snapshot refresh on
   reconnect.
 - Kill switch (Phase 3): NATS command → Delta One cancels working orders,

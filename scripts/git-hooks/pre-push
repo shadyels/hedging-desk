@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Refuses pushes whose target ref is main/master (CLAUDE.md: repo conventions).
+# Enabled via `just setup-hooks` (git config core.hooksPath scripts/git-hooks).
+set -euo pipefail
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+    branch="${remote_ref#refs/heads/}"
+    if [[ "$branch" == "main" || "$branch" == "master" ]]; then
+        echo "error: direct push to '$branch' is not allowed." >&2
+        echo "Push a type/scope-description branch and open a PR instead." >&2
+        exit 1
+    fi
+done
