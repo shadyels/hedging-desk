@@ -5,6 +5,7 @@ Scope principle (corrected 2026-07-06): the **instrument universe** starts minim
 ## Phase 1 — Delta One (Rust) — mandatory
 
 - **P1.M1 — Skeleton & contracts:** compose stack up; protocol codegen; feed ingest from `sim/` replay; position keeper; HDR-histogram bench harness (the latency measurement exists before the features do).
+  - Split into two independent slices (ADR-004: Protobuf never enters `d1-core`, so the runtime needs no codegen). **Slice 1 — skeleton runtime** (`d1-core` ids/feed/market-data/keeper modules, `sim` replay mode, criterion+HDR bench): done on `feat/d1-skeleton`. **Slice 2 — contracts** (`gen-proto.sh`, `schema-check.sh`, `just up`): not started.
 - **P1.M2 — Order path:** order state machine; FIX 4.4 session vs sim acceptor (logon/sequence/resend correct); NewOrderSingle → ExecutionReport round trip; exec reports out on NATS.
 - **P1.M3 — Netting & crosses:** multi-book netting per ADR-005; explicit internal-cross booking (netting-generated AND directed-by-instruction, see ADR-009 mechanics note); pro-rata allocations; property tests (Σ book positions == firm position under arbitrary interleavings).
 - **P1.M4 — Post-trade:** Kafka/Avro producers for trades, crosses, allocations, order audit; deterministic golden-file e2e test.
