@@ -39,8 +39,7 @@ Pinned threads connected by bounded SPSC rings; gateways on separate runtimes:
                                         └──▶ Kafka producer (post-trade)
 ```
 
-EXO targets arrive via the NATS gateway and update desired-position state;
-execution decisions happen on the hot path at the next evaluation event.
+EXO targets arrive via the NATS gateway and update desired-position state; execution decisions happen on the hot path at the next evaluation event.
 
 ## Latency budget
 
@@ -63,34 +62,21 @@ Per-Greek treatment ladder (full rationale and sources in ADR-008): **delta** is
 ## Failure and reconciliation model
 
 - At-least-once everywhere off the hot path; dedupe on `msg_id` (UUIDv7).
-- Order state machine keyed by `ClOrdID`; FIX session recovery per QuickFIX
-  (sequence/resend) tested against `sim/`.
+- Order state machine keyed by `ClOrdID`; FIX session recovery per QuickFIX (sequence/resend) tested against `sim/`.
 - EXO↔D1 position reconciliation: EXO halts target publication per book on divergence and alerts (`exo.alerts.recon`), see `exo/CLAUDE.md` rule 5.
-- UI treats disconnect as stale: full-board grey-out + snapshot refresh on
-  reconnect.
-- Kill switch (Phase 3): NATS command → Delta One cancels working orders,
-  rejects new targets, stays subscribed (observability survives the halt).
+- UI treats disconnect as stale: full-board grey-out + snapshot refresh on reconnect.
+- Kill switch (Phase 3): NATS command → Delta One cancels working orders, rejects new targets, stays subscribed (observability survives the halt).
 
 ## Demo storyline (implemented as a `sim/` scenario)
 
 1. Underlying gaps down through an autocall barrier.
 2. EXO revalues; structured-product book delta jumps; publishes new targets.
-3. Delta One nets EXO demand against tracker-book demand → explicit internal
-   cross (booked, visible in UI blotter) + small external residual.
-4. Residual executes over FIX against the sim acceptor; fills allocate
-   pro-rata; post-trade events land in Kafka.
-5. UI shows the full lineage: target → cross → order → fills → allocations,
-   plus valuation metadata (model, seed, paths, git sha) for the EXO number.
+3. Delta One nets EXO demand against tracker-book demand → explicit internal cross (booked, visible in UI blotter) + small external residual.
+4. Residual executes over FIX against the sim acceptor; fills allocate pro-rata; post-trade events land in Kafka.
+5. UI shows the full lineage: target → cross → order → fills → allocations, plus valuation metadata (model, seed, paths, git sha) for the EXO number.
 
 Extended storyline (`advanced-hedging` scenario, Phase 4):
 
-6. Vol regime shifts in the sim; the book's vega breaches its Tier-1 limit →
-   `RiskLimitAlert`; EXO's optimizer emits a `HedgeProposal` (option basket,
-   pre/post exposure, modeled cost).
-7. Trader approves on the UI (`d1.cmd.proposal`); Delta One validates and
-   executes the legs over FIX; post-exposure lands back inside the limit;
-   everything books through the normal post-trade plane.
-8. Accumulated USD rho crosses its threshold → `InternalTransferRequest`
-   books a directed cross EXO-SP → RATES-IR; RATES-IR's flat-target logic
-   emits the external ZN/SR3 hedge through the same pipeline; UI shows the
-   full transfer-to-hedge lineage.
+6. Vol regime shifts in the sim; the book's vega breaches its Tier-1 limit → `RiskLimitAlert`; EXO's optimizer emits a `HedgeProposal` (option basket, pre/post exposure, modeled cost).
+7. Trader approves on the UI (`d1.cmd.proposal`); Delta One validates and executes the legs over FIX; post-exposure lands back inside the limit; everything books through the normal post-trade plane.
+8. Accumulated USD rho crosses its threshold → `InternalTransferRequest` books a directed cross EXO-SP → RATES-IR; RATES-IR's flat-target logic emits the external ZN/SR3 hedge through the same pipeline; UI shows the full transfer-to-hedge lineage.

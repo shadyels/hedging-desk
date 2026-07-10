@@ -12,8 +12,7 @@ Delta One must publish booked trades, explicit internal crosses, allocations and
 
 - **Kafka (Avro + Schema Registry):** durable replayable log, per-key ordering (`instrument_id` for trades, `cross_id` for crosses), compaction available for latest-state topics, BACKWARD-compatible schema evolution enforced centrally, idempotent producer. Market-standard for exactly this pipeline.
 - **RabbitMQ:** queue semantics, message deleted on consume; replaying a ledger history is not its model. Rejected for this plane.
-- **JSON on Kafka:** no enforced schema, silent field drift, larger payloads.
-  Rejected — Avro chosen per root invariant #3.
+- **JSON on Kafka:** no enforced schema, silent field drift, larger payloads. Rejected — Avro chosen per root invariant #3.
 
 ## Decision
 

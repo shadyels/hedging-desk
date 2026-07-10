@@ -1,7 +1,6 @@
 # Desk Hedging Platform
 
-Institutional hedging platform for index trackers and structured products.
-Demo/showcase system — fully self-contained (no real market connectivity).
+Institutional hedging platform for index trackers and structured products. Demo/showcase system — fully self-contained (no real market connectivity).
 
 **If you are an AI agent or a new contributor: start with `CLAUDE.md` (root), then the CLAUDE.md of the component you're touching. The ADRs in `docs/adr/` are binding.**
 
@@ -27,14 +26,4 @@ just demo    # full end-to-end showcase scenario
 
 ## The one-paragraph design
 
-EXO prices the structured-product book (Monte Carlo under Heston / Heston-LV)
-and publishes per-book **target positions** over NATS. Delta One nets demand
-firm-wide across books, books the offsetting portion as **explicit internal
-crosses** (per-book attribution preserved), executes only the residual over
-**FIX 4.4**, and publishes booked trades/crosses/allocations to **Kafka
-(Avro)** for the post-trade ledger. The 10–50 µs tick-to-trade budget lives
-entirely inside the Delta One process; all buses are off the hot path by
-design (ADR-004). Phase 4 (mandatory) adds the advanced layer: a full vega/liquidity hedge
-optimizer producing trader-approved option **HedgeProposals**, and directed
-**rho transfers** to a rates book that hedges externally through the same
-pipeline (ADR-008/009). The UI subscribes to NATS over WebSocket.
+EXO prices the structured-product book (Monte Carlo under Heston / Heston-LV) and publishes per-book **target positions** over NATS. Delta One nets demand firm-wide across books, books the offsetting portion as **explicit internal crosses** (per-book attribution preserved), executes only the residual over **FIX 4.4**, and publishes booked trades/crosses/allocations to **Kafka (Avro)** for the post-trade ledger. The 10–50 µs tick-to-trade budget lives entirely inside the Delta One process; all buses are off the hot path by design (ADR-004). Phase 4 (mandatory) adds the advanced layer: a full vega/liquidity hedge optimizer producing trader-approved option **HedgeProposals**, and directed **rho transfers** to a rates book that hedges externally through the same pipeline (ADR-008/009). The UI subscribes to NATS over WebSocket.

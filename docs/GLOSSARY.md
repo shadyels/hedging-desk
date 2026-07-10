@@ -1,49 +1,22 @@
 # Glossary (for developers new to the desk)
 
-- **Delta One:** desk trading linear (delta-of-one) products — trackers,
-  futures, forwards, ETFs. Payoff moves 1:1 with the underlying.
-- **Exotics / structured products:** non-linear payoffs sold to clients;
-  the desk hedges the resulting risk. Our set: autocallable (early-redeems if
-  underlying above trigger on observation dates), reverse convertible (bond +
-  short put), barrier reverse convertible (RC whose capital protection knocks
-  out at a barrier), bonus certificate (bonus level unless barrier hit),
-  TARF (target redemption forward: strip of FX fixings that knocks out once
-  accumulated gain hits a target), PTARF (pivot TARF variant).
-- **Greeks:** sensitivities of a derivative's value (delta = to underlying
-  price; vega = to volatility; gamma = delta's own sensitivity).
-- **Theta:** deterministic time decay of option value (expected carry per
-  day); the accounting mirror of gamma for a delta-hedged book — monitored,
-  never hedged (nothing random to hedge). See ADR-008.
-- **Rho:** sensitivity to interest rates; matters for long-dated products.
-  Hedge instruments are linear (swaps, bond futures), so rho can flow through
-  the same machinery as delta; our Phase 4 design transfers it internally to
-  the RATES-IR book instead (ADR-008).
+- **Delta One:** desk trading linear (delta-of-one) products — trackers, futures, forwards, ETFs. Payoff moves 1:1 with the underlying.
+- **Exotics / structured products:** non-linear payoffs sold to clients; the desk hedges the resulting risk. Our set: autocallable (early-redeems if underlying above trigger on observation dates), reverse convertible (bond + short put), barrier reverse convertible (RC whose capital protection knocks out at a barrier), bonus certificate (bonus level unless barrier hit), TARF (target redemption forward: strip of FX fixings that knocks out once accumulated gain hits a target), PTARF (pivot TARF variant).
+- **Greeks:** sensitivities of a derivative's value (delta = to underlying price; vega = to volatility; gamma = delta's own sensitivity).
+- **Theta:** deterministic time decay of option value (expected carry per day); the accounting mirror of gamma for a delta-hedged book — monitored, never hedged (nothing random to hedge). See ADR-008.
+- **Rho:** sensitivity to interest rates; matters for long-dated products. Hedge instruments are linear (swaps, bond futures), so rho can flow through the same machinery as delta; our Phase 4 design transfers it internally to the RATES-IR book instead (ADR-008).
 - **DV01:** value change per 1bp rate move; the rates-desk unit for rho.
-- **Risk limit (Tier-1):** config-driven firm-level cap per underlying on a
-  monitored Greek; breach alerts, never auto-trades (ADR-008).
-- **Rehedging / delta hedging:** trading the underlying so the book's net
-  delta stays inside a band as the market moves.
-- **Netting:** offsetting opposite demands across books before going to
-  market; the offset portion becomes an internal cross (ADR-005).
-- **Internal cross:** a booked trade between two internal books — a real
-  trade record for attribution/compliance, not market execution.
+- **Risk limit (Tier-1):** config-driven firm-level cap per underlying on a monitored Greek; breach alerts, never auto-trades (ADR-008).
+- **Rehedging / delta hedging:** trading the underlying so the book's net delta stays inside a band as the market moves.
+- **Netting:** offsetting opposite demands across books before going to market; the offset portion becomes an internal cross (ADR-005).
+- **Internal cross:** a booked trade between two internal books — a real trade record for attribution/compliance, not market execution.
 - **Book:** a P&L/risk attribution unit (see `protocol/refdata/universe.json`).
-- **T2T (tick-to-trade):** latency from receiving a market-data event to
-  emitting an order.
-- **FIX:** Financial Information eXchange protocol; 35=D NewOrderSingle,
-  35=8 ExecutionReport. `ClOrdID` = client order id, `ExecID` = execution id.
-- **Heston model:** stochastic-volatility dynamics (variance follows its own
-  mean-reverting process); Heston-LV adds a local-vol leverage surface to fit
-  the market smile.
-- **Monte Carlo (MC):** pricing by simulating many underlying paths and
-  averaging discounted payoffs; standard error shrinks with √paths.
-- **Tracking error:** annualized standard deviation of daily fund-vs-index
-  return differences — replication *consistency* (ADR-010).
-- **Tracking difference:** cumulative return gap vs the benchmark — total
-  *drag*; distinct from TE.
-- **Cash drag:** performance impact of uninvested cash a tracker holds but
-  its index doesn't; hurts most in rising markets (ADR-010).
-- **Deep hedging:** deep-RL framework for hedging derivative portfolios under
-  market frictions (Buehler et al.); our Phase 5 research track (ADR-011).
-- **Post-trade ledger:** downstream system of record for booked trades;
-  consumes our Kafka topics.
+- **T2T (tick-to-trade):** latency from receiving a market-data event to emitting an order.
+- **FIX:** Financial Information eXchange protocol; 35=D NewOrderSingle, 35=8 ExecutionReport. `ClOrdID` = client order id, `ExecID` = execution id.
+- **Heston model:** stochastic-volatility dynamics (variance follows its own mean-reverting process); Heston-LV adds a local-vol leverage surface to fit the market smile.
+- **Monte Carlo (MC):** pricing by simulating many underlying paths and averaging discounted payoffs; standard error shrinks with √paths.
+- **Tracking error:** annualized standard deviation of daily fund-vs-index return differences — replication *consistency* (ADR-010).
+- **Tracking difference:** cumulative return gap vs the benchmark — total *drag*; distinct from TE.
+- **Cash drag:** performance impact of uninvested cash a tracker holds but its index doesn't; hurts most in rising markets (ADR-010).
+- **Deep hedging:** deep-RL framework for hedging derivative portfolios under market frictions (Buehler et al.); our Phase 5 research track (ADR-011).
+- **Post-trade ledger:** downstream system of record for booked trades; consumes our Kafka topics.

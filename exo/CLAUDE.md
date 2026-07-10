@@ -18,15 +18,9 @@ Exotics pricing and rehedging service. Computes theoretical values and Greeks fo
 1. **M1:** Barrier option + Autocallable under Heston, equity underlyings.
 2. **M2:** Reverse convertible, barrier reverse convertible, bonus certificate — same MC engine, new payoffs only. If M2 requires touching `models/`, the payoff abstraction is wrong; fix the abstraction.
 3. **M3:** TARF and PTARF. These are FX products: same Heston-style dynamics on FX spot with domestic/foreign rate drift (Garman–Kohlhagen-style), monthly fixings, target-redemption knockout, path-dependent accumulated gain state. Calibration realism (FX smile) is explicitly out of demo scope — document the parameter set used, don't pretend it's calibrated.
-4. **P4.M3–M4 (mandatory, ADR-009):** hedge proposal optimizer with its
-   property test (recomputed post-exposure from legs matches the claim within
-   MC error); Heston-local-vol leverage surface; PDE cross-check pricer;
-   calibration framework against sim-generated synthetic vanilla surfaces.
+4. **P4.M3–M4 (mandatory, ADR-009):** hedge proposal optimizer with its property test (recomputed post-exposure from legs matches the claim within MC error); Heston-local-vol leverage surface; PDE cross-check pricer; calibration framework against sim-generated synthetic vanilla surfaces.
 
-Every priced product must have an analytic or semi-analytic cross-check test
-where one exists (e.g., Heston vanilla via characteristic function; barrier
-under Black–Scholes closed form with the model degenerated to BS). MC vs
-closed-form agreement within 3 standard errors is the acceptance test.
+Every priced product must have an analytic or semi-analytic cross-check test where one exists (e.g., Heston vanilla via characteristic function; barrier under Black–Scholes closed form with the model degenerated to BS). MC vs closed-form agreement within 3 standard errors is the acceptance test.
 
 ## Non-negotiable rules
 
@@ -40,16 +34,11 @@ closed-form agreement within 3 standard errors is the acceptance test.
 ## Tooling & style
 
 - Python 3.12+, `uv` for env/deps, `ruff` (lint+format), `mypy --strict`.
-- Everything typed. Payoffs are frozen `dataclass`es; model params are
-  `pydantic` models validated at load.
-- `pytest`; numerical tests use fixed seeds and assert within tolerances that
-  include the MC standard error — never exact float equality, never `==` on
-  arrays.
+- Everything typed. Payoffs are frozen `dataclass`es; model params are `pydantic` models validated at load.
+- `pytest`; numerical tests use fixed seeds and assert within tolerances that include the MC standard error — never exact float equality, never `==` on arrays.
 - No pandas on the pricing path (fine in notebooks/analysis).
-- Async: `bus/` uses `asyncio` + `nats-py`; pricing runs in a
-  `ProcessPoolExecutor` so a heavy revaluation cannot stall the bus heartbeat.
-- Config via a single `exo.toml` loaded at startup; no env-var spelunking in
-  business logic.
+- Async: `bus/` uses `asyncio` + `nats-py`; pricing runs in a `ProcessPoolExecutor` so a heavy revaluation cannot stall the bus heartbeat.
+- Config via a single `exo.toml` loaded at startup; no env-var spelunking in business logic.
 
 ## Performance posture (be honest in the demo)
 

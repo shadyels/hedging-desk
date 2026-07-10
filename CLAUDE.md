@@ -9,8 +9,7 @@ Monorepo, five phases:
 - **Phase 4 — Advanced hedging & enrichment (MANDATORY, same depth):** Tier-2 hedge proposal engine, rho transfer to RATES-IR with external futures hedge (ADR-008/009), model depth (Heston-LV, PDE cross-check, synthetic-surface calibration), then universe enrichment at scale.
 - **Phase 5 — optional, externally gated:** proprietary venue FIX dialects, live-market-data calibration, JetStream, AI assistance (ADR-011: LLM decision support + deep-hedging research, both non-executing).
 
-**Before editing any component, read that component's own CLAUDE.md:**
-`delta-one/CLAUDE.md`, `exo/CLAUDE.md`, `ui/CLAUDE.md`, `protocol/CLAUDE.md`, `sim/CLAUDE.md`. They contain non-obvious invariants; this file only holds cross-cutting rules.
+**Before editing any component, read that component's own CLAUDE.md:** `delta-one/CLAUDE.md`, `exo/CLAUDE.md`, `ui/CLAUDE.md`, `protocol/CLAUDE.md`, `sim/CLAUDE.md`. They contain non-obvious invariants; this file only holds cross-cutting rules.
 
 ## Documentation map — read these files when indicated (they are NOT auto-loaded)
 
