@@ -34,4 +34,7 @@ Scope principle (corrected 2026-07-06): the **instrument universe** starts minim
 
 ## Phase 5 — Optional / externally gated
 
-Proprietary venue FIX dialects (EMSX, TSOX, FXAll — need specs and entitlements); calibration against live market data feeds; JetStream evaluation for replayable target history; **AI assistance (ADR-011)**: an LLM decision-support layer (risk Q&A, morning briefing, proposal narration, scenario authoring — read-only, non-executing) and an ML research track (deep hedging for the rehedge policy, ex-ante TE, NN-accelerated calibration — shadow mode first); rough-volatility models (rBergomi) — research-strong on short-dated skew but not established desk practice for exotics pricing, so optional by the project's own tech rule.
+- Proprietary venue FIX dialects (EMSX, TSOX, FXAll — need specs and entitlements); calibration against live market data feeds;
+- JetStream evaluation for replayable target history; 
+- **AI assistance (ADR-011)**: an LLM decision-support layer (risk Q&A, morning briefing, proposal narration, scenario authoring — read-only, non-executing) and an ML research track (deep hedging for the rehedge policy, ex-ante TE, NN-accelerated calibration — shadow mode first); 
+- rough-volatility models (rBergomi) — research-strong on short-dated skew but not established desk practice for exotics pricing, so optional by the project's own tech rule.

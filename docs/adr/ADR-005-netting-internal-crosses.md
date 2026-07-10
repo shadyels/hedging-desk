@@ -1,6 +1,8 @@
 # ADR-005: Firm-wide netting with explicit per-book internal crosses
 
-**Status:** Accepted **Date:** 2026-07-05 **Deciders:** desk lead (per-book attribution + explicit cross booking confirmed)
+**Status:** Accepted
+**Date:** 2026-07-05
+**Deciders:** desk lead (per-book attribution + explicit cross booking confirmed)
 
 ## Context
 

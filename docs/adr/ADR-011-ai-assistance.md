@@ -1,6 +1,7 @@
 # ADR-011: AI assistance in the hedging process (Phase 5)
 
-**Status:** Proposed (Phase 5 exploration — acceptance requires desk + model-risk review) **Date:** 2026-07-06
+**Status:** Proposed (Phase 5 exploration — acceptance requires desk + model-risk review) 
+**Date:** 2026-07-06
 
 ## Context
 

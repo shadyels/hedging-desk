@@ -1,6 +1,8 @@
 # ADR-008: Greeks treatment — hedge / limit / monitor ladder
 
-**Status:** Accepted **Date:** 2026-07-06 **Deciders:** desk lead (options chosen explicitly; see consequences for sources)
+**Status:** Accepted
+**Date:** 2026-07-06
+**Deciders:** desk lead (options chosen explicitly; see consequences for sources)
 
 ## Context
 

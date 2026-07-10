@@ -1,6 +1,8 @@
 # ADR-002: Kafka + Avro + Schema Registry for the post-trade plane
 
-**Status:** Accepted **Date:** 2026-07-05 **Deciders:** desk lead (Kafka confirmed over RabbitMQ)
+**Status:** Accepted
+**Date:** 2026-07-05
+**Deciders:** desk lead (Kafka confirmed over RabbitMQ)
 
 ## Context
 

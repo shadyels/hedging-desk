@@ -1,6 +1,7 @@
 # CLAUDE.md — Desk Hedging Platform (root)
 
-Institutional hedging platform for index trackers and structured products. Monorepo, five phases:
+Institutional hedging platform for index trackers and structured products.
+Monorepo, five phases:
 
 - **Phase 1 — Delta One (`delta-one/`, Rust):** linear hedging, high volume, latency-sensitive. Owns firm-wide netting, execution, FIX, post-trade publishing.
 - **Phase 2 — EXO (`exo/`, Python):** exotics pricing (Monte Carlo, Heston / Heston-local-vol, PDE later). Computes target deltas per book and streams them to Delta One. EXO NEVER executes; it only publishes targets and consumes fills/risk.

@@ -1,6 +1,8 @@
 # ADR-006: Exotics model stack — Monte Carlo under Heston(-LV), full product list phased
 
-**Status:** Accepted **Date:** 2026-07-05 **Deciders:** desk lead
+**Status:** Accepted
+**Date:** 2026-07-05
+**Deciders:** desk lead
 
 ## Context
 

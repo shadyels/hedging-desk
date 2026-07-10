@@ -1,6 +1,8 @@
 # ADR-010: Index-tracker analytics — tracking error, tracking difference, cash drag
 
-**Status:** Accepted **Date:** 2026-07-06 **Deciders:** desk lead (requested TE + cash drag for tracker books)
+**Status:** Accepted
+**Date:** 2026-07-06
+**Deciders:** desk lead (requested TE + cash drag for tracker books)
 
 ## Definitions (sourced)
 

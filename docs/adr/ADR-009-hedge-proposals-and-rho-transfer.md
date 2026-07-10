@@ -1,6 +1,10 @@
 # ADR-009: Tier-2 hedge proposal engine (full optimizer) and rho transfer with external hedge
 
-**Status:** Accepted **Date:** 2026-07-06 **Deciders:** desk lead — full optimizer chosen explicitly over a simplified v1; rho transfer generates the external hedge (not transfer-and-stop). Both are **mandatory demo scope** (Phase 4), not backlog.
+**Status:** Accepted
+**Date:** 2026-07-06
+**Deciders:** desk lead — full optimizer chosen explicitly over a simplified v1;
+rho transfer generates the external hedge (not transfer-and-stop). Both are
+**mandatory demo scope** (Phase 4), not backlog.
 
 ## Context
 

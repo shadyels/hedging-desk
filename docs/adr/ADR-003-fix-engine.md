@@ -1,6 +1,8 @@
 # ADR-003: FIX 4.4 via the `quickfix` Rust crate; venue dialects deferred
 
-**Status:** Accepted **Date:** 2026-07-05 **Deciders:** desk lead (FIX 4.4 + QuickFIX confirmed)
+**Status:** Accepted
+**Date:** 2026-07-05
+**Deciders:** desk lead (FIX 4.4 + QuickFIX confirmed)
 
 ## Context
 

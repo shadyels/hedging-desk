@@ -1,6 +1,8 @@
 # ADR-001: NATS core for the live plane (EXO ↔ Delta One ↔ UI)
 
-**Status:** Accepted **Date:** 2026-07-05 **Deciders:** desk lead
+**Status:** Accepted
+**Date:** 2026-07-05
+**Deciders:** desk lead
 
 ## Context
 

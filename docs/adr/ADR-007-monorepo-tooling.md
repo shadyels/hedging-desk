@@ -1,6 +1,8 @@
 # ADR-007: Monorepo layout and toolchain
 
-**Status:** Accepted **Date:** 2026-07-05 **Deciders:** desk lead (monorepo confirmed)
+**Status:** Accepted
+**Date:** 2026-07-05
+**Deciders:** desk lead (monorepo confirmed)
 
 ## Decision
 

@@ -1,6 +1,8 @@
 # ADR-004: Hot-path boundary and serialization choices
 
-**Status:** Accepted **Date:** 2026-07-05 **Deciders:** desk lead (10–50 µs T2T tier confirmed)
+**Status:** Accepted
+**Date:** 2026-07-05
+**Deciders:** desk lead (10–50 µs T2T tier confirmed)
 
 ## Context
 
