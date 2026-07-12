@@ -3,7 +3,29 @@
     "deny": [
       "Read(./.env)",
       "Read(./**/.env)",
-      "Read(./**/.env.*)"
+      "Read(./**/.env.*)",
+      "Edit(./.env)",
+      "Edit(./**/.env)",
+      "Edit(./**/.env.*)",
+      "Write(./.env)",
+      "Write(./**/.env)",
+      "Write(./**/.env.*)",
+      "Edit(./.github/workflows/**)",
+      "Write(./.github/workflows/**)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/bash_guard.py\"",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }
