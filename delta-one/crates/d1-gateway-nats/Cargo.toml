@@ -9,3 +9,4 @@ workspace = true
 
 [dependencies]
 # Populate only from the approved dependency table in delta-one/CLAUDE.md.
+prost = "0.14"

@@ -17,7 +17,7 @@ Monorepo, five phases:
 |---|---|
 | `docs/ARCHITECTURE.md` | any change touching data flow between components, threading, latency, failure/recon behavior, or the demo storyline |
 | `docs/ROADMAP.md` | starting any new feature or milestone work, or judging whether something is in scope |
-| `docs/adr/` (ADR-001…011) | touching anything an ADR governs: bus (001), post-trade (002), FIX (003), hot path (004), netting/crosses (005), models/products (006), tooling (007), Greeks ladder (008), proposals/transfers (009), tracker analytics (010), AI assistance (011, Proposed). ADRs are binding; read the relevant one in full |
+| `docs/adr/` (ADR-001…012) | touching anything an ADR governs: bus (001), post-trade (002), FIX (003), hot path (004), netting/crosses (005), models/products (006), tooling (007), Greeks ladder (008), proposals/transfers (009), tracker analytics (010), AI assistance (011, Proposed), codegen plugin tooling (012). ADRs are binding; read the relevant one in full |
 | `protocol/nats-subjects.md` | publishing or subscribing to any NATS subject |
 | `protocol/refdata/universe.json` | using any instrument_id, book_id, or market convention |
 | `docs/GLOSSARY.md` | when a trading term in a task is unclear |

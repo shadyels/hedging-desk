@@ -19,11 +19,13 @@ dev = [
   "mypy==1.14.*",
   "ruff==0.9.*",
   "hypothesis==6.*",        # property tests for fixed-point conversion & payoff invariants
+  "types-protobuf==5.29.*", # mypy stubs matching the pinned protobuf==5.29.* runtime
 ]
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+extend-exclude = ["src/exo/bus/gen"]  # protoc-generated (committed, see scripts/gen-proto.sh)
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF", "ANN"]
@@ -31,6 +33,26 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF", "ANN"]
 [tool.mypy]
 strict = true
 python_version = "3.12"
+exclude = ["_pb2\\.py$"]
+
+[[tool.mypy.overrides]]
+# Google's official protoc .pyi generator predates strict-mode generics
+# (e.g. `_Union[X, _Mapping]` with no type args) and subclasses Any
+# (`google.protobuf.message.Message`). Relax just these two strict checks
+# for the generated stubs; consumer code is still checked at full strict.
+module = "exo.bus.gen.*"
+disallow_any_generics = false
+disallow_subclassing_any = false
+
+[[tool.mypy.overrides]]
+# protoc's python codegen emits sibling pb2 imports as bare top-level
+# module names (e.g. live_pb2.pyi does `import common_pb2`) rather than
+# package-qualified ones, which mypy can't resolve from outside the gen/
+# package. Consumers get full InstrumentRef/Meta typing through the
+# gen.live_pb2-qualified re-exports; this only covers the internal bare
+# cross-reference inside the generated stub itself.
+module = "common_pb2"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

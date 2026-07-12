@@ -1,0 +1,16 @@
+version: v2
+plugins:
+  # Rust (prost). protoc-gen-prost is a real standalone plugin binary:
+  #   cargo install protoc-gen-prost --version 0.5.0
+  - local: protoc-gen-prost
+    out: ../delta-one/crates/d1-gateway-nats/src/gen
+    opt: flat_output_dir=true
+  # TS (ts-proto). Already a ui/ devDependency; its binary is installed
+  # locally by `npm install` (no separate cargo/pip-style step needed).
+  - local: ../ui/node_modules/.bin/protoc-gen-ts_proto
+    out: ../ui/src/gen
+    opt: forceLong=bigint
+  # Python + Python stubs are generated directly via `protoc` in
+  # scripts/gen-proto.sh, not here: protoc's python/pyi generators are
+  # built into the protoc binary itself, not a separate protoc-gen-*
+  # plugin buf can shell out to.
