@@ -9,3 +9,13 @@ workspace = true
 
 [dependencies]
 # Populate only from the approved dependency table in delta-one/CLAUDE.md.
+# (none yet: d1-core is plain structs, ADR-004 — no proto/bus deps here.)
+
+[dev-dependencies]
+criterion = "0.5"
+hdrhistogram = "7"
+proptest = "1"
+
+[[bench]]
+name = "hot_path"
+harness = false

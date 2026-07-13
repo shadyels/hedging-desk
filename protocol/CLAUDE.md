@@ -4,7 +4,7 @@ Single source of truth for everything that crosses a process boundary. If two co
 
 ## Contents
 
-- `proto/` — Protobuf schemas for the NATS live plane (EXO ↔ Delta One ↔ UI). Code generated for Rust (`prost`), Python (`protobuf`, picked — matches exo/pyproject.toml; do not introduce betterproto), TypeScript (`ts-proto`, `forceLong=bigint`). `just proto` regenerates all three; generated code is committed so builds don't need protoc.
+- `proto/` — Protobuf schemas for the NATS live plane (EXO ↔ Delta One ↔ UI). Code generated for Rust (`prost`), Python (`protobuf`, picked — matches exo/pyproject.toml; do not introduce betterproto), TypeScript (`ts-proto`, `forceLong=bigint`). `just proto` regenerates all three; generated code is committed so builds don't need protoc. Regeneration itself uses local plugin binaries only, never BSR remote plugins (ADR-012) — see `scripts/gen-proto.sh` for the exact tool versions required.
 - `avro/` — Avro schemas (`.avsc`) for the Kafka post-trade plane, registered in Schema Registry with `BACKWARD` compatibility mode.
 - `nats-subjects.md` — the complete subject taxonomy. A subject not listed there does not exist.
 - `refdata/` — instrument reference data for the demo universe (tick sizes, currencies, day counts, settlement lags). Defined once here, consumed by all components. Never duplicate a market convention in component code.

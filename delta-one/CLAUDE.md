@@ -15,6 +15,8 @@ Delta One engine: linear hedging, firm-wide netting, execution, and the three ou
 
 Threading model: one pinned thread per hot-path stage, communicating over bounded SPSC ring buffers (`rtrb` or `crossbeam` ArrayQueue — pick once, ADR it). Gateways run on separate threads/tokio runtimes and exchange data with the core only through those queues. The core never awaits.
 
+**Deferred to M2:** none of the above (pinned threads, SPSC rings, the `rtrb`-vs-`crossbeam` ADR) exists yet. P1.M1 built `d1-core`/`sim` single-threaded — there is nothing to decouple until the NATS/FIX/Kafka gateways show up in M2. The M1 feed ingest boundary (`MarketData::ingest`) is a direct function call, marked with a `ponytail:` comment in `crates/d1-core/src/feed.rs`; M2 replaces that call site with a ring, not the function signature.
+
 ## The hot path contract (tick → order emit)
 
 Target: 10–50 µs T2T inside the process, measured p50/p99/p99.9 with `criterion` + HDR histograms on a **release build** with pinned cores. Rules on any code reachable from the hot path:

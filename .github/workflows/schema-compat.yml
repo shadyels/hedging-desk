@@ -15,4 +15,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Shallow checkout only has the PR's own ref; buf breaking's
+      # `.git#branch=main` and the Avro baseline diff both need a real
+      # local `main` branch to compare against. Skip on push-to-main,
+      # where HEAD already *is* main (fetching into the checked-out
+      # branch is rejected).
+      - run: |
+          if [ "$(git rev-parse --abbrev-ref HEAD)" != "main" ]; then
+            git fetch --depth=1 origin main:refs/heads/main
+          fi
+      - uses: bufbuild/buf-setup-action@v1
+      - run: docker compose -f deploy/docker-compose.yml up -d kafka schema-registry
       - run: ./scripts/schema-check.sh

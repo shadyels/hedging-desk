@@ -11,7 +11,7 @@
 - Rust: single Cargo workspace under `delta-one/` (sim's Rust binaries join it), pinned toolchain via `rust-toolchain.toml`, clippy lint policy in workspace `Cargo.toml`.
 - Python: `uv` + `pyproject.toml`, `ruff`, `mypy --strict`, `pytest`.
 - TS: Vite + `tsc --noEmit` + eslint/prettier + Vitest.
-- Codegen: `just proto` regenerates prost/protobuf-py/ts-proto outputs; generated code committed.
+- Codegen: `just proto` regenerates prost/protobuf-py/ts-proto outputs; generated code committed. Plugin sourcing (local binaries, not BSR remote plugins): ADR-012.
 - CI: per-component jobs keyed on changed paths + always-on schema-compat job.
 - Local infra: `deploy/docker-compose.yml` (NATS with WS listener, Kafka KRaft, Schema Registry).
 
