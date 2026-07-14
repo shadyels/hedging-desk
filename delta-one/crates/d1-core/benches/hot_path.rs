@@ -6,7 +6,10 @@
 #![allow(missing_docs)] // bench binary, not a public library API
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use d1_core::{BookId, FeedTick, InstrumentId, MarketData, PositionKeeper, Side};
+use d1_core::{
+    BookId, ClOrdId, ExecEvent, ExecId, FeedTick, InstrumentId, MarketData, Order, OrderStatus,
+    OrderStore, PositionKeeper, Side,
+};
 
 const N_INSTRUMENTS: u32 = 16;
 const N_BOOKS: u32 = 4;
@@ -95,9 +98,64 @@ fn bench_position_keeper_apply_fill(c: &mut Criterion) {
     });
 }
 
+// Unique per-iteration exec id, no allocation (mirrors `ClOrdId::from_seq`).
+fn seq_exec_id(mut n: u64) -> ExecId {
+    let mut bytes = [b'0'; 20];
+    for slot in bytes.iter_mut().rev() {
+        *slot = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    ExecId::from_bytes(bytes)
+}
+
+fn bench_order_store_apply_exec(c: &mut Criterion) {
+    let mut store = OrderStore::new(1);
+    let cl_ord_id = ClOrdId::from_seq(0);
+    // Huge order_qty so partial fills never reach the terminal Filled state
+    // over hundreds of thousands of iterations.
+    store.place(Order {
+        cl_ord_id,
+        book: BookId(0),
+        instrument: InstrumentId(0),
+        side: Side::Buy,
+        order_qty_e2: i64::MAX / 2,
+        limit_px_e9: 0,
+        status: OrderStatus::New,
+        cum_qty_e2: 0,
+        leaves_qty_e2: 0,
+        last_px_e9: 0,
+    });
+
+    let mut seq: u64 = 0;
+    hdr_report("OrderStore::apply_exec", || {
+        seq += 1;
+        let _ = black_box(store.apply_exec(black_box(&ExecEvent {
+            cl_ord_id,
+            exec_id: seq_exec_id(seq),
+            reported_status: OrderStatus::PartiallyFilled,
+            last_qty_e2: 100,
+            last_px_e9: 100_000_000_000,
+        })));
+    });
+
+    c.bench_function("OrderStore::apply_exec", |b| {
+        b.iter(|| {
+            seq += 1;
+            black_box(store.apply_exec(black_box(&ExecEvent {
+                cl_ord_id,
+                exec_id: seq_exec_id(seq),
+                reported_status: OrderStatus::PartiallyFilled,
+                last_qty_e2: 100,
+                last_px_e9: 100_000_000_000,
+            })))
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_market_data_ingest,
-    bench_position_keeper_apply_fill
+    bench_position_keeper_apply_fill,
+    bench_order_store_apply_exec
 );
 criterion_main!(benches);

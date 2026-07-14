@@ -9,7 +9,7 @@ workspace = true
 
 [dependencies]
 # Populate only from the approved dependency table in delta-one/CLAUDE.md.
-# (none yet: d1-core is plain structs, ADR-004 — no proto/bus deps here.)
+thiserror = "2"
 
 [dev-dependencies]
 criterion = "0.5"
