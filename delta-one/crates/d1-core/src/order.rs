@@ -115,11 +115,12 @@ pub struct OrderStore {
 
 impl OrderStore {
     /// Preallocate for up to `capacity` concurrently-tracked orders.
-    // ponytail: append-only slab, no slot reuse for terminal orders — fine
-    // while capacity is sized generously for a single session; a freelist
-    // reclaiming terminal-order slots lands if/when long-uptime memory
-    // bounding actually matters (Slice 2/3, once a real gateway drives this
-    // continuously).
+    // ponytail: append-only slab, no slot reuse for terminal orders, and
+    // `seen_execs` likewise grows without bound — fine while capacity is
+    // sized generously for a single session; a freelist reclaiming
+    // terminal-order slots (and an eviction policy for `seen_execs`) lands
+    // if/when long-uptime memory bounding actually matters (Slice 2/3, once
+    // a real gateway drives this continuously).
     #[must_use]
     pub fn new(capacity: usize) -> Self {
         Self {
@@ -172,17 +173,24 @@ impl OrderStore {
         // since nothing produces them yet, so they fall through to the
         // catch-all like any other genuinely illegal move.
         match (order.status, event.reported_status) {
-            (OrderStatus::New | OrderStatus::PartiallyFilled, OrderStatus::PartiallyFilled)
-            | (
+            (
                 OrderStatus::New | OrderStatus::PartiallyFilled,
-                OrderStatus::Filled | OrderStatus::Rejected | OrderStatus::Canceled,
+                OrderStatus::PartiallyFilled
+                | OrderStatus::Filled
+                | OrderStatus::Rejected
+                | OrderStatus::Canceled,
             ) => {}
             (from, to) => return Err(OrderError::IllegalTransition { from, to }),
         }
 
         // Trust the exec's reported cum/leaves inputs as authoritative (the
-        // FIX session already resolved them) rather than recomputing and
-        // cross-checking locally.
+        // FIX session already resolved them) rather than recomputing them
+        // locally. `checked_*` guards i64 overflow only, so `debug_assert`
+        // the *domain* invariants (root CLAUDE.md #7): these catch our own
+        // conversion/wiring bugs before they corrupt the ledger, and compile
+        // out of the release hot path.
+        // ponytail: debug-only. If a live venue is ever trusted to send
+        // malformed execs in production, promote these to a returned error.
         let new_cum = order
             .cum_qty_e2
             .checked_add(event.last_qty_e2)
@@ -191,6 +199,19 @@ impl OrderStore {
             .leaves_qty_e2
             .checked_sub(event.last_qty_e2)
             .ok_or(OrderError::Overflow)?;
+        debug_assert!(event.last_qty_e2 >= 0, "exec reported negative fill qty");
+        debug_assert!(
+            new_leaves >= 0,
+            "overfill: cum exceeded order_qty (leaves went negative)"
+        );
+        debug_assert!(
+            event.reported_status != OrderStatus::Filled || new_leaves == 0,
+            "reported Filled but leaves_qty is nonzero"
+        );
+        debug_assert!(
+            event.reported_status != OrderStatus::PartiallyFilled || new_leaves > 0,
+            "reported PartiallyFilled but leaves_qty is zero"
+        );
 
         order.cum_qty_e2 = new_cum;
         order.leaves_qty_e2 = new_leaves;
@@ -350,6 +371,24 @@ mod tests {
             })
             .unwrap_err();
         assert_eq!(err, OrderError::AlreadyTerminal);
+    }
+
+    #[test]
+    #[should_panic(expected = "overfill")]
+    fn overfill_trips_invariant_in_debug() {
+        // last_qty exceeds order_qty -> leaves would go negative. The
+        // debug_assert must fire (this test relies on debug_assertions, i.e.
+        // the default `cargo test` profile).
+        let mut store = OrderStore::new(4);
+        let id = ClOrdId::from_seq(1);
+        store.place(sample_order(id)); // order_qty_e2 = 10_000
+        let _ = store.apply_exec(&ExecEvent {
+            cl_ord_id: id,
+            exec_id: ExecId::from_bytes([1; 20]),
+            reported_status: OrderStatus::Filled,
+            last_qty_e2: 12_000,
+            last_px_e9: 1,
+        });
     }
 
     #[test]

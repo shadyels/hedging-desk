@@ -45,6 +45,10 @@ pub struct ExecId(pub [u8; 20]);
 
 impl ExecId {
     /// Wrap raw bytes (e.g. a FIX `ExecID` once decoded).
+    // ponytail: FIX `ExecID` (tag 17) is a variable-length String with no
+    // 20-byte cap. The Slice 2 converter MUST reject or hash oversize IDs,
+    // never truncate — two distinct ExecIDs colliding to the same 20 bytes
+    // would be deduped as a replay and silently drop a real fill.
     #[must_use]
     pub fn from_bytes(bytes: [u8; 20]) -> Self {
         Self(bytes)
