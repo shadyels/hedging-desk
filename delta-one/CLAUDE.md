@@ -16,7 +16,7 @@ Delta One engine: linear hedging, firm-wide netting, execution, and the three ou
 
 Threading model: one pinned thread per hot-path stage, communicating over bounded SPSC ring buffers, `rtrb` for every ring (ADR-013 — bounded `crossbeam-channel` rejected, its blocking ops lock and it's MPMC machinery this project never needs). Gateways run on separate threads/tokio runtimes and exchange data with the core only through those queues. The core never awaits. `rtrb` has no disconnect signal, so ring shutdown is an explicit `AtomicBool` flag checked each poll-loop iteration, not channel-close semantics.
 
-**M2 status:** Slice 2 (`feat/d1-fix-round-trip`) wired the first rings: `crates/d1` (new binary crate hosting the core thread + `d1-gateway-fix`) has two `rtrb` rings between the core thread and the FIX gateway (outbound `Order`, inbound `ExecEvent`). The core thread places one CLI-driven startup order as a stand-in for the netting-driven emit that lands in P1.M3 — there is no EXO target / netting yet. **Still deferred to Slice 3:** the feed-ingest ring and its producer thread — `MarketData::ingest` (`crates/d1-core/src/feed.rs`) stays a direct call until a real market-data transport shows up alongside `d1-gateway-nats`.
+**M2 status:** Slice 3 (`feat/d1-nats-plane`) wired the remaining rings. `crates/d1`'s core thread (shared between the binary and its integration tests via `crates/d1/src/lib.rs::spawn`) now drains 5 `rtrb` rings: the Slice 2 FIX pair (outbound `Order`, inbound `ExecEvent`), inbound `Target` and outbound `ExecReport` to/from `d1-gateway-nats`, and the feed-ingest ring (`FeedTick`) deferred from Slice 2. `crates/d1/src/feed.rs` is a synthetic producer thread — no real market-data transport exists yet, `sim.md.<instrument>` on NATS is UI-display-only (`protocol/nats-subjects.md`). `target_to_order` (`d1-core/src/target.rs`) is the P1.M3 netting stand-in: it converts each NATS-derived `Target` straight into a market order with no current-position/in-flight offset. The Slice 2 CLI-driven startup order stays, additive, alongside NATS-driven targets.
 
 ## The hot path contract (tick → order emit)
 
@@ -49,6 +49,8 @@ Enforcement: `cargo clippy` with `-D warnings` plus the lint set in `Cargo.toml`
 | `rtrb` | SPSC rings (ADR-013) | yes |
 | `prost` | Protobuf (gateway side) | no |
 | `async-nats` | NATS client (official nats-io) | no |
+| `tokio` | async runtime `async-nats` needs (Slice 3, `d1-gateway-nats`): the gateway thread builds its own single-threaded `Runtime` and blocks on it, same shape as `d1-gateway-fix`'s blocking socket loop | no |
+| `futures-util` | `StreamExt::next` on `async-nats`'s `Subscriber` stream (Slice 3) — the only way to poll it without hand-rolling `Stream::poll_next` | no |
 | `quickfix` | FIX 4.4 engine (C++ binding) | no |
 | `rdkafka` | Kafka producer | no |
 | `criterion`, `hdrhistogram` | benches | test-only |
@@ -58,6 +60,8 @@ Enforcement: `cargo clippy` with `-D warnings` plus the lint set in `Cargo.toml`
 | `ctrlc` | Ctrl-C signal handler (`crates/d1`'s shutdown flag) | no -- registration happens once at startup on the main thread, never in a poll loop |
 
 Anything not in this table needs a row added here + a sentence of justification in the PR description.
+
+**MSRV note (Slice 3):** `async-nats`'s current release chain (`url`/`idna`/`icu_*`, `time`) needs rustc ≥1.88, ahead of this workspace's prior `rust-version = "1.85"`. Bumped `rust-version` (and `rust-toolchain.toml`'s pinned channel) to `1.88` — routine ecosystem MSRV drift on an already-approved dependency, not a design change; pinning the whole transitive tree to years-old releases to hold the line at 1.85 was rejected as fragile (re-pins cascade every time any transitive crate bumps its own floor) and ships a stale NATS client. `async-nats` itself runs with `default-features = false` (drops jetstream/kv/service/websockets/nkeys — ADR-001 already excludes JetStream from Phase 1/2, and this crate only needs core pub/sub).
 
 ## Netting & internal crosses (summary — full spec in ADR-005)
 
