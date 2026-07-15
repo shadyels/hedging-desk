@@ -82,9 +82,13 @@ impl ApplicationCallback for FixCallbacks {
         let event = convert::exec_report_to_event(msg).map_err(fix_error_to_from_app)?;
 
         // ponytail: ring sized generously for a single demo session; a full
-        // ring silently drops the exec rather than blocking this callback
-        // thread (which the quickfix engine owns). Promote to a returned
-        // reject (backpressure) if a live venue needs it.
+        // ring (or a poisoned `Mutex` -- the `Err` arm of `lock()` below)
+        // silently drops the exec rather than blocking this callback thread
+        // (which the quickfix engine owns). A dropped fill is invisible from
+        // here -> the order can stall mid-execution forever. Ceiling for the
+        // demo; upgrade to a drop counter / `eprintln!` for observability, or
+        // promote to a returned reject (backpressure), when a live venue
+        // drives this.
         if let Ok(mut tx) = self.inbound_tx.lock() {
             let _ = tx.push(event);
         }
@@ -139,11 +143,22 @@ pub fn run_initiator(
             std::thread::sleep(DRAIN_POLL_INTERVAL);
             continue;
         }
+        // ponytail: log-and-drop -- a non-convertible order or a transient
+        // send failure drops just that order and keeps the session alive. Not
+        // retried or dead-lettered: fine for Slice 2 (single CLI startup
+        // order, no netting), upgrade to bounded-retry / dead-letter when a
+        // real order source lands. `eprintln!` matches the slow-path logging
+        // style (`main.rs`); this is an edge crate off the hot path, so the
+        // no-logging rule (hot-path only) does not apply.
         match outbound_rx.pop() {
-            Ok(order) => {
-                let msg = convert::order_to_new_order_single(&order)?;
-                send_to_target(msg, &session_id)?;
-            }
+            Ok(order) => match convert::order_to_new_order_single(&order) {
+                Ok(msg) => {
+                    if let Err(err) = send_to_target(msg, &session_id) {
+                        eprintln!("fix: send_to_target failed, dropping order: {err}");
+                    }
+                }
+                Err(err) => eprintln!("fix: order conversion failed, dropping order: {err}"),
+            },
             Err(rtrb::PopError::Empty) => std::thread::sleep(DRAIN_POLL_INTERVAL),
         }
     }

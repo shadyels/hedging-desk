@@ -48,6 +48,10 @@ pub fn order_to_new_order_single(order: &Order) -> Result<Message, FixError> {
     msg.set_field(TAG_SYMBOL, order.instrument.0.to_string())?;
     msg.set_field(TAG_SIDE, side_to_fix(order.side))?;
 
+    // ponytail: `limit_px_e9 == 0` is an in-band "market order" sentinel —
+    // it conflates a genuine zero-price limit order. Fine while D1 only emits
+    // market orders (Slice 2); add an explicit `OrdType`/enum field on `Order`
+    // when real limit orders arrive (P1.M3).
     let is_market = order.limit_px_e9 == 0;
     msg.set_field(TAG_ORD_TYPE, if is_market { "1" } else { "2" })?;
     msg.set_field(TAG_ORDER_QTY, fmt_fixed(order.order_qty_e2, 2))?;
@@ -61,6 +65,13 @@ pub fn order_to_new_order_single(order: &Order) -> Result<Message, FixError> {
 /// Convert an inbound `ExecutionReport` (35=8) to a `d1-core::ExecEvent`.
 /// Pure — the gateway is responsible for pushing the result onto the
 /// inbound-exec ring.
+///
+/// `LastQty` (32) and `LastPx` (31) are **conditional** per FIX 4.4 — present
+/// only on trade reports (`ExecType` a fill). A status-only report
+/// (Rejected / Canceled / New-ack) omits them, so both default to `0` when
+/// absent (parsed strictly when present). `apply_exec` (`order.rs`) returns
+/// `None` (no fill) when `last_qty_e2 == 0`, so a defaulted-zero status report
+/// correctly produces no fill while still transitioning the order's status.
 pub fn exec_report_to_event(msg: &Message) -> Result<ExecEvent, FixError> {
     let cl_ord_id_str = msg
         .get_field(TAG_CL_ORD_ID)
@@ -77,15 +88,14 @@ pub fn exec_report_to_event(msg: &Message) -> Result<ExecEvent, FixError> {
         .ok_or(FixError::MissingField(TAG_ORD_STATUS))?;
     let reported_status = map_ord_status(&ord_status_str)?;
 
-    let last_qty_str = msg
-        .get_field(TAG_LAST_QTY)
-        .ok_or(FixError::MissingField(TAG_LAST_QTY))?;
-    let last_qty_e2 = parse_fixed(&last_qty_str, 2, TAG_LAST_QTY)?;
-
-    let last_px_str = msg
-        .get_field(TAG_LAST_PX)
-        .ok_or(FixError::MissingField(TAG_LAST_PX))?;
-    let last_px_e9 = parse_fixed(&last_px_str, 9, TAG_LAST_PX)?;
+    let last_qty_e2 = match msg.get_field(TAG_LAST_QTY) {
+        Some(s) => parse_fixed(&s, 2, TAG_LAST_QTY)?,
+        None => 0,
+    };
+    let last_px_e9 = match msg.get_field(TAG_LAST_PX) {
+        Some(s) => parse_fixed(&s, 9, TAG_LAST_PX)?,
+        None => 0,
+    };
 
     Ok(ExecEvent {
         cl_ord_id,
@@ -200,6 +210,12 @@ fn hash20(s: &str) -> [u8; 20] {
 /// so integer division/modulo does the conversion exactly. Assumes
 /// non-negative input (this system never sends negative quantities/prices;
 /// direction is `Side`).
+///
+/// ponytail: the non-negative precondition is currently unguarded — negative
+/// input yields malformed FIX text (e.g. `fmt_fixed(-50, 2)` -> `"0.-50"`).
+/// Upgrade path is a one-line `debug_assert!(value_e_n >= 0, ...)` (matching
+/// the `apply_exec` domain-assert style) if a caller that could ever pass a
+/// negative appears. Note only for now — no caller can today.
 fn fmt_fixed(value_e_n: i64, decimals: u32) -> String {
     let scale = 10i64.pow(decimals);
     let whole = value_e_n / scale;
@@ -326,6 +342,25 @@ mod tests {
         assert_eq!(event.reported_status, OrderStatus::Filled);
         assert_eq!(event.last_qty_e2, 10_000);
         assert_eq!(event.last_px_e9, 150_500_000_000);
+    }
+
+    #[test]
+    fn exec_report_to_event_status_only_defaults_qty_and_px_to_zero() {
+        // A Rejected (39=8) report with no LastQty (32) / LastPx (31) --
+        // conditional fields, absent on a status-only report. Must convert
+        // cleanly (not error) and default the money fields to 0.
+        let mut msg = Message::new();
+        msg.with_header_mut(|h| h.set_field(TAG_MSG_TYPE, "8"))
+            .unwrap();
+        msg.set_field(TAG_CL_ORD_ID, "00000000000000000042")
+            .unwrap();
+        msg.set_field(TAG_EXEC_ID, "EXEC-1").unwrap();
+        msg.set_field(TAG_ORD_STATUS, "8").unwrap();
+
+        let event = exec_report_to_event(&msg).unwrap();
+        assert_eq!(event.reported_status, OrderStatus::Rejected);
+        assert_eq!(event.last_qty_e2, 0);
+        assert_eq!(event.last_px_e9, 0);
     }
 
     #[test]
