@@ -24,8 +24,11 @@ schema-check:
     ./scripts/schema-check.sh  # proto field-number lint + Avro BACKWARD compat vs registry
 
 # --- delta one (Rust) ----------------------------------------------------
-d1:
-    cd delta-one && cargo run -p d1-core
+# P1.M2 slice 2: places one CLI-driven startup order over FIX (stand-in for
+# the netting-driven emit that lands in P1.M3). Run `just sim-acceptor` in
+# another terminal first.
+d1 book="1" instrument="1001" side="buy" qty="10000" px="0":
+    cd delta-one && cargo run -p d1 -- --book {{book}} --instrument {{instrument}} --side {{side}} --qty {{qty}} --px {{px}}
 
 d1-release:
     cd delta-one && cargo build --release
@@ -43,6 +46,12 @@ ui:
 
 sim scenario="tracker-flow":
     cd delta-one && cargo run -p sim -- --scenario ../sim/scenarios/{{scenario}}.yaml
+
+# sim's FIX acceptor counterparty for `just d1` (P1.M2 slice 2), the
+# counterparty `d1-gateway-fix/initiator.cfg` connects to. fill_model:
+# immediate|partial|reject. Run before `just d1`.
+sim-acceptor fill_model="immediate":
+    cd delta-one && cargo run -p sim -- --mode acceptor --fill-model {{fill_model}}
 
 # --- quality gates -------------------------------------------------------
 test:

@@ -6,6 +6,7 @@ Delta One engine: linear hedging, firm-wide netting, execution, and the three ou
 
 | Crate            | Role | Hot path? |
 |------------------|------|-----------|
+| `d1`             | process binary: owns the core thread (`OrderStore` + `PositionKeeper`) and starts the gateways, wired together over `rtrb` rings (ADR-013) | no (hosts the hot path) |
 | `d1-core`        | market-data ingest, position keeper (incl. per-book cash, ADR-010), order state machine, risk checks | **yes** |
 | `d1-netting`     | firm-wide netting across books, internal-cross generation (ADR-005) | **yes** |
 | `d1-gateway-nats`| NATS in/out: consume EXO targets + UI commands, publish exec reports & risk | no |
@@ -13,9 +14,9 @@ Delta One engine: linear hedging, firm-wide netting, execution, and the three ou
 | `d1-posttrade`   | Kafka producer, Avro encoding, booking events (ADR-002) | no |
 | `d1-analytics`   | tracker analytics: ex-post TE, tracking difference, cash drag (ADR-010) | no |
 
-Threading model: one pinned thread per hot-path stage, communicating over bounded SPSC ring buffers (`rtrb` or `crossbeam` ArrayQueue — pick once, ADR it). Gateways run on separate threads/tokio runtimes and exchange data with the core only through those queues. The core never awaits.
+Threading model: one pinned thread per hot-path stage, communicating over bounded SPSC ring buffers, `rtrb` for every ring (ADR-013 — bounded `crossbeam-channel` rejected, its blocking ops lock and it's MPMC machinery this project never needs). Gateways run on separate threads/tokio runtimes and exchange data with the core only through those queues. The core never awaits. `rtrb` has no disconnect signal, so ring shutdown is an explicit `AtomicBool` flag checked each poll-loop iteration, not channel-close semantics.
 
-**Deferred to M2:** none of the above (pinned threads, SPSC rings, the `rtrb`-vs-`crossbeam` ADR) exists yet. P1.M1 built `d1-core`/`sim` single-threaded — there is nothing to decouple until the NATS/FIX/Kafka gateways show up in M2. The M1 feed ingest boundary (`MarketData::ingest`) is a direct function call, marked with a `ponytail:` comment in `crates/d1-core/src/feed.rs`; M2 replaces that call site with a ring, not the function signature.
+**M2 status:** Slice 2 (`feat/d1-fix-round-trip`) wired the first rings: `crates/d1` (new binary crate hosting the core thread + `d1-gateway-fix`) has two `rtrb` rings between the core thread and the FIX gateway (outbound `Order`, inbound `ExecEvent`). The core thread places one CLI-driven startup order as a stand-in for the netting-driven emit that lands in P1.M3 — there is no EXO target / netting yet. **Still deferred to Slice 3:** the feed-ingest ring and its producer thread — `MarketData::ingest` (`crates/d1-core/src/feed.rs`) stays a direct call until a real market-data transport shows up alongside `d1-gateway-nats`.
 
 ## The hot path contract (tick → order emit)
 
@@ -45,7 +46,7 @@ Enforcement: `cargo clippy` with `-D warnings` plus the lint set in `Cargo.toml`
 
 | Crate | Purpose | Allowed on hot path |
 |-------|---------|---------------------|
-| `rtrb` (or `crossbeam` queues) | SPSC rings | yes |
+| `rtrb` | SPSC rings (ADR-013) | yes |
 | `prost` | Protobuf (gateway side) | no |
 | `async-nats` | NATS client (official nats-io) | no |
 | `quickfix` | FIX 4.4 engine (C++ binding) | no |
@@ -54,6 +55,7 @@ Enforcement: `cargo clippy` with `-D warnings` plus the lint set in `Cargo.toml`
 | `proptest` | property tests | test-only |
 | `thiserror`, `anyhow` | errors | thiserror yes / anyhow no |
 | `uuid` (v7) | msg ids | generated off hot path, pre-fetched pool on |
+| `ctrlc` | Ctrl-C signal handler (`crates/d1`'s shutdown flag) | no -- registration happens once at startup on the main thread, never in a poll loop |
 
 Anything not in this table needs a row added here + a sentence of justification in the PR description.
 
