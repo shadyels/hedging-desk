@@ -9,8 +9,16 @@ import sys
 RULES = [
     (
         "enforce-branch-naming",
+        # Only branch *creation* is validated: `checkout -b <name>`,
+        # `switch -c <name>`, or bare `git branch <name>`. The `(?!-)` on the
+        # `branch` arm lets every flag form through — read-only/listing
+        # (`git branch`, `--show-current`, `-a`, `-v`, `--list`, `--merged`),
+        # delete (`-d`/`-D <name>`), and rename (`-m <name>`) — none of which
+        # are creating a new positional name. Rename-to-a-bad-name is not
+        # caught here; like the commit rule below, the local git hooks +
+        # review are the backstop for what this regex intentionally skips.
         re.compile(
-            r"git\s+(?:checkout\s+-b|switch\s+-c|branch)\s+"
+            r"git\s+(?:checkout\s+-b\s+|switch\s+-c\s+|branch\s+(?!-))"
             r"(?!(?:feat|fix|chore|docs|refactor|d1|exo|ui|protocol|sim)/)[^\s]+",
             re.IGNORECASE,
         ),
@@ -18,7 +26,9 @@ RULES = [
         "Branch names must be `type/scope-description`, using one of: `feat`, `fix`, `chore`, `docs`, "
         "`refactor` (workflow types) or `d1`, `exo`, `ui`, `protocol`, `sim` (component names) as the "
         "`type/` prefix, kept under 50 characters, e.g. `feat/d1-netting`, `fix/exo-calibration`, "
-        "`docs/adr-008`. Rename the branch to match and retry.",
+        "`docs/adr-008`. Rename the branch to match and retry.\n\n"
+        "This rule matches branch *creation* only (`checkout -b` / `switch -c` / `git branch <name>`); "
+        "flag forms like `git branch --show-current`, `-a`, or `-d <name>` are not affected.",
     ),
     (
         "enforce-commit-convention",
