@@ -9,3 +9,14 @@ workspace = true
 
 [dependencies]
 # Populate only from the approved dependency table in delta-one/CLAUDE.md.
+d1-core = { path = "../d1-core" }
+thiserror = "2"
+
+[dev-dependencies]
+criterion = "0.5"
+hdrhistogram = "7"
+proptest = "1"
+
+[[bench]]
+name = "netting"
+harness = false

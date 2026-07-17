@@ -404,6 +404,13 @@ dependencies = [
 [[package]]
 name = "d1-netting"
 version = "0.1.0"
+dependencies = [
+ "criterion",
+ "d1-core",
+ "hdrhistogram",
+ "proptest",
+ "thiserror",
+]
 
 [[package]]
 name = "d1-posttrade"
