@@ -13,8 +13,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use d1_core::{FeedTick, InstrumentId, MarketData, PositionKeeper};
+use d1_refdata::Universe;
 
-use crate::{refdata, refdata::Universe, scenario};
+use crate::scenario;
 
 fn to_fixed_e9(px: f64) -> i64 {
     (px * 1_000_000_000.0).round() as i64
@@ -27,7 +28,7 @@ pub fn run(scenario_path: &Path) -> Result<()> {
 
     let scenario_dir = scenario_path.parent().unwrap_or_else(|| Path::new("."));
     let universe_path = scenario_dir.join(&scenario.universe);
-    let universe = refdata::load(&universe_path)?;
+    let universe = d1_refdata::load(&universe_path)?;
 
     let mut market_data = MarketData::new(&universe.instrument_ids);
     // Stood up but not driven: fills arrive with the M2 order path.
