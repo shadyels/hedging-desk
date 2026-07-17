@@ -105,6 +105,35 @@ pub struct Fill {
     pub px_e9: i64,
 }
 
+/// Core -> NATS DTO: everything `d1-gateway-nats::convert::exec_report_to_pb`
+/// needs to build a proto `ExecutionReport`. Built by the core thread from
+/// the post-`apply_exec` `Order` plus the `ExecEvent` that produced it. Plain
+/// struct -- ADR-004, proto stays out of `d1-core`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecReport {
+    /// Which order this report describes.
+    pub cl_ord_id: ClOrdId,
+    /// The specific exec (fill or status-only change) this report carries.
+    pub exec_id: ExecId,
+    /// Book the order belongs to.
+    pub book: BookId,
+    /// Instrument traded.
+    pub instrument: InstrumentId,
+    /// Buy or sell.
+    pub side: Side,
+    /// Order status after this exec.
+    pub status: OrderStatus,
+    /// Quantity filled by this specific exec (0 for a non-fill status
+    /// change), fixed-point x10^2.
+    pub last_qty_e2: i64,
+    /// Price of this specific fill, fixed-point x10^9.
+    pub last_px_e9: i64,
+    /// Cumulative filled quantity, fixed-point x10^2.
+    pub cum_qty_e2: i64,
+    /// Remaining quantity, fixed-point x10^2.
+    pub leaves_qty_e2: i64,
+}
+
 /// Preallocated order store: `ClOrdId` -> `Order`, plus exec-id dedupe for
 /// idempotent replay (root CLAUDE.md invariant #4).
 pub struct OrderStore {

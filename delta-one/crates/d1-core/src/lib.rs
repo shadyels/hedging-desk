@@ -7,10 +7,12 @@ pub mod ids;
 pub mod keeper;
 pub mod market_data;
 pub mod order;
+pub mod target;
 
 pub use error::OrderError;
 pub use feed::FeedTick;
 pub use ids::{BookId, ClOrdId, ExecId, InstrumentId};
 pub use keeper::{Position, PositionKeeper, Side};
 pub use market_data::{MarketData, Quote};
-pub use order::{ExecEvent, Fill, Order, OrderStatus, OrderStore};
+pub use order::{ExecEvent, ExecReport, Fill, Order, OrderStatus, OrderStore};
+pub use target::{Target, target_to_order};

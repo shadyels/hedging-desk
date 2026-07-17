@@ -11,6 +11,15 @@ workspace = true
 # Populate only from the approved dependency table in delta-one/CLAUDE.md.
 d1-core = { path = "../d1-core" }
 d1-gateway-fix = { path = "../d1-gateway-fix" }
+d1-gateway-nats = { path = "../d1-gateway-nats" }
 rtrb = "0.3"
 anyhow = "1"
 ctrlc = "3"
+
+[dev-dependencies]
+# nats_round_trip.rs drives the gateway from the outside (publish a
+# TargetPosition as EXO would, subscribe ExecutionReport as UI/EXO would).
+async-nats = { version = "0.49", default-features = false }
+tokio = { version = "1", features = ["rt", "time"] }
+futures-util = "0.3"
+prost = "0.14"
