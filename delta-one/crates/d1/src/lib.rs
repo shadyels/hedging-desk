@@ -196,15 +196,46 @@ fn run_core(
 
         if let Ok(target) = target_rx.pop() {
             did_work = true;
-            if let Some(order) = target_to_order(&target, ClOrdId::from_seq(next_seq)) {
-                next_seq += 1;
-                store.place(order);
-                println!(
-                    "d1: target-driven order book={:?} instrument={:?} side={:?} qty_e2={}",
-                    order.book, order.instrument, order.side, order.order_qty_e2
-                );
-                if fix_outbound_tx.push(order).is_err() {
-                    eprintln!("d1: FIX outbound ring full, dropping target-driven order");
+            // The keeper's universe is the gate: `exo.targets.>` is a
+            // wildcard, so a target can name a (book, instrument) this
+            // process was never configured for. Placing that order would
+            // fill at the venue and then have nowhere to book -- a position
+            // lost in silence (root CLAUDE.md #2). Reject it instead.
+            match keeper.position(target.book, target.instrument) {
+                None => eprintln!(
+                    "d1: target for unconfigured book={:?} instrument={:?}, rejecting (not in this process's position universe)",
+                    target.book, target.instrument
+                ),
+                // ADR-005's `demand_b = target_b - position_b - inflight_b`,
+                // minus the in-flight term (see `target_to_order`).
+                Some(position) => {
+                    if let Some(order) =
+                        target_to_order(&target, position.net_qty_e2, ClOrdId::from_seq(next_seq))
+                    {
+                        // Push to the wire BEFORE recording the order: a
+                        // `place` that outlives a failed push leaves a
+                        // phantom `New` order the venue never saw, which
+                        // then poisons every in-flight calculation built on
+                        // the store.
+                        // ponytail: log-and-drop on a full ring, same
+                        // ceiling as every other ring in this binary -- a
+                        // single demo session, not a backpressure protocol.
+                        if fix_outbound_tx.push(order).is_err() {
+                            eprintln!("d1: FIX outbound ring full, dropping target-driven order");
+                        } else {
+                            next_seq += 1;
+                            store.place(order);
+                            println!(
+                                "d1: target-driven order book={:?} instrument={:?} side={:?} qty_e2={} (target={} position={})",
+                                order.book,
+                                order.instrument,
+                                order.side,
+                                order.order_qty_e2,
+                                target.target_qty_e2,
+                                position.net_qty_e2
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -214,37 +245,58 @@ fn run_core(
             match store.apply_exec(&event) {
                 Ok(fill) => {
                     if let Some(fill) = fill {
-                        keeper.apply_fill(
-                            fill.book,
-                            fill.instrument,
-                            fill.side,
-                            fill.qty_e2,
-                            fill.px_e9,
-                        );
-                        println!(
-                            "d1: fill qty_e2={} px_e9={} book={:?} instrument={:?}",
-                            fill.qty_e2, fill.px_e9, fill.book, fill.instrument
-                        );
+                        // A `None` here means the fill was never booked
+                        // (unknown book/instrument, or a cost-basis
+                        // overflow). The position is real either way, so
+                        // this can never pass quietly (root CLAUDE.md #2).
+                        if keeper
+                            .apply_fill(
+                                fill.book,
+                                fill.instrument,
+                                fill.side,
+                                fill.qty_e2,
+                                fill.px_e9,
+                            )
+                            .is_none()
+                        {
+                            eprintln!(
+                                "d1: FILL NOT BOOKED book={:?} instrument={:?} side={:?} qty_e2={} px_e9={} -- unknown book/instrument or overflow; firm position is now understated",
+                                fill.book, fill.instrument, fill.side, fill.qty_e2, fill.px_e9
+                            );
+                        } else {
+                            println!(
+                                "d1: fill qty_e2={} px_e9={} book={:?} instrument={:?}",
+                                fill.qty_e2, fill.px_e9, fill.book, fill.instrument
+                            );
+                        }
                     }
                     // ponytail: log-and-drop on a full ring, same ceiling as
                     // every other ring in this binary -- a single demo
                     // session, not a backpressure protocol yet.
-                    if let Some(order) = store.get(event.cl_ord_id) {
-                        let report = ExecReport {
-                            cl_ord_id: event.cl_ord_id,
-                            exec_id: event.exec_id,
-                            book: order.book,
-                            instrument: order.instrument,
-                            side: order.side,
-                            status: order.status,
-                            last_qty_e2: event.last_qty_e2,
-                            last_px_e9: event.last_px_e9,
-                            cum_qty_e2: order.cum_qty_e2,
-                            leaves_qty_e2: order.leaves_qty_e2,
-                        };
-                        if exec_report_tx.push(report).is_err() {
-                            eprintln!("d1: NATS outbound ring full, dropping ExecutionReport");
+                    match store.get(event.cl_ord_id) {
+                        Some(order) => {
+                            let report = ExecReport {
+                                cl_ord_id: event.cl_ord_id,
+                                exec_id: event.exec_id,
+                                book: order.book,
+                                instrument: order.instrument,
+                                side: order.side,
+                                status: order.status,
+                                last_qty_e2: event.last_qty_e2,
+                                last_px_e9: event.last_px_e9,
+                                cum_qty_e2: order.cum_qty_e2,
+                                leaves_qty_e2: order.leaves_qty_e2,
+                            };
+                            if exec_report_tx.push(report).is_err() {
+                                eprintln!("d1: NATS outbound ring full, dropping ExecutionReport");
+                            }
                         }
+                        // Unreachable while `apply_exec` resolves the same
+                        // id it just returned Ok for -- but if that ever
+                        // stops holding, the report must not vanish mutely.
+                        None => eprintln!(
+                            "d1: apply_exec succeeded but order is gone from the store, ExecutionReport not published"
+                        ),
                     }
                 }
                 Err(err) => eprintln!("d1: apply_exec error: {err}"),

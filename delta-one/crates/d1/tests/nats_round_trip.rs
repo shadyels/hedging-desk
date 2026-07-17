@@ -31,9 +31,43 @@ use prost::Message;
 const NATS_URL: &str = "127.0.0.1:4222";
 const FIX_PORT: u16 = 15_028;
 const ROUND_TRIP_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long to wait for a (forbidden) second report after a redelivery.
+const DUP_QUIET_WINDOW: Duration = Duration::from_secs(3);
 // `d1::run_core` places the CLI startup order as ClOrdId seq 1, then hands
 // out seq 2 to the first NATS-driven target -- see lib.rs's `next_seq`.
+const STARTUP_CL_ORD_ID: &str = "00000000000000000001";
 const TARGET_DRIVEN_CL_ORD_ID: &str = "00000000000000000002";
+/// Startup order size; establishes a position the target must net against.
+const STARTUP_QTY_E2: i64 = 100;
+/// Absolute target position EXO asks for, well above `STARTUP_QTY_E2`.
+const TARGET_QTY_E2: i64 = 5_000;
+
+/// Read from `subscriber` until a report for `cl_ord_id` arrives, panicking
+/// on `ROUND_TRIP_TIMEOUT`. Reports for other orders are skipped, not failed.
+async fn await_report(subscriber: &mut async_nats::Subscriber, cl_ord_id: &str) -> ExecutionReport {
+    let deadline = Instant::now() + ROUND_TRIP_TIMEOUT;
+    loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .unwrap_or_default();
+        assert!(
+            !remaining.is_zero(),
+            "no ExecutionReport for cl_ord_id={cl_ord_id} within {ROUND_TRIP_TIMEOUT:?}"
+        );
+        match tokio::time::timeout(remaining, subscriber.next()).await {
+            Ok(Some(msg)) => {
+                let report = ExecutionReport::decode(msg.payload).expect("decode ExecutionReport");
+                if report.cl_ord_id == cl_ord_id {
+                    return report;
+                }
+            }
+            Ok(None) => panic!("subscription ended early"),
+            Err(_) => {
+                panic!("no ExecutionReport for cl_ord_id={cl_ord_id} within {ROUND_TRIP_TIMEOUT:?}")
+            }
+        }
+    }
+}
 
 struct SimAcceptor {
     child: Child,
@@ -160,7 +194,7 @@ fn target_position_round_trips_to_execution_report() {
             book: BookId(1),
             instrument: InstrumentId(1001),
             side: Side::Buy,
-            qty_e2: 100, // small startup order, distinct from the target-driven one below
+            qty_e2: STARTUP_QTY_E2,
             px_e9: 0,
         },
         FixConfig {
@@ -183,6 +217,28 @@ fn target_position_round_trips_to_execution_report() {
             .subscribe("d1.exec.1.1001")
             .await
             .expect("subscribe d1.exec.1.1001");
+        // `exo.targets.>` is a wildcard, but this process only has keeper
+        // slots for book 1 / instrument 1001. Watch the off-universe exec
+        // subject: an order placed there would fill at the venue with nowhere
+        // to book the position (root CLAUDE.md #2), and its report would show
+        // up here.
+        let mut off_universe = client
+            .subscribe("d1.exec.2.2001")
+            .await
+            .expect("subscribe d1.exec.2.2001");
+
+        // Wait for the startup order's own report before publishing the
+        // target. Core NATS doesn't queue for a subscriber that isn't
+        // registered yet, and `d1::spawn`'s gateway needs a moment to connect
+        // + subscribe -- but `run_gateway_async` subscribes to `exo.targets.>`
+        // *before* it ever publishes an exec report, so seeing seq 1's report
+        // proves the target subscription is already live. It also proves the
+        // startup fill is booked (the core books the fill before pushing the
+        // report), which is what makes the target-driven quantity below
+        // deterministic rather than a race.
+        let startup = await_report(&mut subscriber, STARTUP_CL_ORD_ID).await;
+        assert_eq!(startup.status, OrdStatus::Filled as i32);
+        assert_eq!(startup.cum_qty_e2, STARTUP_QTY_E2);
 
         let target = TargetPosition {
             meta: Some(Meta {
@@ -196,58 +252,71 @@ fn target_position_round_trips_to_execution_report() {
                 instrument_id: 1001,
                 ..Default::default()
             }),
-            target_qty_e2: 5_000, // 50.00 units, buy (positive)
+            target_qty_e2: TARGET_QTY_E2, // absolute desired position, not a delta
             ..Default::default()
         };
         let payload = target.encode_to_vec();
-
-        // Core NATS pub/sub doesn't queue for a subscriber that isn't
-        // registered yet -- `d1::spawn`'s NATS gateway thread needs a moment
-        // to connect + subscribe after `spawn` returns, so a single publish
-        // can race it and be silently dropped. Republish whenever a full
-        // window passes with nothing at all on the exec subject (that
-        // signals the first publish never landed, not just that the
-        // matching report hasn't shown up yet -- the startup order's own
-        // report arrives first regardless, proving the subscription is
-        // alive, so once anything arrives we stop republishing).
-        const RETRY_WINDOW: Duration = Duration::from_secs(2);
-        let deadline = Instant::now() + ROUND_TRIP_TIMEOUT;
         client
             .publish("exo.targets.1.1001", payload.clone().into())
             .await
             .expect("publish TargetPosition");
 
-        loop {
-            assert!(
-                Instant::now() < deadline,
-                "ExecutionReport for the target-driven order never arrived"
+        let report = await_report(&mut subscriber, TARGET_DRIVEN_CL_ORD_ID).await;
+
+        // Redelivery is explicitly allowed (root CLAUDE.md #4), so the same
+        // msg_id going out twice must not place a second order. Nothing more
+        // may arrive on the exec subject after this.
+        client
+            .publish("exo.targets.1.1001", payload.into())
+            .await
+            .expect("republish TargetPosition");
+        if let Ok(Some(msg)) = tokio::time::timeout(DUP_QUIET_WINDOW, subscriber.next()).await {
+            let extra = ExecutionReport::decode(msg.payload).expect("decode ExecutionReport");
+            panic!(
+                "redelivered TargetPosition produced a second order: cl_ord_id={} cum_qty_e2={}",
+                extra.cl_ord_id, extra.cum_qty_e2
             );
-            match tokio::time::timeout(RETRY_WINDOW, subscriber.next()).await {
-                Ok(Some(msg)) => {
-                    let report =
-                        ExecutionReport::decode(msg.payload).expect("decode ExecutionReport");
-                    if report.cl_ord_id == TARGET_DRIVEN_CL_ORD_ID {
-                        break report;
-                    }
-                    // Not our target-driven order's report (e.g. the CLI
-                    // startup order's) -- subscription is alive, keep
-                    // waiting without republishing.
-                }
-                Ok(None) => panic!("subscription ended early"),
-                Err(_) => {
-                    client
-                        .publish("exo.targets.1.1001", payload.clone().into())
-                        .await
-                        .expect("republish TargetPosition");
-                }
-            }
         }
+
+        // A target naming a book/instrument this process has no keeper slot
+        // for must be rejected outright, not traded and then silently left
+        // unbooked.
+        let stray = TargetPosition {
+            meta: Some(Meta {
+                msg_id: "test-target-off-universe".to_string(),
+                producer: "test".to_string(),
+                sent_ns: 1,
+                schema_version: 1,
+            }),
+            book_id: 2,
+            instrument: Some(InstrumentRef {
+                instrument_id: 2001,
+                ..Default::default()
+            }),
+            target_qty_e2: 7_000,
+            ..Default::default()
+        };
+        client
+            .publish("exo.targets.2.2001", stray.encode_to_vec().into())
+            .await
+            .expect("publish off-universe TargetPosition");
+        if let Ok(Some(msg)) = tokio::time::timeout(DUP_QUIET_WINDOW, off_universe.next()).await {
+            let extra = ExecutionReport::decode(msg.payload).expect("decode ExecutionReport");
+            panic!(
+                "target for unconfigured book/instrument was traded anyway: cl_ord_id={} book={} cum_qty_e2={} -- that position has nowhere to book",
+                extra.cl_ord_id, extra.book_id, extra.cum_qty_e2
+            );
+        }
+
+        report
     });
 
     assert_eq!(report.status, OrdStatus::Filled as i32);
     assert_eq!(report.book_id, 1);
     assert_eq!(report.instrument.as_ref().unwrap().instrument_id, 1001);
-    assert_eq!(report.cum_qty_e2, 5_000);
+    // The target is absolute: D1 must trade only the shortfall between it and
+    // the position the startup order already established, not the full target.
+    assert_eq!(report.cum_qty_e2, TARGET_QTY_E2 - STARTUP_QTY_E2);
     assert_eq!(report.leaves_qty_e2, 0);
 
     shutdown.store(true, Ordering::Relaxed);

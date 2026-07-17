@@ -12,7 +12,10 @@ workspace = true
 d1-core = { path = "../d1-core" }
 prost = "0.14"
 async-nats = { version = "0.49", default-features = false }
-tokio = { version = "1", features = ["rt", "time"] }
+# "net": `run_gateway` builds its runtime with `enable_all()`, and the IO
+# driver async-nats needs is feature-gated. It currently resolves only via
+# async-nats's own tokio features unifying in; declare what we use.
+tokio = { version = "1", features = ["rt", "time", "net"] }
 futures-util = "0.3"
 rtrb = "0.3"
 thiserror = "2"
