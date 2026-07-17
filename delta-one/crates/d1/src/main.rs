@@ -24,16 +24,33 @@ const TARGET_COMP_ID: &str = "SIM";
 const DEFAULT_INITIATOR_CFG: &str = "crates/d1-gateway-fix/initiator.cfg";
 /// NATS client port (`deploy/docker-compose.yml`).
 const DEFAULT_NATS_URL: &str = "127.0.0.1:4222";
+/// Relative to `delta-one/`, this binary's cwd (`justfile`'s `cd delta-one && cargo run -p d1`).
+const DEFAULT_UNIVERSE: &str = "../protocol/refdata/universe.json";
 const MAIN_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 struct Args {
     startup: StartupOrder,
     cfg: PathBuf,
     nats_url: String,
+    universe: PathBuf,
 }
 
 fn main() -> Result<()> {
     let args = parse_args()?;
+
+    let universe = d1_refdata::load(&args.universe).context("loading universe refdata")?;
+    // ADR-005 §4: the cross reference-price policy is compliance-visible and
+    // must never be a silent default. Parse it at startup so a typo in refdata
+    // kills the process here rather than mispricing internal risk transfers.
+    // ponytail: validated-only this slice — the netting engine is unwired
+    // (target_to_order still stands). Slice 2 threads the parsed policy into
+    // the netting cycle; today parsing it IS the gate.
+    let _policy: d1_netting::RefPxPolicy = universe.cross_px_policy.parse().with_context(|| {
+        format!(
+            "unknown cross_px_policy in refdata: {:?}",
+            universe.cross_px_policy
+        )
+    })?;
 
     let shutdown = Arc::new(AtomicBool::new(false));
     {
@@ -50,6 +67,8 @@ fn main() -> Result<()> {
             target_comp_id: TARGET_COMP_ID.to_string(),
         },
         args.nats_url,
+        universe.book_ids,
+        universe.instrument_ids,
         &shutdown,
     );
 
@@ -90,6 +109,7 @@ fn parse_args() -> Result<Args> {
     let mut px_e9: i64 = 0;
     let mut cfg = PathBuf::from(DEFAULT_INITIATOR_CFG);
     let mut nats_url = DEFAULT_NATS_URL.to_string();
+    let mut universe = PathBuf::from(DEFAULT_UNIVERSE);
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -129,6 +149,7 @@ fn parse_args() -> Result<Args> {
             }
             "--cfg" => cfg = PathBuf::from(next_arg(&mut args, "--cfg")?),
             "--nats-url" => nats_url = next_arg(&mut args, "--nats-url")?,
+            "--universe" => universe = PathBuf::from(next_arg(&mut args, "--universe")?),
             other => bail!("unknown argument '{other}'"),
         }
     }
@@ -145,6 +166,7 @@ fn parse_args() -> Result<Args> {
         },
         cfg,
         nats_url,
+        universe,
     })
 }
 

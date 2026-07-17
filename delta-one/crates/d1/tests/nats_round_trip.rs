@@ -37,10 +37,16 @@ const DUP_QUIET_WINDOW: Duration = Duration::from_secs(3);
 // out seq 2 to the first NATS-driven target -- see lib.rs's `next_seq`.
 const STARTUP_CL_ORD_ID: &str = "00000000000000000001";
 const TARGET_DRIVEN_CL_ORD_ID: &str = "00000000000000000002";
+/// The next order after the startup + book-1 target, i.e. the book-2 target
+/// below (see `d1::run_core`'s `next_seq`).
+const BOOK2_TARGET_CL_ORD_ID: &str = "00000000000000000003";
 /// Startup order size; establishes a position the target must net against.
 const STARTUP_QTY_E2: i64 = 100;
 /// Absolute target position EXO asks for, well above `STARTUP_QTY_E2`.
 const TARGET_QTY_E2: i64 = 5_000;
+/// Absolute target position for book 2 / instrument 2001 -- in-universe, no
+/// prior position, so demand = this value minus zero.
+const BOOK2_TARGET_QTY_E2: i64 = 3_000;
 
 /// Read from `subscriber` until a report for `cl_ord_id` arrives, panicking
 /// on `ROUND_TRIP_TIMEOUT`. Reports for other orders are skipped, not failed.
@@ -87,6 +93,12 @@ fn workspace_root() -> PathBuf {
         .parent()
         .expect("delta-one dir")
         .to_path_buf()
+}
+
+/// Same path shape as `d1-refdata`'s own unit test: from `crates/d1` up to
+/// the repo root, then into `protocol/refdata/universe.json`.
+fn universe_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../protocol/refdata/universe.json")
 }
 
 fn write_cfg(dir: &Path, filename: &str, contents: &str) -> PathBuf {
@@ -188,6 +200,8 @@ fn target_position_round_trips_to_execution_report() {
     let _sim = spawn_sim_acceptor(&acceptor_cfg_path);
     wait_for_port(FIX_PORT, ROUND_TRIP_TIMEOUT);
 
+    let universe = d1_refdata::load(&universe_path()).expect("load universe refdata");
+
     let shutdown = Arc::new(AtomicBool::new(false));
     let handles = spawn(
         StartupOrder {
@@ -203,6 +217,8 @@ fn target_position_round_trips_to_execution_report() {
             target_comp_id: target_comp_id(),
         },
         NATS_URL.to_string(),
+        universe.book_ids,
+        universe.instrument_ids,
         &shutdown,
     );
 
@@ -217,15 +233,21 @@ fn target_position_round_trips_to_execution_report() {
             .subscribe("d1.exec.1.1001")
             .await
             .expect("subscribe d1.exec.1.1001");
-        // `exo.targets.>` is a wildcard, but this process only has keeper
-        // slots for book 1 / instrument 1001. Watch the off-universe exec
-        // subject: an order placed there would fill at the venue with nowhere
-        // to book the position (root CLAUDE.md #2), and its report would show
-        // up here.
-        let mut off_universe = client
+        // Book 2 / instrument 2001 is in-universe (protocol/refdata/universe.json)
+        // but is not the CLI startup pair -- the keeper/market-data universe
+        // swap (P1.M3 slice 1) is what makes an order here bookable at all.
+        let mut book2_subscriber = client
             .subscribe("d1.exec.2.2001")
             .await
             .expect("subscribe d1.exec.2.2001");
+        // book 99 / instrument 999999 are in no book/instrument index in
+        // universe.json: the keeper returns `None` for them, so the
+        // wildcard-target guard rejects -- a position with nowhere to book
+        // (root CLAUDE.md #2). This subject must never see a report.
+        let mut off_universe = client
+            .subscribe("d1.exec.99.999999")
+            .await
+            .expect("subscribe d1.exec.99.999999");
 
         // Wait for the startup order's own report before publishing the
         // target. Core NATS doesn't queue for a subscriber that isn't
@@ -278,12 +300,13 @@ fn target_position_round_trips_to_execution_report() {
             );
         }
 
-        // A target naming a book/instrument this process has no keeper slot
-        // for must be rejected outright, not traded and then silently left
-        // unbooked.
-        let stray = TargetPosition {
+        // Book 2 / instrument 2001: in-universe, not the startup pair, no
+        // prior position. The universe swap means this now gets a keeper
+        // slot and the target is ACCEPTED -- the headline proof this slice's
+        // universe wiring works.
+        let book2_target = TargetPosition {
             meta: Some(Meta {
-                msg_id: "test-target-off-universe".to_string(),
+                msg_id: "test-target-book2".to_string(),
                 producer: "test".to_string(),
                 sent_ns: 1,
                 schema_version: 1,
@@ -293,11 +316,43 @@ fn target_position_round_trips_to_execution_report() {
                 instrument_id: 2001,
                 ..Default::default()
             }),
+            target_qty_e2: BOOK2_TARGET_QTY_E2, // absolute; no prior position, so demand = this value
+            ..Default::default()
+        };
+        client
+            .publish("exo.targets.2.2001", book2_target.encode_to_vec().into())
+            .await
+            .expect("publish book-2 TargetPosition");
+        let book2_report = await_report(&mut book2_subscriber, BOOK2_TARGET_CL_ORD_ID).await;
+        assert_eq!(book2_report.status, OrdStatus::Filled as i32);
+        assert_eq!(book2_report.book_id, 2);
+        assert_eq!(
+            book2_report.instrument.as_ref().unwrap().instrument_id,
+            2001
+        );
+        assert_eq!(book2_report.cum_qty_e2, BOOK2_TARGET_QTY_E2);
+        assert_eq!(book2_report.leaves_qty_e2, 0);
+
+        // A target naming a book/instrument genuinely outside universe.json
+        // (no book/instrument index entry at all) must still be rejected
+        // outright, not traded and then silently left unbooked.
+        let stray = TargetPosition {
+            meta: Some(Meta {
+                msg_id: "test-target-off-universe".to_string(),
+                producer: "test".to_string(),
+                sent_ns: 1,
+                schema_version: 1,
+            }),
+            book_id: 99,
+            instrument: Some(InstrumentRef {
+                instrument_id: 999_999,
+                ..Default::default()
+            }),
             target_qty_e2: 7_000,
             ..Default::default()
         };
         client
-            .publish("exo.targets.2.2001", stray.encode_to_vec().into())
+            .publish("exo.targets.99.999999", stray.encode_to_vec().into())
             .await
             .expect("publish off-universe TargetPosition");
         if let Ok(Some(msg)) = tokio::time::timeout(DUP_QUIET_WINDOW, off_universe.next()).await {

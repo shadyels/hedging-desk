@@ -357,6 +357,8 @@ dependencies = [
  "d1-core",
  "d1-gateway-fix",
  "d1-gateway-nats",
+ "d1-netting",
+ "d1-refdata",
  "futures-util",
  "prost",
  "rtrb",
