@@ -52,6 +52,22 @@ fn main() -> Result<()> {
         )
     })?;
 
+    // The keeper's universe now comes from refdata, decoupled from the CLI
+    // startup order's identity. Unlike NATS targets (gated in run_core), the
+    // startup order is placed unconditionally -- so a --book/--instrument pair
+    // absent from the universe would fill at the venue with nowhere to book it
+    // (root invariant #2: firm position silently understated). Reject at
+    // startup, same fail-loud posture as the policy gate above.
+    if !universe.book_ids.contains(&args.startup.book)
+        || !universe.instrument_ids.contains(&args.startup.instrument)
+    {
+        bail!(
+            "startup order book={:?} instrument={:?} is not in universe refdata",
+            args.startup.book,
+            args.startup.instrument
+        );
+    }
+
     let shutdown = Arc::new(AtomicBool::new(false));
     {
         let shutdown = Arc::clone(&shutdown);

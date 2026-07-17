@@ -31,6 +31,16 @@ pub enum RefdataError {
         #[source]
         source: serde_json::Error,
     },
+    /// A required refdata array (`books` or `instruments`) was empty. A
+    /// process started against an empty universe would have zero keeper slots
+    /// and silently trade nothing — fail loud instead of starting degraded.
+    #[error("universe refdata at {path:?} has an empty `{field}` array")]
+    Empty {
+        /// Path whose array was empty.
+        path: PathBuf,
+        /// Which required array was empty (`books` or `instruments`).
+        field: &'static str,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,6 +98,19 @@ fn parse(path: &Path, raw: &str) -> Result<Universe, RefdataError> {
         source,
     })?;
 
+    if parsed.books.is_empty() {
+        return Err(RefdataError::Empty {
+            path: path.to_path_buf(),
+            field: "books",
+        });
+    }
+    if parsed.instruments.is_empty() {
+        return Err(RefdataError::Empty {
+            path: path.to_path_buf(),
+            field: "instruments",
+        });
+    }
+
     let book_ids = parsed.books.iter().map(|b| BookId(b.book_id)).collect();
     let instrument_ids = parsed
         .instruments
@@ -138,5 +161,31 @@ mod tests {
         }"#;
         let err = parse(Path::new("test.json"), raw).unwrap_err();
         assert!(matches!(err, RefdataError::Parse { .. }));
+    }
+
+    #[test]
+    fn empty_books_or_instruments_is_an_error() {
+        let empty_books = r#"{
+            "books": [],
+            "instruments": [{"instrument_id": 1001, "symbol": "AAPL"}],
+            "conventions": {"cross_px_policy_default": "ARRIVAL_MID"}
+        }"#;
+        assert!(matches!(
+            parse(Path::new("test.json"), empty_books).unwrap_err(),
+            RefdataError::Empty { field: "books", .. }
+        ));
+
+        let empty_instruments = r#"{
+            "books": [{"book_id": 1}],
+            "instruments": [],
+            "conventions": {"cross_px_policy_default": "ARRIVAL_MID"}
+        }"#;
+        assert!(matches!(
+            parse(Path::new("test.json"), empty_instruments).unwrap_err(),
+            RefdataError::Empty {
+                field: "instruments",
+                ..
+            }
+        ));
     }
 }

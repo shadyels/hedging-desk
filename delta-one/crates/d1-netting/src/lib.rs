@@ -26,9 +26,10 @@ pub const MAX_BOOKS: usize = 16;
 // and so cannot be implemented today regardless. ADR-005 §4 also specifies
 // the policy "per instrument class", but no such per-class map exists in
 // `protocol/refdata/universe.json` yet — today it is one policy for the
-// whole cycle, passed in by the caller (`d1.toml`'s `[netting]` config per
-// docs/ROADMAP.md); the upgrade path is a `InstrumentClass -> RefPxPolicy`
-// lookup once that refdata exists.
+// whole cycle, passed in by the caller (`d1` reads it from refdata's
+// `conventions.cross_px_policy_default` and validates it at startup); the
+// upgrade path is a `InstrumentClass -> RefPxPolicy` lookup once that
+// refdata exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefPxPolicy {
     /// Arrival mid at netting-cycle start (ADR-005 §4 default).
@@ -221,8 +222,16 @@ pub fn net(
                 n_longs += 1;
             }
         } else if d.demand_e2 < 0 {
+            // `i64::MIN.abs()` overflows (its magnitude doesn't fit in `i64`):
+            // wraps back to `i64::MIN` (still negative) in a release build
+            // (no overflow-checks), or panics in a debug build. Either way
+            // `demand_e2` is untrusted EXO wire input, so this must be a
+            // `checked_abs` -> `Err` at the boundary, not a trap that only
+            // gets caught by a later `checked_sub` after already writing a
+            // corrupted (negative) "qty" into a matched cross record.
+            let magnitude = d.demand_e2.checked_abs().ok_or(NettingError::Overflow)?;
             if let Some(slot) = shorts.get_mut(n_shorts) {
-                *slot = (d.book, d.demand_e2.abs());
+                *slot = (d.book, magnitude);
                 n_shorts += 1;
             }
         }
@@ -282,7 +291,17 @@ pub fn net(
     // §2: the band is on the external order; crosses pay no spread, so
     // banding them would only leave books mismatched with each other for no
     // saving).
-    let external_suppressed = net_external_e2.abs() <= band_e2;
+    // Same `i64::MIN.abs()` overflow class as the per-book demand guard above,
+    // but here on the checked-add *sum*: two non-MIN demands (e.g. two of
+    // ~-4.6e18) can land net_external_e2 exactly on i64::MIN, which the
+    // per-book guard never sees. Left unchecked, `i64::MIN <= band_e2` is
+    // always true (band_e2 >= 0 is enforced) and would silently suppress a
+    // large legitimate external order -- the "hedge silently doesn't happen"
+    // failure this file's band `ponytail:` comment warns about.
+    let net_external_abs = net_external_e2
+        .checked_abs()
+        .ok_or(NettingError::Overflow)?;
+    let external_suppressed = net_external_abs <= band_e2;
     let net_external_e2 = if external_suppressed {
         0
     } else {
@@ -442,6 +461,53 @@ mod tests {
             px_e9: 0,
             policy: RefPxPolicy::ArrivalMid,
         }; 4];
+        let err = net(&demands, 1, RefPxPolicy::ArrivalMid, &mut out).unwrap_err();
+        assert_eq!(err, NettingError::Overflow);
+    }
+
+    #[test]
+    fn i64_min_short_demand_errors_cleanly() {
+        // `i64::MIN` has no positive counterpart in `i64` (its magnitude
+        // doesn't fit), so a naive `.abs()` either panics (debug) or wraps
+        // back to a negative value (release, no overflow-checks) instead of
+        // erroring. `demand_e2` is untrusted EXO wire input -- this must
+        // surface as `NettingError::Overflow`, and it must do so before ever
+        // writing a corrupted (negative) "qty" into `out_crosses`, not after.
+        let demands = [demand(1, 1_000, 0), demand(2, i64::MIN, 0)];
+        let mut out = [Cross {
+            buy_book: BookId(0),
+            sell_book: BookId(0),
+            qty_e2: 0,
+            px_e9: 0,
+            policy: RefPxPolicy::ArrivalMid,
+        }; 4];
+        let err = net(&demands, 1, RefPxPolicy::ArrivalMid, &mut out).unwrap_err();
+        assert_eq!(err, NettingError::Overflow);
+        // No corrupted cross record was written before the error.
+        assert_eq!(out[0].qty_e2, 0);
+
+        // Same instrument, no opposing long at all: the matching loop would
+        // never visit the short side in the old code, silently returning
+        // `Ok` while `shorts` held a wrapped-negative magnitude. Must still
+        // error, not succeed quietly.
+        let lone_short = [demand(2, i64::MIN, 0)];
+        let mut out2 = out;
+        let err2 = net(&lone_short, 1, RefPxPolicy::ArrivalMid, &mut out2).unwrap_err();
+        assert_eq!(err2, NettingError::Overflow);
+    }
+
+    #[test]
+    fn net_external_sum_at_i64_min_errors_cleanly() {
+        // No single demand is i64::MIN, so the per-book guard never fires --
+        // but two same-side demands of i64::MIN/2 checked-add to exactly
+        // i64::MIN, and the band comparison's `.abs()` on that overflows.
+        // Must surface as Overflow, not silently suppress the external order
+        // via `i64::MIN <= band_e2` (always true). No opposing side, so no
+        // cross buffer needed.
+        let half = i64::MIN / 2;
+        assert_eq!(half.checked_mul(2), Some(i64::MIN)); // exact, no rounding
+        let demands = [demand(1, half, 0), demand(2, half, 0)];
+        let mut out: [Cross; 0] = [];
         let err = net(&demands, 1, RefPxPolicy::ArrivalMid, &mut out).unwrap_err();
         assert_eq!(err, NettingError::Overflow);
     }
