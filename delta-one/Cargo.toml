@@ -4,6 +4,7 @@ members = [
   "crates/d1",
   "crates/d1-core",
   "crates/d1-netting",
+  "crates/d1-refdata",
   "crates/d1-gateway-nats",
   "crates/d1-gateway-fix",
   "crates/d1-posttrade",

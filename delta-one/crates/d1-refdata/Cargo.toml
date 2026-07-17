@@ -1,5 +1,5 @@
 [package]
-name = "d1-netting"
+name = "d1-refdata"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -10,13 +10,6 @@ workspace = true
 [dependencies]
 # Populate only from the approved dependency table in delta-one/CLAUDE.md.
 d1-core = { path = "../d1-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
-
-[dev-dependencies]
-criterion = "0.5"
-hdrhistogram = "7"
-proptest = "1"
-
-[[bench]]
-name = "netting"
-harness = false

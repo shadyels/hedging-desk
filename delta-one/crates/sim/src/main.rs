@@ -3,7 +3,6 @@
 //! Implemented in P1.M1–P1.M2 (docs/ROADMAP.md). M1: `replay` mode only.
 
 mod acceptor;
-mod refdata;
 mod replay;
 mod scenario;
 

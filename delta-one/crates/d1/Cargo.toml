@@ -12,6 +12,8 @@ workspace = true
 d1-core = { path = "../d1-core" }
 d1-gateway-fix = { path = "../d1-gateway-fix" }
 d1-gateway-nats = { path = "../d1-gateway-nats" }
+d1-refdata = { path = "../d1-refdata" }
+d1-netting = { path = "../d1-netting" }
 rtrb = "0.3"
 anyhow = "1"
 ctrlc = "3"

@@ -357,6 +357,8 @@ dependencies = [
  "d1-core",
  "d1-gateway-fix",
  "d1-gateway-nats",
+ "d1-netting",
+ "d1-refdata",
  "futures-util",
  "prost",
  "rtrb",
@@ -404,10 +406,27 @@ dependencies = [
 [[package]]
 name = "d1-netting"
 version = "0.1.0"
+dependencies = [
+ "criterion",
+ "d1-core",
+ "hdrhistogram",
+ "proptest",
+ "thiserror",
+]
 
 [[package]]
 name = "d1-posttrade"
 version = "0.1.0"
+
+[[package]]
+name = "d1-refdata"
+version = "0.1.0"
+dependencies = [
+ "d1-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "dispatch2"
@@ -1401,9 +1420,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "d1-core",
+ "d1-refdata",
  "quickfix",
  "serde",
- "serde_json",
  "serde_yaml",
 ]
 

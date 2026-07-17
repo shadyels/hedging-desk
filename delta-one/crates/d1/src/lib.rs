@@ -71,11 +71,20 @@ pub struct RunHandles {
 /// Build the `rtrb` rings (ADR-013) and spawn the core/FIX/NATS/feed
 /// threads. Blocks on nothing itself -- the caller decides how/when to flip
 /// `shutdown` and joins the returned handles.
+///
+/// `book_ids`/`instrument_ids` are the keeper/market-data universe (P1.M3
+/// slice 1: loaded from `protocol/refdata/universe.json` via `d1-refdata` by
+/// the caller). `startup.book`/`startup.instrument` must be included in
+/// these lists for the startup order to book anywhere -- the wildcard-target
+/// guard in `run_core` already handles a startup pair that isn't configured,
+/// so `spawn` does not re-validate that here.
 #[must_use]
 pub fn spawn(
     startup: StartupOrder,
     fix_cfg: FixConfig,
     nats_url: String,
+    book_ids: Vec<BookId>,
+    instrument_ids: Vec<InstrumentId>,
     shutdown: &Arc<AtomicBool>,
 ) -> RunHandles {
     let (fix_outbound_tx, fix_outbound_rx) = rtrb::RingBuffer::<Order>::new(RING_CAPACITY);
@@ -93,6 +102,8 @@ pub fn spawn(
             target_rx,
             exec_report_tx,
             feed_rx,
+            book_ids,
+            instrument_ids,
             &core_shutdown,
         );
     });
@@ -134,6 +145,11 @@ pub fn spawn(
 /// `PositionKeeper::apply_fill`. Manual-verification `println!`s only, same
 /// as Slice 2 -- not the benchmarked hot path
 /// (`d1-core/benches/hot_path.rs` covers that).
+///
+/// `book_ids`/`instrument_ids` are the keeper/market-data universe (P1.M3
+/// slice 1): every (book, instrument) pair drawn from these lists gets a
+/// keeper slot, so the wildcard-target guard below now rejects only pairs
+/// genuinely outside `protocol/refdata/universe.json`.
 #[allow(clippy::too_many_arguments)]
 fn run_core(
     startup: StartupOrder,
@@ -142,11 +158,13 @@ fn run_core(
     mut target_rx: rtrb::Consumer<Target>,
     mut exec_report_tx: rtrb::Producer<ExecReport>,
     mut feed_rx: rtrb::Consumer<FeedTick>,
+    book_ids: Vec<BookId>,
+    instrument_ids: Vec<InstrumentId>,
     shutdown: &AtomicBool,
 ) {
     let mut store = OrderStore::new(RING_CAPACITY);
-    let mut keeper = PositionKeeper::new(&[startup.book], &[startup.instrument]);
-    let mut market_data = MarketData::new(&[startup.instrument]);
+    let mut keeper = PositionKeeper::new(&book_ids, &instrument_ids);
+    let mut market_data = MarketData::new(&instrument_ids);
     let mut next_seq = 2u64; // seq 1 is the startup order below
 
     let cl_ord_id = ClOrdId::from_seq(1);
