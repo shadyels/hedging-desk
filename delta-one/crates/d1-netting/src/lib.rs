@@ -1,9 +1,10 @@
 //! Firm-wide netting engine (ADR-005): per-instrument, per-cycle, turns
 //! per-book residual demands into explicit internal crosses plus one net
-//! external order intent. Pure logic only — no proto, no NATS/Kafka, no
-//! `d1-core::target::target_to_order` wiring (that stays untouched; Slice 2
-//! deletes it). See delta-one/CLAUDE.md for the crate's role and hot-path
-//! rules: this crate is **on** the hot path.
+//! external order intent. Pure logic only — no proto, no NATS/Kafka. Wired
+//! into the live core loop by `crates/d1/src/cycle.rs::NettingSession`
+//! (P1.M3 Slice 2), which replaced the earlier `d1-core::target::target_to_order`
+//! single-book stand-in. See delta-one/CLAUDE.md for the crate's role and
+//! hot-path rules: this crate is **on** the hot path.
 
 use std::fmt;
 use std::str::FromStr;

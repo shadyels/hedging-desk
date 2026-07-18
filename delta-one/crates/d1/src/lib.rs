@@ -4,6 +4,7 @@
 //! copy. `docs/ROADMAP.md` P1.M2 slice 3: the feed-ingest ring/thread
 //! (deferred from Slice 2) plus the NATS target/exec-report rings.
 
+pub mod cycle;
 pub mod feed;
 
 use std::path::PathBuf;
@@ -12,12 +13,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use cycle::{NettingSession, allocate_fill};
 use d1_core::{
     BookId, ClOrdId, ExecEvent, ExecReport, FeedTick, InstrumentId, MarketData, Order, OrderStatus,
-    OrderStore, PositionKeeper, Side, Target, target_to_order,
+    OrderStore, PositionKeeper, Side, Target,
 };
 use d1_gateway_fix::{FixCallbacks, FixError};
 use d1_gateway_nats::NatsError;
+use d1_netting::RefPxPolicy;
 
 /// Ring capacity for every `rtrb` ring this binary owns (ADR-013). Generous
 /// for a demo-sized single session, matching `d1-gateway-fix`'s ring sizing.
@@ -25,9 +28,10 @@ pub const RING_CAPACITY: usize = 64;
 /// Poll/backoff interval for the core thread's drain loop.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
-/// The CLI-driven startup order (Slice 2 stand-in for the netting-driven
-/// emit that lands in P1.M3): placed once at core-thread startup, on top of
-/// whatever `TargetPosition`s arrive over NATS afterward.
+/// The CLI-driven startup order: placed once at core-thread startup as a
+/// position + FIX round-trip anchor, additive alongside whatever
+/// `TargetPosition`s arrive over NATS and get netted through
+/// `cycle::NettingSession` afterward.
 #[derive(Debug, Clone, Copy)]
 pub struct StartupOrder {
     /// Book the startup order books to.
@@ -85,6 +89,7 @@ pub fn spawn(
     nats_url: String,
     book_ids: Vec<BookId>,
     instrument_ids: Vec<InstrumentId>,
+    policy: RefPxPolicy,
     shutdown: &Arc<AtomicBool>,
 ) -> RunHandles {
     let (fix_outbound_tx, fix_outbound_rx) = rtrb::RingBuffer::<Order>::new(RING_CAPACITY);
@@ -104,6 +109,7 @@ pub fn spawn(
             feed_rx,
             book_ids,
             instrument_ids,
+            policy,
             &core_shutdown,
         );
     });
@@ -140,16 +146,20 @@ pub fn spawn(
 
 /// Core thread: places the CLI-driven startup order, then each poll drains
 /// (in order) the feed ring -> `MarketData::ingest`, the target ring ->
-/// `target_to_order` -> `OrderStore::place` + FIX outbound, and the FIX
-/// inbound-exec ring -> `apply_exec` -> `ExecReport` (NATS outbound) +
-/// `PositionKeeper::apply_fill`. Manual-verification `println!`s only, same
-/// as Slice 2 -- not the benchmarked hot path
-/// (`d1-core/benches/hot_path.rs` covers that).
+/// `cycle::NettingSession::on_target` -> internal cross legs booked and
+/// `OrderStore::place` plus FIX outbound for the resulting parent order,
+/// and the FIX inbound-exec ring -> `apply_exec` -> `ExecReport` (NATS
+/// outbound) and fill booking: pro-rata `cycle::allocate_fill` for netting
+/// parent orders, direct `PositionKeeper::apply_fill` for the single-book
+/// startup order. Manual-verification `println!`s only, same as Slice 2 --
+/// not the benchmarked hot path (`d1-core/benches/hot_path.rs` covers that).
 ///
 /// `book_ids`/`instrument_ids` are the keeper/market-data universe (P1.M3
 /// slice 1): every (book, instrument) pair drawn from these lists gets a
 /// keeper slot, so the wildcard-target guard below now rejects only pairs
-/// genuinely outside `protocol/refdata/universe.json`.
+/// genuinely outside `protocol/refdata/universe.json`. `policy` is the
+/// cross reference-price policy (ADR-005 §4), parsed and validated by the
+/// caller at startup.
 #[allow(clippy::too_many_arguments)]
 fn run_core(
     startup: StartupOrder,
@@ -160,12 +170,13 @@ fn run_core(
     mut feed_rx: rtrb::Consumer<FeedTick>,
     book_ids: Vec<BookId>,
     instrument_ids: Vec<InstrumentId>,
+    policy: RefPxPolicy,
     shutdown: &AtomicBool,
 ) {
     let mut store = OrderStore::new(RING_CAPACITY);
     let mut keeper = PositionKeeper::new(&book_ids, &instrument_ids);
     let mut market_data = MarketData::new(&instrument_ids);
-    let mut next_seq = 2u64; // seq 1 is the startup order below
+    let mut session = NettingSession::new(policy, 2); // seq 1 is the startup order below
 
     let cl_ord_id = ClOrdId::from_seq(1);
     let order = Order {
@@ -224,35 +235,47 @@ fn run_core(
                     "d1: target for unconfigured book={:?} instrument={:?}, rejecting (not in this process's position universe)",
                     target.book, target.instrument
                 ),
-                // ADR-005's `demand_b = target_b - position_b - inflight_b`,
-                // minus the in-flight term (see `target_to_order`).
-                Some(position) => {
-                    if let Some(order) =
-                        target_to_order(&target, position.net_qty_e2, ClOrdId::from_seq(next_seq))
-                    {
-                        // Push to the wire BEFORE recording the order: a
-                        // `place` that outlives a failed push leaves a
-                        // phantom `New` order the venue never saw, which
-                        // then poisons every in-flight calculation built on
-                        // the store.
-                        // ponytail: log-and-drop on a full ring, same
-                        // ceiling as every other ring in this binary -- a
-                        // single demo session, not a backpressure protocol.
-                        if fix_outbound_tx.push(order).is_err() {
-                            eprintln!("d1: FIX outbound ring full, dropping target-driven order");
-                        } else {
-                            next_seq += 1;
-                            store.place(order);
-                            println!(
-                                "d1: target-driven order book={:?} instrument={:?} side={:?} qty_e2={} (target={} position={})",
-                                order.book,
-                                order.instrument,
-                                order.side,
-                                order.order_qty_e2,
-                                target.target_qty_e2,
-                                position.net_qty_e2
-                            );
+                Some(_) => {
+                    let ref_px_e9 = arrival_mid_px_e9(&market_data, target.instrument);
+                    match session.on_target(target, &mut keeper, ref_px_e9) {
+                        Ok(output) => {
+                            if !output.crosses_to_book.is_empty() {
+                                println!(
+                                    "d1: booked {} internal cross leg(s) instrument={:?}",
+                                    output.crosses_to_book.len(),
+                                    target.instrument
+                                );
+                            }
+                            if let Some(order) = output.parent_order {
+                                // Push to the wire BEFORE recording the
+                                // order in `store`: a `place` that outlives
+                                // a failed push leaves a phantom `New` order
+                                // the venue never saw. `session.on_target`
+                                // already registered this order's parent
+                                // (weights/inflight) before returning it --
+                                // ponytail: a dropped push here leaves that
+                                // registration orphaned (never filled, its
+                                // weight permanently `inflight`), same
+                                // ring-full ceiling every other ring in this
+                                // binary already accepts for a single demo
+                                // session, not a backpressure protocol.
+                                if fix_outbound_tx.push(order).is_err() {
+                                    eprintln!(
+                                        "d1: FIX outbound ring full, dropping netting parent order"
+                                    );
+                                } else {
+                                    store.place(order);
+                                    println!(
+                                        "d1: netting parent order cl_ord_id={:?} instrument={:?} side={:?} qty_e2={}",
+                                        order.cl_ord_id,
+                                        order.instrument,
+                                        order.side,
+                                        order.order_qty_e2
+                                    );
+                                }
+                            }
                         }
+                        Err(err) => eprintln!("d1: netting cycle error: {err}"),
                     }
                 }
             }
@@ -263,11 +286,41 @@ fn run_core(
             match store.apply_exec(&event) {
                 Ok(fill) => {
                     if let Some(fill) = fill {
-                        // A `None` here means the fill was never booked
-                        // (unknown book/instrument, or a cost-basis
-                        // overflow). The position is real either way, so
-                        // this can never pass quietly (root CLAUDE.md #2).
-                        if keeper
+                        // A parent order's `Fill.book == BookId(0)` (the
+                        // reserved firm-level pre-allocation, `live.proto`
+                        // `ExecutionReport.book_id` doc comment) -- real
+                        // attribution lives in the parent's weights, so a
+                        // tracked parent routes through pro-rata
+                        // allocation; anything else (the single-book
+                        // startup order) books directly as before.
+                        if let Some(parent) = session.parent_mut(event.cl_ord_id) {
+                            let side = parent.side;
+                            let instrument = parent.instrument;
+                            for (book, qty_e2) in allocate_fill(parent, fill.qty_e2) {
+                                if qty_e2 == 0 {
+                                    continue;
+                                }
+                                // A `None` here means the allocation was
+                                // never booked (unknown book/instrument, or
+                                // a cost-basis overflow). The position is
+                                // real either way, so this can never pass
+                                // quietly (root CLAUDE.md #2).
+                                if keeper
+                                    .apply_fill(book, instrument, side, qty_e2, fill.px_e9)
+                                    .is_none()
+                                {
+                                    eprintln!(
+                                        "d1: FILL NOT BOOKED (parent allocation) book={book:?} instrument={instrument:?} side={side:?} qty_e2={qty_e2} px_e9={} -- firm position is now understated",
+                                        fill.px_e9
+                                    );
+                                } else {
+                                    println!(
+                                        "d1: parent fill allocated book={book:?} instrument={instrument:?} qty_e2={qty_e2} px_e9={}",
+                                        fill.px_e9
+                                    );
+                                }
+                            }
+                        } else if keeper
                             .apply_fill(
                                 fill.book,
                                 fill.instrument,
@@ -325,4 +378,22 @@ fn run_core(
             thread::sleep(POLL_INTERVAL);
         }
     }
+}
+
+/// Cross/order reference price for a netting cycle (ADR-005 §4 default:
+/// arrival mid). Falls back to `last_px_e9` if either side of the book is
+/// unpriced (e.g. a two-sided quote hasn't ticked yet), and to `0` if the
+/// instrument has never ticked at all -- `d1-netting::net` itself has no
+/// opinion on price validity, so an unpriced instrument nets at 0 rather
+/// than blocking the cycle.
+fn arrival_mid_px_e9(market_data: &MarketData, instrument: InstrumentId) -> i64 {
+    let Some(quote) = market_data.quote(instrument) else {
+        return 0;
+    };
+    if quote.bid_px_e9 > 0 && quote.ask_px_e9 > 0 {
+        if let Some(sum) = quote.bid_px_e9.checked_add(quote.ask_px_e9) {
+            return sum / 2;
+        }
+    }
+    quote.last_px_e9
 }

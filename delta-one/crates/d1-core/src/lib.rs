@@ -15,4 +15,4 @@ pub use ids::{BookId, ClOrdId, ExecId, InstrumentId};
 pub use keeper::{Position, PositionKeeper, Side};
 pub use market_data::{MarketData, Quote};
 pub use order::{ExecEvent, ExecReport, Fill, Order, OrderStatus, OrderStore};
-pub use target::{Target, target_to_order};
+pub use target::Target;

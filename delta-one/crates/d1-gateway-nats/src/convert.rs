@@ -22,6 +22,7 @@ pub fn target_position_to_target(msg: &TargetPosition) -> Result<Target, NatsErr
         book: BookId(msg.book_id),
         instrument: InstrumentId(instrument.instrument_id),
         target_qty_e2: msg.target_qty_e2,
+        band_e2: msg.band_qty_e2,
     })
 }
 
@@ -105,12 +106,14 @@ mod tests {
                 ..Default::default()
             }),
             target_qty_e2: -12_345,
+            band_qty_e2: 500,
             ..Default::default()
         };
         let target = target_position_to_target(&msg).unwrap();
         assert_eq!(target.book, BookId(1));
         assert_eq!(target.instrument, InstrumentId(1001));
         assert_eq!(target.target_qty_e2, -12_345);
+        assert_eq!(target.band_e2, 500);
     }
 
     #[test]
