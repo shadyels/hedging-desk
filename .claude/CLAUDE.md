@@ -62,7 +62,9 @@ Define the per-project stack in the PROJECT's CLAUDE.md using this template, and
 ```
 ## Orchestrator learned lessons
 <!-- BEGIN orchestrator-lessons (install.sh preserves this section across updates) -->
-_(none yet)_
+- When two subagents make conflicting factual claims (e.g. about test coverage or behavior), do not pick a side — route the conflict to the architect (or a fresh reader) to adjudicate by reading the actual source. Surface it explicitly in the approval dispatch rather than silently resolving it yourself.
+- A detailed approved plan already serves as the architect's SPEC — skip a redundant explorer+SPEC round and dispatch the worker directly with the plan; still run the full test→review→APPROVAL tail. Workers/reviewers start fresh, so each dispatch must be self-contained (goal, plan excerpt, file paths, reuse APIs, gate commands).
+- Agent dispatches can fail transiently on a classifier/model outage ("temporarily unavailable, auto mode cannot determine safety") — this is not a rejection; just retry the same dispatch.
 <!-- END orchestrator-lessons -->
 
 <!-- END subagent-orchestration -->

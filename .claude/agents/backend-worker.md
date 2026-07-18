@@ -26,5 +26,6 @@ End every report with a `LESSONS:` block: 0-3 short, GENERALIZABLE lessons that 
 
 <!-- BEGIN learned-lessons (written ONLY by the orchestrator; install.sh preserves this section across updates) -->
 ## Learned lessons
-_(none yet)_
+- When a per-book/per-order weight is stored as a magnitude (`|residual|`), re-apply the side's sign at EVERY site that subtracts it back into a signed quantity (e.g. demand `= target − position − inflight`); a Sell order's unfilled qty must reduce demand negatively. Write a property test with negative-target/Sell-side cases — Buy-only unit tests (sign +1) silently miss this.
+- If an incremental-delta API is built by diffing two calls to a batch/cumulative algorithm, verify that algorithm is monotone in its parameter first. Largest-remainder/apportionment (Hamilton) is a classic non-monotone case (Alabama paradox) and can emit negative deltas that still pass Σ-conservation tests. Fix: feed the algorithm the *remaining capacity* per step so each call is already the correct non-negative delta.
 <!-- END learned-lessons -->

@@ -31,5 +31,5 @@ End every report with a `LESSONS:` block: 0-3 short, GENERALIZABLE lessons that 
 
 <!-- BEGIN learned-lessons (written ONLY by the orchestrator; install.sh preserves this section across updates) -->
 ## Learned lessons
-_(none yet)_
+- For accumulating/session state (HashMap of cells, order books, caches) fed by untrusted per-message input, check insert-then-validate vs validate-then-insert: a per-call "rejected loudly" error can still mask an unbounded silent DoS if the invalid entry is left in the state it's derived from (no removal path) and re-triggers the error on every future cycle. Move the validation BEFORE the state mutation.
 <!-- END learned-lessons -->

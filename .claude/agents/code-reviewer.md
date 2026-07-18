@@ -31,5 +31,6 @@ End every report with a `LESSONS:` block: 0-3 short, GENERALIZABLE lessons that 
 
 <!-- BEGIN learned-lessons (written ONLY by the orchestrator; install.sh preserves this section across updates) -->
 ## Learned lessons
-_(none yet)_
+- When a diff reconstructs an incremental delta by differencing cumulative allocations, check house-monotonicity (Alabama paradox) explicitly: a sum-preserving allocator can still emit negative per-step deltas that pass conservation tests yet corrupt downstream per-item audit records. Verify by tracing a concrete case, not by trusting the Σ invariant.
+- A green proptest does not prove a branch is exercised. When findings hinge on a `prop_assert!`/loop over a collection, check whether the generator can ever make that collection non-empty — a loop over an always-empty set passes vacuously. Trace the generator's state evolution before crediting coverage.
 <!-- END learned-lessons -->

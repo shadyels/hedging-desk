@@ -46,5 +46,5 @@ End every report with a `LESSONS:` block: 0-3 short, GENERALIZABLE lessons that 
 
 <!-- BEGIN learned-lessons (written ONLY by the orchestrator; install.sh preserves this section across updates) -->
 ## Learned lessons
-_(none yet)_
+- In APPROVAL mode, when two subagents make conflicting factual claims about test coverage, resolve it by hand-tracing the test generator's state evolution rather than trusting either report. A `prop_assert!` loop over a structurally-always-empty collection passes without ever exercising the asserted branch (here: each book self-committing its demand to inflight before any fill prevented the crossing case). Judge coverage by what the generator can actually produce.
 <!-- END learned-lessons -->
