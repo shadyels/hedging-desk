@@ -3,10 +3,10 @@
 //! shared with `tests/nats_round_trip.rs` so both exercise the real setup.
 //! docs/ROADMAP.md P1.M2 slice 3.
 //!
-//! ponytail: the startup order below is a CLI-driven stand-in for the
-//! netting-driven emit that lands in P1.M3 -- there is no real netting yet,
-//! so this binary places one order from CLI flags on startup in addition to
-//! whatever `TargetPosition`s arrive over NATS.
+//! The startup order below is a CLI-driven position + FIX round-trip
+//! anchor, additive: this binary places one order from CLI flags on
+//! startup, on top of whatever `TargetPosition`s arrive over NATS and get
+//! netted through `d1::cycle::NettingSession` (P1.M3 Slice 2).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -42,10 +42,7 @@ fn main() -> Result<()> {
     // ADR-005 §4: the cross reference-price policy is compliance-visible and
     // must never be a silent default. Parse it at startup so a typo in refdata
     // kills the process here rather than mispricing internal risk transfers.
-    // ponytail: validated-only this slice — the netting engine is unwired
-    // (target_to_order still stands). Slice 2 threads the parsed policy into
-    // the netting cycle; today parsing it IS the gate.
-    let _policy: d1_netting::RefPxPolicy = universe.cross_px_policy.parse().with_context(|| {
+    let policy: d1_netting::RefPxPolicy = universe.cross_px_policy.parse().with_context(|| {
         format!(
             "unknown cross_px_policy in refdata: {:?}",
             universe.cross_px_policy
@@ -85,6 +82,7 @@ fn main() -> Result<()> {
         args.nats_url,
         universe.book_ids,
         universe.instrument_ids,
+        policy,
         &shutdown,
     );
 

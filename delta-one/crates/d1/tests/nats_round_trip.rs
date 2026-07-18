@@ -1,10 +1,14 @@
-//! Slice 3 DoD proof: publish a `TargetPosition` on `exo.targets.<book>.<instrument>`
-//! (as EXO would), drive it through the real `d1::spawn` wiring --
-//! `d1-gateway-nats` consume -> `target_to_order` -> FIX `NewOrderSingle` ->
-//! a real `sim` acceptor -> `ExecutionReport` -> `d1-gateway-nats` publish --
-//! and assert an `ExecutionReport` reaching `Filled` arrives on
-//! `d1.exec.<book>.<instrument>`. Mirrors `fix_round_trip.rs`'s shape (real
-//! subprocess, real sockets) plus the live NATS plane this slice adds.
+//! P1.M3 Slice 2 DoD proof: publish a `TargetPosition` on
+//! `exo.targets.<book>.<instrument>` (as EXO would), drive it through the
+//! real `d1::spawn` wiring -- `d1-gateway-nats` consume ->
+//! `cycle::NettingSession::on_target` -> firm-level parent order (`Order.book
+//! == BookId(0)`) -> FIX `NewOrderSingle` -> a real `sim` acceptor ->
+//! `ExecutionReport` -> `d1-gateway-nats` publish -- and assert an
+//! `ExecutionReport` reaching `Filled` arrives on `d1.exec.0.<instrument>`
+//! with `book_id == 0` (the reserved firm-level parent-order
+//! pre-allocation, `protocol/proto/live.proto`'s `ExecutionReport.book_id`
+//! doc comment). Mirrors `fix_round_trip.rs`'s shape (real subprocess, real
+//! sockets) plus the live NATS plane Slice 3 added.
 //!
 //! Requires a NATS server on `127.0.0.1:4222` (`just up`). Marked `#[ignore]`
 //! so plain `cargo test`/`just test` stays green without Docker; run
@@ -34,11 +38,12 @@ const ROUND_TRIP_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long to wait for a (forbidden) second report after a redelivery.
 const DUP_QUIET_WINDOW: Duration = Duration::from_secs(3);
 // `d1::run_core` places the CLI startup order as ClOrdId seq 1, then hands
-// out seq 2 to the first NATS-driven target -- see lib.rs's `next_seq`.
+// its `NettingSession` a starting sequence of 2 for parent orders -- see
+// lib.rs's `NettingSession::new(policy, 2)`.
 const STARTUP_CL_ORD_ID: &str = "00000000000000000001";
 const TARGET_DRIVEN_CL_ORD_ID: &str = "00000000000000000002";
-/// The next order after the startup + book-1 target, i.e. the book-2 target
-/// below (see `d1::run_core`'s `next_seq`).
+/// The next parent order after the book-1 target's, i.e. the book-2 target
+/// below (see `d1::cycle::NettingSession`'s internal sequence counter).
 const BOOK2_TARGET_CL_ORD_ID: &str = "00000000000000000003";
 /// Startup order size; establishes a position the target must net against.
 const STARTUP_QTY_E2: i64 = 100;
@@ -201,6 +206,10 @@ fn target_position_round_trips_to_execution_report() {
     wait_for_port(FIX_PORT, ROUND_TRIP_TIMEOUT);
 
     let universe = d1_refdata::load(&universe_path()).expect("load universe refdata");
+    let policy: d1_netting::RefPxPolicy = universe
+        .cross_px_policy
+        .parse()
+        .expect("universe refdata cross_px_policy parses");
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let handles = spawn(
@@ -219,6 +228,7 @@ fn target_position_round_trips_to_execution_report() {
         NATS_URL.to_string(),
         universe.book_ids,
         universe.instrument_ids,
+        policy,
         &shutdown,
     );
 
@@ -229,17 +239,30 @@ fn target_position_round_trips_to_execution_report() {
 
     let report = runtime.block_on(async {
         let client = async_nats::connect(NATS_URL).await.expect("connect NATS");
-        let mut subscriber = client
+        // The CLI startup order books directly to book 1 (unchanged, not
+        // netting-driven): its own ExecutionReport carries book_id == 1.
+        let mut startup_subscriber = client
             .subscribe("d1.exec.1.1001")
             .await
             .expect("subscribe d1.exec.1.1001");
+        // Every netting-driven parent order books to BookId(0) -- the
+        // reserved firm-level parent-order pre-allocation
+        // (`protocol/proto/live.proto`'s `ExecutionReport.book_id` doc
+        // comment) -- regardless of which book's target triggered it. Real
+        // per-book attribution lives in the parent's weights, not
+        // `Order.book`; this subject is where its ExecutionReport lands.
+        let mut parent_1001 = client
+            .subscribe("d1.exec.0.1001")
+            .await
+            .expect("subscribe d1.exec.0.1001");
         // Book 2 / instrument 2001 is in-universe (protocol/refdata/universe.json)
         // but is not the CLI startup pair -- the keeper/market-data universe
-        // swap (P1.M3 slice 1) is what makes an order here bookable at all.
-        let mut book2_subscriber = client
-            .subscribe("d1.exec.2.2001")
+        // swap (P1.M3 slice 1) is what makes a target here bookable at all.
+        // Its parent order still books to BookId(0), same as book 1's.
+        let mut parent_2001 = client
+            .subscribe("d1.exec.0.2001")
             .await
-            .expect("subscribe d1.exec.2.2001");
+            .expect("subscribe d1.exec.0.2001");
         // book 99 / instrument 999999 are in no book/instrument index in
         // universe.json: the keeper returns `None` for them, so the
         // wildcard-target guard rejects -- a position with nowhere to book
@@ -258,8 +281,9 @@ fn target_position_round_trips_to_execution_report() {
         // startup fill is booked (the core books the fill before pushing the
         // report), which is what makes the target-driven quantity below
         // deterministic rather than a race.
-        let startup = await_report(&mut subscriber, STARTUP_CL_ORD_ID).await;
+        let startup = await_report(&mut startup_subscriber, STARTUP_CL_ORD_ID).await;
         assert_eq!(startup.status, OrdStatus::Filled as i32);
+        assert_eq!(startup.book_id, 1);
         assert_eq!(startup.cum_qty_e2, STARTUP_QTY_E2);
 
         let target = TargetPosition {
@@ -283,7 +307,7 @@ fn target_position_round_trips_to_execution_report() {
             .await
             .expect("publish TargetPosition");
 
-        let report = await_report(&mut subscriber, TARGET_DRIVEN_CL_ORD_ID).await;
+        let report = await_report(&mut parent_1001, TARGET_DRIVEN_CL_ORD_ID).await;
 
         // Redelivery is explicitly allowed (root CLAUDE.md #4), so the same
         // msg_id going out twice must not place a second order. Nothing more
@@ -292,7 +316,7 @@ fn target_position_round_trips_to_execution_report() {
             .publish("exo.targets.1.1001", payload.into())
             .await
             .expect("republish TargetPosition");
-        if let Ok(Some(msg)) = tokio::time::timeout(DUP_QUIET_WINDOW, subscriber.next()).await {
+        if let Ok(Some(msg)) = tokio::time::timeout(DUP_QUIET_WINDOW, parent_1001.next()).await {
             let extra = ExecutionReport::decode(msg.payload).expect("decode ExecutionReport");
             panic!(
                 "redelivered TargetPosition produced a second order: cl_ord_id={} cum_qty_e2={}",
@@ -323,9 +347,11 @@ fn target_position_round_trips_to_execution_report() {
             .publish("exo.targets.2.2001", book2_target.encode_to_vec().into())
             .await
             .expect("publish book-2 TargetPosition");
-        let book2_report = await_report(&mut book2_subscriber, BOOK2_TARGET_CL_ORD_ID).await;
+        let book2_report = await_report(&mut parent_2001, BOOK2_TARGET_CL_ORD_ID).await;
         assert_eq!(book2_report.status, OrdStatus::Filled as i32);
-        assert_eq!(book2_report.book_id, 2);
+        // Parent orders always book to BookId(0), never the requesting
+        // book -- real attribution lives in the netting session's weights.
+        assert_eq!(book2_report.book_id, 0);
         assert_eq!(
             book2_report.instrument.as_ref().unwrap().instrument_id,
             2001
@@ -367,7 +393,10 @@ fn target_position_round_trips_to_execution_report() {
     });
 
     assert_eq!(report.status, OrdStatus::Filled as i32);
-    assert_eq!(report.book_id, 1);
+    // The netting-driven parent order books to BookId(0), the reserved
+    // firm-level parent-order pre-allocation -- not book 1, even though
+    // book 1's target is what triggered this cycle.
+    assert_eq!(report.book_id, 0);
     assert_eq!(report.instrument.as_ref().unwrap().instrument_id, 1001);
     // The target is absolute: D1 must trade only the shortfall between it and
     // the position the startup order already established, not the full target.

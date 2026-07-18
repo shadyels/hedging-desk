@@ -25,3 +25,5 @@ async-nats = { version = "0.49", default-features = false }
 tokio = { version = "1", features = ["rt", "time"] }
 futures-util = "0.3"
 prost = "0.14"
+# netting_conservation.rs: mandatory Sigma-book-position proptest (P1.M3 Slice 2).
+proptest = "1"
