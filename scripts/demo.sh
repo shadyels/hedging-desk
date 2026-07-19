@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Contract: scripts/README.md. P1.M2 slice 3 (docs/ROADMAP.md): the current
-# demo is the live NATS round trip (TargetPosition -> order -> fill ->
-# ExecutionReport over the real NATS + FIX planes). Deferred pieces, by
-# milestone -- not implemented here, not pretended:
-#   - real netting/internal crosses (target_to_order's P1.M3 replacement)
+# Contract: scripts/README.md. docs/ROADMAP.md P1.M2 slice 3 added the live
+# NATS round trip (TargetPosition -> order -> fill -> ExecutionReport over
+# the real NATS + FIX planes); P1.M3 slice 3 added the crosses/transfers
+# round trip (two opposite TargetPositions -> InternalCrossNotice + residual
+# ExecutionReport, plus an InternalTransferRequest -> InternalCrossNotice).
+# Deferred pieces, by milestone -- not implemented here, not pretended:
 #   - Kafka golden-file diff + UI left running (the eventual justfile
 #     comment's "tracker-flow -> golden Kafka -> UI" contract): P1.M4 / Phase 3
 set -euo pipefail
@@ -32,6 +33,7 @@ fi
 
 cd delta-one
 cargo test -p d1 --test nats_round_trip -- --ignored --nocapture
+cargo test -p d1 --test crosses_round_trip -- --ignored --nocapture
 cd ..
 
 just down

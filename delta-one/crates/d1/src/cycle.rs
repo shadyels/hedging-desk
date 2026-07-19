@@ -14,7 +14,10 @@
 
 use std::collections::HashMap;
 
-use d1_core::{BookId, ClOrdId, InstrumentId, Order, OrderStatus, PositionKeeper, Side, Target};
+use d1_core::{
+    BookId, ClOrdId, CrossRecord, InstrumentId, Order, OrderStatus, PositionKeeper, Side, Target,
+    TransferRequest,
+};
 use d1_netting::{BookDemand, Cross, MAX_BOOKS, NettingError, RefPxPolicy, net};
 
 /// One book's currently-known EXO target for one instrument.
@@ -52,13 +55,52 @@ pub struct ParentOrder {
 /// Output of one netting cycle (`NettingSession::on_target`).
 #[derive(Debug, Clone)]
 pub struct CycleOutput {
-    /// Internal cross legs this cycle produced. Already booked into the
-    /// `PositionKeeper` by the time this is returned -- present here only so
-    /// the caller can log/audit them.
-    pub crosses_to_book: Vec<Cross>,
+    /// Internal crosses this cycle produced. Already booked into the
+    /// `PositionKeeper` by the time this is returned -- present here so the
+    /// caller can publish `InternalCrossNotice` (`crates/d1/src/lib.rs`) and
+    /// audit them.
+    pub crosses_to_book: Vec<CrossRecord>,
     /// The firm-level parent order to place, if this cycle's residual demand
     /// wasn't fully absorbed by crosses or suppressed by the no-trade band.
     pub parent_order: Option<Order>,
+}
+
+/// Books one two-leg internal cross into `keeper` atomically via
+/// `PositionKeeper::apply_cross` (both legs commit or neither does -- a
+/// half-booked cross would leave a net-imbalanced firm position published as
+/// a clean `InternalCrossNotice`, root CLAUDE.md #2) and, on success, mints a
+/// fresh `cross_id` (UUIDv7). On a `None` booking failure (overflow in
+/// either leg), logs one rejection line and returns `None` -- the caller
+/// must not publish anything for it. The single booking path ADR-009
+/// requires both `on_target` (netting-derived crosses) and `on_transfer`
+/// (directed transfers) to share.
+fn book_cross(
+    keeper: &mut PositionKeeper,
+    instrument: InstrumentId,
+    buy_book: BookId,
+    sell_book: BookId,
+    qty_e2: i64,
+    px_e9: i64,
+    policy: RefPxPolicy,
+) -> Option<CrossRecord> {
+    if keeper
+        .apply_cross(instrument, buy_book, sell_book, qty_e2, px_e9)
+        .is_none()
+    {
+        eprintln!(
+            "d1: cross not booked (overflow) buy_book={buy_book:?} sell_book={sell_book:?} instrument={instrument:?} qty_e2={qty_e2} -- not published"
+        );
+        return None;
+    }
+    Some(CrossRecord {
+        cross_id: uuid::Uuid::now_v7(),
+        instrument,
+        buy_book,
+        sell_book,
+        qty_e2,
+        ref_px_e9: px_e9,
+        policy_id: policy.as_str(),
+    })
 }
 
 /// Per-instrument netting-cycle state: known EXO targets and open parent
@@ -175,35 +217,23 @@ impl NettingSession {
         let netted = net(&demands, ref_px_e9, self.policy, &mut cross_buf)?;
         let crosses = cross_buf.get(..netted.n_crosses).unwrap_or(&[]).to_vec();
 
-        // Book cross legs immediately: nets to zero firm-wide and makes
-        // re-netting idempotent (root CLAUDE.md #2: never leave a cross
-        // silently unbooked).
-        for c in &crosses {
-            if keeper
-                .apply_fill(c.buy_book, target.instrument, Side::Buy, c.qty_e2, c.px_e9)
-                .is_none()
-            {
-                eprintln!(
-                    "d1: cross leg not booked (buy) book={:?} instrument={:?} qty_e2={} -- firm position is now understated",
-                    c.buy_book, target.instrument, c.qty_e2
-                );
-            }
-            if keeper
-                .apply_fill(
-                    c.sell_book,
+        // Book cross legs immediately via the shared `book_cross` path: nets
+        // to zero firm-wide and makes re-netting idempotent (root CLAUDE.md
+        // #2: never leave a cross silently unbooked).
+        let cross_records: Vec<CrossRecord> = crosses
+            .iter()
+            .filter_map(|c| {
+                book_cross(
+                    keeper,
                     target.instrument,
-                    Side::Sell,
+                    c.buy_book,
+                    c.sell_book,
                     c.qty_e2,
                     c.px_e9,
+                    c.policy,
                 )
-                .is_none()
-            {
-                eprintln!(
-                    "d1: cross leg not booked (sell) book={:?} instrument={:?} qty_e2={} -- firm position is now understated",
-                    c.sell_book, target.instrument, c.qty_e2
-                );
-            }
-        }
+            })
+            .collect();
 
         self.cycle_seq = self.cycle_seq.wrapping_add(1);
         let cycle_id = self.cycle_seq;
@@ -284,9 +314,34 @@ impl NettingSession {
         };
 
         Ok(CycleOutput {
-            crosses_to_book: crosses,
+            crosses_to_book: cross_records,
             parent_order,
         })
+    }
+
+    /// Book a directed internal transfer (ADR-009) as one immediate cross
+    /// through the same `book_cross` path netting-derived crosses use: `req`
+    /// buys into `req.to_book`, sells from `req.from_book`. No external
+    /// order, no parent-order tracking -- positions move now, so the next
+    /// `on_target` cycle for this instrument reads post-transfer positions
+    /// and never re-nets this quantity. The caller (`crates/d1/src/lib.rs::run_core`)
+    /// owns validation (from/to distinct, `qty_e2 > 0`, both books in the
+    /// keeper's universe) before calling this.
+    pub fn on_transfer(
+        &mut self,
+        req: TransferRequest,
+        keeper: &mut PositionKeeper,
+        ref_px_e9: i64,
+    ) -> Option<CrossRecord> {
+        book_cross(
+            keeper,
+            req.instrument,
+            req.to_book,
+            req.from_book,
+            req.qty_e2,
+            ref_px_e9,
+            self.policy,
+        )
     }
 
     /// `Σ` over currently-open parent orders for `instrument` of `book`'s
@@ -434,6 +489,7 @@ fn hamilton(weights: &[(BookId, i64)], total: i64) -> Vec<i64> {
 #[allow(clippy::unwrap_used)] // tests: unwrap_used/expect_used are hot-path-only bans (delta-one/CLAUDE.md)
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::collections::HashMap as StdHashMap;
 
     fn target(book: u32, instrument: u32, target_qty_e2: i64, band_e2: i64) -> Target {
@@ -601,5 +657,121 @@ mod tests {
             out.parent_order.is_some(),
             "instrument must still net after an earlier rejected message, not stay poisoned"
         );
+    }
+
+    #[test]
+    fn on_transfer_books_both_legs_and_stamps_lineage() {
+        let mut keeper = PositionKeeper::new(&[BookId(1), BookId(5)], &[InstrumentId(1001)]);
+        let mut session = NettingSession::new(RefPxPolicy::ArrivalMid, 1);
+
+        let record = session
+            .on_transfer(
+                TransferRequest {
+                    instrument: InstrumentId(1001),
+                    from_book: BookId(1),
+                    to_book: BookId(5),
+                    qty_e2: 40_000,
+                },
+                &mut keeper,
+                150_000_000_000,
+            )
+            .unwrap();
+
+        assert_eq!(record.buy_book, BookId(5));
+        assert_eq!(record.sell_book, BookId(1));
+        assert_eq!(record.qty_e2, 40_000);
+        assert_eq!(record.ref_px_e9, 150_000_000_000);
+        assert_eq!(record.policy_id, "ARRIVAL_MID");
+        assert_eq!(
+            keeper
+                .position(BookId(5), InstrumentId(1001))
+                .unwrap()
+                .net_qty_e2,
+            40_000
+        );
+        assert_eq!(
+            keeper
+                .position(BookId(1), InstrumentId(1001))
+                .unwrap()
+                .net_qty_e2,
+            -40_000
+        );
+    }
+
+    #[test]
+    fn on_transfer_overflow_rejects_and_moves_no_position() {
+        // Security-review regression: a transfer that can't book atomically
+        // must return `None` and leave both books' positions untouched, not
+        // half-book one leg.
+        let mut keeper = PositionKeeper::new(&[BookId(1), BookId(5)], &[InstrumentId(1001)]);
+        let mut session = NettingSession::new(RefPxPolicy::ArrivalMid, 1);
+
+        // Force the buy leg (to_book) to overflow.
+        keeper
+            .apply_fill(BookId(5), InstrumentId(1001), Side::Buy, i64::MAX, 1)
+            .unwrap();
+
+        let record = session.on_transfer(
+            TransferRequest {
+                instrument: InstrumentId(1001),
+                from_book: BookId(1),
+                to_book: BookId(5),
+                qty_e2: 1,
+            },
+            &mut keeper,
+            1,
+        );
+
+        assert!(record.is_none());
+        assert_eq!(
+            keeper
+                .position(BookId(1), InstrumentId(1001))
+                .unwrap()
+                .net_qty_e2,
+            0
+        );
+        assert_eq!(
+            keeper
+                .position(BookId(5), InstrumentId(1001))
+                .unwrap()
+                .net_qty_e2,
+            i64::MAX
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn transfer_conserves_firm_position(
+            qty_e2 in 1i64..=1_000_000,
+            px_e9 in 1i64..=1_000_000_000_000,
+        ) {
+            // Money path (transfers move real risk, ADR-009): a directed
+            // transfer must never change the firm-wide sum of book
+            // positions, only redistribute it -- `to_book` gains exactly
+            // `qty_e2`, `from_book` loses exactly `qty_e2`.
+            let mut keeper = PositionKeeper::new(&[BookId(1), BookId(5)], &[InstrumentId(1001)]);
+            let mut session = NettingSession::new(RefPxPolicy::ArrivalMid, 1);
+
+            let before_sum = keeper.position(BookId(1), InstrumentId(1001)).unwrap().net_qty_e2
+                + keeper.position(BookId(5), InstrumentId(1001)).unwrap().net_qty_e2;
+
+            let _record = session.on_transfer(
+                TransferRequest {
+                    instrument: InstrumentId(1001),
+                    from_book: BookId(1),
+                    to_book: BookId(5),
+                    qty_e2,
+                },
+                &mut keeper,
+                px_e9,
+            );
+
+            let after_from = keeper.position(BookId(1), InstrumentId(1001)).unwrap().net_qty_e2;
+            let after_to = keeper.position(BookId(5), InstrumentId(1001)).unwrap().net_qty_e2;
+
+            prop_assert_eq!(after_to, qty_e2);
+            prop_assert_eq!(after_from, -qty_e2);
+            prop_assert_eq!(after_from + after_to, before_sum);
+        }
     }
 }

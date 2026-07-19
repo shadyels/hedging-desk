@@ -23,6 +23,7 @@ Monorepo, five phases:
 | `docs/GLOSSARY.md` | when a trading term in a task is unclear |
 | `scripts/README.md` | implementing or debugging any `scripts/*.sh` (they are stubs; that file is their contract) |
 | `deploy/docker-compose.yml` + `deploy/nats.conf` | changing local infra, ports, or NATS/Kafka/Schema-Registry config |
+| `docs/PONYTAIL-DEBT.md` | planning Slice 2/3 feature work or any milestone implementation; catalogs deliberate shortcuts and their phase-gated upgrade paths |
 
 If a task matches a row above and the file hasn't been read this session, read it first. When docs and code disagree, flag it — do not silently pick one.
 

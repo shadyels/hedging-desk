@@ -50,15 +50,14 @@ Define the per-project stack in the PROJECT's CLAUDE.md using this template, and
 
 ```markdown
 ## Stack Profile
-- Language(s): <e.g. TypeScript 5.x / Python 3.12>
-- Backend: <e.g. Node + Fastify / FastAPI> — conventions: <notes>
-- Frontend: <e.g. React + Vite, Tailwind> — conventions: <notes>
-- Database: <e.g. Postgres via Prisma / SQLAlchemy + Alembic>
-- Tests: <framework> — run with: `<exact command>`
-- Lint/typecheck: `<exact command>`
-- Build: `<exact command>`
-- CI/CD: <e.g. GitHub Actions>; Deploy target: <e.g. Docker on Fly.io>
-- Other conventions: <error handling, logging, folder layout, commit style>
+- Language(s): Rust (delta-one), Python 3.12 (exo), TypeScript (ui)
+- Backend: Rust (tokio) + Python (FastAPI) — conventions: see component CLAUDE.md files
+- Frontend: TypeScript + React — conventions: see ui/CLAUDE.md
+- Tests: Rust (cargo test), Python (pytest), TS (vitest) — run with: `just test`
+- Lint/typecheck: `cargo clippy`, `mypy --strict`, `tsc --noEmit`
+- Build: `just build`
+- CI/CD: GitHub Actions
+- Other conventions: ADR-driven; no unsafe Rust; money as i64 fixed-point; Protobuf/Avro schemas
 ```
 ## Orchestrator learned lessons
 <!-- BEGIN orchestrator-lessons (install.sh preserves this section across updates) -->

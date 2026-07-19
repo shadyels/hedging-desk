@@ -33,12 +33,12 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use d1_core::{ExecReport, Target};
+use d1_core::{CrossRecord, ExecReport, Target, TransferRequest};
 use futures_util::StreamExt;
 use prost::Message as _;
 
 pub use error::NatsError;
-use pb::hedging::live::v1::TargetPosition;
+use pb::hedging::live::v1::{InternalTransferRequest, TargetPosition};
 
 /// Poll/backoff interval for the outbound-exec drain and the inbound-target
 /// subscribe timeout. Off the hot path (ADR-004): matches
@@ -47,6 +47,9 @@ const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// Wildcard subscription for every book/instrument EXO publishes targets on
 /// (`protocol/nats-subjects.md`: `exo.targets.<book>.<instrument>`).
 const TARGET_SUBJECT_WILDCARD: &str = "exo.targets.>";
+/// Wildcard subscription for every book EXO publishes directed transfers on
+/// (`protocol/nats-subjects.md`: `exo.transfers.<book>`).
+const TRANSFER_SUBJECT_WILDCARD: &str = "exo.transfers.*";
 
 /// Run the NATS gateway until `shutdown` is set: connects to `url`,
 /// subscribes `exo.targets.>` -> convert -> push onto `target_tx`, and drains
@@ -59,10 +62,13 @@ const TARGET_SUBJECT_WILDCARD: &str = "exo.targets.>";
 /// `retry_on_initial_connect`), so this logs and returns, leaving the
 /// FIX-only path running. Upgrade to background reconnect/backoff once a
 /// real deployment needs the NATS plane to recover without restarting `d1`.
+#[allow(clippy::too_many_arguments)]
 pub fn run_gateway(
     url: &str,
     target_tx: rtrb::Producer<Target>,
     exec_rx: rtrb::Consumer<ExecReport>,
+    cross_rx: rtrb::Consumer<CrossRecord>,
+    transfer_tx: rtrb::Producer<TransferRequest>,
     shutdown: &AtomicBool,
 ) -> Result<(), NatsError> {
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -75,13 +81,23 @@ pub fn run_gateway(
             return Ok(());
         }
     };
-    runtime.block_on(run_gateway_async(url, target_tx, exec_rx, shutdown))
+    runtime.block_on(run_gateway_async(
+        url,
+        target_tx,
+        exec_rx,
+        cross_rx,
+        transfer_tx,
+        shutdown,
+    ))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_gateway_async(
     url: &str,
     mut target_tx: rtrb::Producer<Target>,
     mut exec_rx: rtrb::Consumer<ExecReport>,
+    mut cross_rx: rtrb::Consumer<CrossRecord>,
+    mut transfer_tx: rtrb::Producer<TransferRequest>,
     shutdown: &AtomicBool,
 ) -> Result<(), NatsError> {
     let client = match async_nats::connect(url).await {
@@ -91,12 +107,13 @@ async fn run_gateway_async(
             return Ok(());
         }
     };
-    let mut subscriber = client.subscribe(TARGET_SUBJECT_WILDCARD).await?;
+    let mut target_subscriber = client.subscribe(TARGET_SUBJECT_WILDCARD).await?;
+    let mut transfer_subscriber = client.subscribe(TRANSFER_SUBJECT_WILDCARD).await?;
     let mut seen_msg_ids = HashSet::new();
 
     while !shutdown.load(Ordering::Relaxed) {
         tokio::select! {
-            next = subscriber.next() => match next {
+            next = target_subscriber.next() => match next {
                 Some(msg) => handle_target(&msg.payload, &mut seen_msg_ids, &mut target_tx),
                 // The stream ending means the subscription is gone, not that
                 // there's nothing to read. Silently falling through to the
@@ -106,7 +123,14 @@ async fn run_gateway_async(
                 // the gateway loudly and the FIX path keeps running.
                 None => {
                     eprintln!("nats: target subscription ended, resubscribing to {TARGET_SUBJECT_WILDCARD}");
-                    subscriber = client.subscribe(TARGET_SUBJECT_WILDCARD).await?;
+                    target_subscriber = client.subscribe(TARGET_SUBJECT_WILDCARD).await?;
+                }
+            },
+            next = transfer_subscriber.next() => match next {
+                Some(msg) => handle_transfer(&msg.payload, &mut seen_msg_ids, &mut transfer_tx),
+                None => {
+                    eprintln!("nats: transfer subscription ended, resubscribing to {TRANSFER_SUBJECT_WILDCARD}");
+                    transfer_subscriber = client.subscribe(TRANSFER_SUBJECT_WILDCARD).await?;
                 }
             },
             () = tokio::time::sleep(DRAIN_POLL_INTERVAL) => {}
@@ -124,6 +148,17 @@ async fn run_gateway_async(
                 .await
             {
                 eprintln!("nats: publish ExecutionReport failed, dropping: {err}");
+            }
+        }
+
+        while let Ok(record) = cross_rx.pop() {
+            let msg_id = uuid::Uuid::now_v7().to_string();
+            let pb_notice = convert::cross_record_to_pb(&record, msg_id, now_ns());
+            if let Err(err) = client
+                .publish(convert::CROSSES_SUBJECT, pb_notice.encode_to_vec().into())
+                .await
+            {
+                eprintln!("nats: publish InternalCrossNotice failed, dropping: {err}");
             }
         }
     }
@@ -180,6 +215,51 @@ fn handle_target(
     // protocol yet.
     if target_tx.push(target).is_err() {
         eprintln!("nats: target ring full, dropping TargetPosition msg_id={msg_id}");
+        return; // NOT marked seen: redelivery is how this one recovers.
+    }
+    seen_msg_ids.insert(msg_id.to_string());
+}
+
+/// Decode one inbound `InternalTransferRequest`, dedupe it, and hand the core
+/// a plain `TransferRequest`. Near-copy of `handle_target` -- same dedupe
+/// set (`Meta.msg_id` is a UUIDv7, globally unique regardless of message
+/// type, so one shared set is enough) and the same don't-mark-seen-on-full-ring
+/// recovery contract.
+fn handle_transfer(
+    payload: &[u8],
+    seen_msg_ids: &mut HashSet<String>,
+    transfer_tx: &mut rtrb::Producer<TransferRequest>,
+) {
+    let msg = match InternalTransferRequest::decode(payload) {
+        Ok(msg) => msg,
+        Err(err) => {
+            eprintln!("nats: InternalTransferRequest decode failed, dropping: {err}");
+            return;
+        }
+    };
+
+    let msg_id = msg.meta.as_ref().map_or("", |meta| meta.msg_id.as_str());
+    if msg_id.is_empty() {
+        eprintln!("nats: InternalTransferRequest without Meta.msg_id, dropping (cannot dedupe)");
+        return;
+    }
+    if seen_msg_ids.contains(msg_id) {
+        println!(
+            "nats: duplicate InternalTransferRequest msg_id={msg_id}, already applied, dropping"
+        );
+        return;
+    }
+
+    let transfer = match convert::internal_transfer_to_transfer(&msg) {
+        Ok(transfer) => transfer,
+        Err(err) => {
+            eprintln!("nats: bad InternalTransferRequest, dropping: {err}");
+            return;
+        }
+    };
+
+    if transfer_tx.push(transfer).is_err() {
+        eprintln!("nats: transfer ring full, dropping InternalTransferRequest msg_id={msg_id}");
         return; // NOT marked seen: redelivery is how this one recovers.
     }
     seen_msg_ids.insert(msg_id.to_string());

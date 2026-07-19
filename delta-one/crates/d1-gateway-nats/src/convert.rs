@@ -3,11 +3,20 @@
 //! state (that lives in `crate::lib`). ADR-004: proto never enters
 //! `d1-core`; mirrors `d1-gateway-fix::convert`'s role for the FIX side.
 
-use d1_core::{BookId, ClOrdId, ExecId, ExecReport, InstrumentId, OrderStatus, Side, Target};
+use d1_core::{
+    BookId, ClOrdId, CrossRecord, ExecId, ExecReport, InstrumentId, OrderStatus, Side, Target,
+    TransferRequest,
+};
 
 use crate::error::NatsError;
 use crate::pb::hedging::common::v1::{InstrumentRef, Meta, Side as PbSide};
-use crate::pb::hedging::live::v1::{ExecutionReport, OrdStatus, TargetPosition};
+use crate::pb::hedging::live::v1::{
+    ExecutionReport, InternalCrossNotice, InternalTransferRequest, OrdStatus, TargetPosition,
+};
+
+/// Subject `InternalCrossNotice` publishes to (`protocol/nats-subjects.md`:
+/// `d1.crosses`).
+pub const CROSSES_SUBJECT: &str = "d1.crosses";
 
 /// Convert an inbound `TargetPosition` (subject `exo.targets.<book>.<instrument>`)
 /// to the plain core `Target`. Errors if the required nested `instrument`
@@ -58,6 +67,54 @@ pub fn exec_report_to_pb(report: &ExecReport, msg_id: String, sent_ns: u64) -> E
         cum_qty_e2: report.cum_qty_e2,
         leaves_qty_e2: report.leaves_qty_e2,
         text: String::new(),
+    }
+}
+
+/// Convert an inbound `InternalTransferRequest` (subject
+/// `exo.transfers.<book>`) to the plain core `TransferRequest`. Errors if the
+/// required nested `instrument` field is absent, mirroring
+/// `target_position_to_target`.
+pub fn internal_transfer_to_transfer(
+    msg: &InternalTransferRequest,
+) -> Result<TransferRequest, NatsError> {
+    let instrument = msg
+        .instrument
+        .as_ref()
+        .ok_or(NatsError::MissingField("instrument"))?;
+    Ok(TransferRequest {
+        instrument: InstrumentId(instrument.instrument_id),
+        from_book: BookId(msg.from_book_id),
+        to_book: BookId(msg.to_book_id),
+        qty_e2: msg.qty_e2,
+    })
+}
+
+/// Build the outbound `InternalCrossNotice` for a booked `CrossRecord`,
+/// stamping a fresh `Meta` block (`protocol/CLAUDE.md`: every NATS payload
+/// carries one). Mirrors `exec_report_to_pb`.
+#[must_use]
+pub fn cross_record_to_pb(
+    record: &CrossRecord,
+    msg_id: String,
+    sent_ns: u64,
+) -> InternalCrossNotice {
+    InternalCrossNotice {
+        meta: Some(Meta {
+            msg_id,
+            producer: "delta-one".to_string(),
+            sent_ns,
+            schema_version: 1,
+        }),
+        cross_id: record.cross_id.to_string(),
+        instrument: Some(InstrumentRef {
+            instrument_id: record.instrument.0,
+            ..Default::default()
+        }),
+        buy_book_id: record.buy_book.0,
+        sell_book_id: record.sell_book.0,
+        qty_e2: record.qty_e2,
+        ref_px_e9: record.ref_px_e9,
+        px_policy_id: record.policy_id.to_string(),
     }
 }
 
@@ -127,6 +184,62 @@ mod tests {
             target_position_to_target(&msg),
             Err(NatsError::MissingField("instrument"))
         ));
+    }
+
+    #[test]
+    fn internal_transfer_to_transfer_reads_required_fields() {
+        let msg = InternalTransferRequest {
+            instrument: Some(InstrumentRef {
+                instrument_id: 1001,
+                ..Default::default()
+            }),
+            from_book_id: 1,
+            to_book_id: 5,
+            qty_e2: 40_000,
+            ..Default::default()
+        };
+        let transfer = internal_transfer_to_transfer(&msg).unwrap();
+        assert_eq!(transfer.instrument, InstrumentId(1001));
+        assert_eq!(transfer.from_book, BookId(1));
+        assert_eq!(transfer.to_book, BookId(5));
+        assert_eq!(transfer.qty_e2, 40_000);
+    }
+
+    #[test]
+    fn internal_transfer_to_transfer_missing_instrument_errors() {
+        let msg = InternalTransferRequest {
+            instrument: None,
+            ..Default::default()
+        };
+        assert!(matches!(
+            internal_transfer_to_transfer(&msg),
+            Err(NatsError::MissingField("instrument"))
+        ));
+    }
+
+    #[test]
+    fn cross_record_to_pb_maps_all_fields() {
+        let record = CrossRecord {
+            cross_id: uuid::Uuid::nil(),
+            instrument: InstrumentId(1001),
+            buy_book: BookId(1),
+            sell_book: BookId(2),
+            qty_e2: 800_000,
+            ref_px_e9: 150_000_000_000,
+            policy_id: "ARRIVAL_MID",
+        };
+        let pb = cross_record_to_pb(&record, "msg-1".to_string(), 42);
+
+        assert_eq!(pb.meta.as_ref().unwrap().msg_id, "msg-1");
+        assert_eq!(pb.meta.as_ref().unwrap().producer, "delta-one");
+        assert_eq!(pb.meta.as_ref().unwrap().sent_ns, 42);
+        assert_eq!(pb.cross_id, uuid::Uuid::nil().to_string());
+        assert_eq!(pb.instrument.as_ref().unwrap().instrument_id, 1001);
+        assert_eq!(pb.buy_book_id, 1);
+        assert_eq!(pb.sell_book_id, 2);
+        assert_eq!(pb.qty_e2, 800_000);
+        assert_eq!(pb.ref_px_e9, 150_000_000_000);
+        assert_eq!(pb.px_policy_id, "ARRIVAL_MID");
     }
 
     #[test]

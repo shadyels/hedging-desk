@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use cycle::{NettingSession, allocate_fill};
 use d1_core::{
-    BookId, ClOrdId, ExecEvent, ExecReport, FeedTick, InstrumentId, MarketData, Order, OrderStatus,
-    OrderStore, PositionKeeper, Side, Target,
+    BookId, ClOrdId, CrossRecord, ExecEvent, ExecReport, FeedTick, InstrumentId, MarketData, Order,
+    OrderStatus, OrderStore, PositionKeeper, Side, Target, TransferRequest,
 };
 use d1_gateway_fix::{FixCallbacks, FixError};
 use d1_gateway_nats::NatsError;
@@ -97,6 +97,8 @@ pub fn spawn(
     let (target_tx, target_rx) = rtrb::RingBuffer::<Target>::new(RING_CAPACITY);
     let (exec_report_tx, exec_report_rx) = rtrb::RingBuffer::<ExecReport>::new(RING_CAPACITY);
     let (feed_tx, feed_rx) = rtrb::RingBuffer::<FeedTick>::new(RING_CAPACITY);
+    let (cross_tx, cross_rx) = rtrb::RingBuffer::<CrossRecord>::new(RING_CAPACITY);
+    let (transfer_tx, transfer_rx) = rtrb::RingBuffer::<TransferRequest>::new(RING_CAPACITY);
 
     let core_shutdown = Arc::clone(shutdown);
     let core = thread::spawn(move || {
@@ -107,6 +109,8 @@ pub fn spawn(
             target_rx,
             exec_report_tx,
             feed_rx,
+            cross_tx,
+            transfer_rx,
             book_ids,
             instrument_ids,
             policy,
@@ -129,7 +133,14 @@ pub fn spawn(
 
     let nats_shutdown = Arc::clone(shutdown);
     let nats = thread::spawn(move || {
-        d1_gateway_nats::run_gateway(&nats_url, target_tx, exec_report_rx, &nats_shutdown)
+        d1_gateway_nats::run_gateway(
+            &nats_url,
+            target_tx,
+            exec_report_rx,
+            cross_rx,
+            transfer_tx,
+            &nats_shutdown,
+        )
     });
 
     let feed_shutdown = Arc::clone(shutdown);
@@ -146,13 +157,17 @@ pub fn spawn(
 
 /// Core thread: places the CLI-driven startup order, then each poll drains
 /// (in order) the feed ring -> `MarketData::ingest`, the target ring ->
-/// `cycle::NettingSession::on_target` -> internal cross legs booked and
-/// `OrderStore::place` plus FIX outbound for the resulting parent order,
-/// and the FIX inbound-exec ring -> `apply_exec` -> `ExecReport` (NATS
-/// outbound) and fill booking: pro-rata `cycle::allocate_fill` for netting
-/// parent orders, direct `PositionKeeper::apply_fill` for the single-book
-/// startup order. Manual-verification `println!`s only, same as Slice 2 --
-/// not the benchmarked hot path (`d1-core/benches/hot_path.rs` covers that).
+/// `cycle::NettingSession::on_target` -> internal cross legs booked (each
+/// pushed to `cross_tx` as a `CrossRecord` for NATS `d1.crosses` publish,
+/// Slice 3) and `OrderStore::place` plus FIX outbound for the resulting
+/// parent order, the transfer ring -> universe/sanity validation ->
+/// `cycle::NettingSession::on_transfer` -> one more `CrossRecord` pushed to
+/// `cross_tx` (Slice 3, ADR-009: no external order, no parent tracking), and
+/// the FIX inbound-exec ring -> `apply_exec` -> `ExecReport` (NATS outbound)
+/// and fill booking: pro-rata `cycle::allocate_fill` for netting parent
+/// orders, direct `PositionKeeper::apply_fill` for the single-book startup
+/// order. Manual-verification `println!`s only, same as Slice 2 -- not the
+/// benchmarked hot path (`d1-core/benches/hot_path.rs` covers that).
 ///
 /// `book_ids`/`instrument_ids` are the keeper/market-data universe (P1.M3
 /// slice 1): every (book, instrument) pair drawn from these lists gets a
@@ -168,6 +183,8 @@ fn run_core(
     mut target_rx: rtrb::Consumer<Target>,
     mut exec_report_tx: rtrb::Producer<ExecReport>,
     mut feed_rx: rtrb::Consumer<FeedTick>,
+    mut cross_tx: rtrb::Producer<CrossRecord>,
+    mut transfer_rx: rtrb::Consumer<TransferRequest>,
     book_ids: Vec<BookId>,
     instrument_ids: Vec<InstrumentId>,
     policy: RefPxPolicy,
@@ -246,6 +263,18 @@ fn run_core(
                                     target.instrument
                                 );
                             }
+                            // ponytail: log-and-drop on a full ring, same
+                            // ceiling as every other ring in this binary --
+                            // a single demo session, not a backpressure
+                            // protocol yet.
+                            for record in &output.crosses_to_book {
+                                if cross_tx.push(*record).is_err() {
+                                    eprintln!(
+                                        "d1: cross ring full, dropping InternalCrossNotice cross_id={}",
+                                        record.cross_id
+                                    );
+                                }
+                            }
                             if let Some(order) = output.parent_order {
                                 // Push to the wire BEFORE recording the
                                 // order in `store`: a `place` that outlives
@@ -277,6 +306,67 @@ fn run_core(
                         }
                         Err(err) => eprintln!("d1: netting cycle error: {err}"),
                     }
+                }
+            }
+        }
+
+        if let Ok(transfer) = transfer_rx.pop() {
+            did_work = true;
+            // Same universe gate as the target branch above (root CLAUDE.md
+            // #2): a transfer naming a book/instrument this process has no
+            // keeper slot for is rejected outright, plus the transfer-only
+            // invariants (distinct books, positive qty) `d1_netting::net`
+            // would otherwise enforce for netting-derived crosses.
+            if transfer.from_book == transfer.to_book {
+                eprintln!(
+                    "d1: transfer rejected, from_book == to_book book={:?} instrument={:?}",
+                    transfer.from_book, transfer.instrument
+                );
+            } else if transfer.qty_e2 <= 0 {
+                // ponytail: no numeric upper bound on qty_e2 here -- a
+                // business max-transfer-size limit is a Tier-1 risk check
+                // (ADR-008, `d1.toml` config), not a code constant, and
+                // lands with M4 risk limits. Overflow is still guarded by
+                // `PositionKeeper::apply_cross`'s `checked_*` arithmetic
+                // rejecting the cross outright (below), not by bounding the
+                // input here.
+                eprintln!(
+                    "d1: transfer rejected, qty_e2 must be > 0, got {} instrument={:?}",
+                    transfer.qty_e2, transfer.instrument
+                );
+            } else if keeper
+                .position(transfer.from_book, transfer.instrument)
+                .is_none()
+                || keeper
+                    .position(transfer.to_book, transfer.instrument)
+                    .is_none()
+            {
+                eprintln!(
+                    "d1: transfer for unconfigured book/instrument from_book={:?} to_book={:?} instrument={:?}, rejecting (not in this process's position universe)",
+                    transfer.from_book, transfer.to_book, transfer.instrument
+                );
+            } else {
+                let ref_px_e9 = arrival_mid_px_e9(&market_data, transfer.instrument);
+                if let Some(record) = session.on_transfer(transfer, &mut keeper, ref_px_e9) {
+                    println!(
+                        "d1: booked directed transfer cross_id={} instrument={:?} buy_book={:?} sell_book={:?} qty_e2={}",
+                        record.cross_id,
+                        record.instrument,
+                        record.buy_book,
+                        record.sell_book,
+                        record.qty_e2
+                    );
+                    if cross_tx.push(record).is_err() {
+                        eprintln!(
+                            "d1: cross ring full, dropping InternalCrossNotice cross_id={}",
+                            record.cross_id
+                        );
+                    }
+                } else {
+                    eprintln!(
+                        "d1: transfer not booked (overflow) instrument={:?} from_book={:?} to_book={:?} qty_e2={} -- not published",
+                        transfer.instrument, transfer.from_book, transfer.to_book, transfer.qty_e2
+                    );
                 }
             }
         }

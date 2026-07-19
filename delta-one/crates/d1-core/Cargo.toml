@@ -10,6 +10,7 @@ workspace = true
 [dependencies]
 # Populate only from the approved dependency table in delta-one/CLAUDE.md.
 thiserror = "2"
+uuid = { version = "1" }
 
 [dev-dependencies]
 criterion = "0.5"
