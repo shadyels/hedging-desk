@@ -17,6 +17,7 @@ d1-netting = { path = "../d1-netting" }
 rtrb = "0.3"
 anyhow = "1"
 ctrlc = "3"
+uuid = { version = "1", features = ["v7"] }
 
 [dev-dependencies]
 # nats_round_trip.rs drives the gateway from the outside (publish a

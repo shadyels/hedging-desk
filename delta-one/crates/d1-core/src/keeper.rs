@@ -59,23 +59,24 @@ impl PositionKeeper {
         Some(bi * self.n_instruments + ii)
     }
 
-    /// Apply a fill: `checked_add` on quantity, weighted-average cost on the
-    /// held/adding side. Returns `None` on overflow or an unknown
-    /// book/instrument; the keeper never panics.
-    ///
-    /// ponytail: cost-basis update is a simplified weighted-average (no lot
-    /// tracking, no realized P&L). Full Σ-book-position invariants and
-    /// per-book cash land with netting (P1.M3) / tracker analytics (P1.M5).
-    pub fn apply_fill(
-        &mut self,
+    /// Pure fill computation: works out the slot index and the resulting
+    /// `Position` for one (book, instrument) leg WITHOUT writing it back.
+    /// `None` on overflow or an unknown book/instrument -- same failure
+    /// modes as `apply_fill`, just deferred so a caller can compute two legs
+    /// of a cross against current state before committing either
+    /// (`apply_cross` below): committing one leg then discovering the other
+    /// overflows would leave a half-booked, net-imbalanced firm position
+    /// (root CLAUDE.md #2).
+    fn compute_fill(
+        &self,
         book: BookId,
         instrument: InstrumentId,
         side: Side,
         qty_e2: i64,
         px_e9: i64,
-    ) -> Option<()> {
+    ) -> Option<(usize, Position)> {
         let slot = self.slot(book, instrument)?;
-        let pos = self.positions.get_mut(slot)?;
+        let pos = self.positions.get(slot)?;
 
         let signed_qty = match side {
             Side::Buy => qty_e2,
@@ -83,7 +84,7 @@ impl PositionKeeper {
         };
         let new_qty = pos.net_qty_e2.checked_add(signed_qty)?;
 
-        pos.avg_px_e9 = if new_qty == 0 {
+        let avg_px_e9 = if new_qty == 0 {
             0
         } else if pos.net_qty_e2 == 0
             || (pos.net_qty_e2.signum() == new_qty.signum()
@@ -99,7 +100,77 @@ impl PositionKeeper {
             // Reducing or flipping: cost basis of the remaining/new leg is this trade.
             px_e9
         };
-        pos.net_qty_e2 = new_qty;
+
+        Some((
+            slot,
+            Position {
+                net_qty_e2: new_qty,
+                avg_px_e9,
+            },
+        ))
+    }
+
+    /// Apply a fill: `checked_add` on quantity, weighted-average cost on the
+    /// held/adding side. Returns `None` on overflow or an unknown
+    /// book/instrument; the keeper never panics.
+    ///
+    /// ponytail: cost-basis update is a simplified weighted-average (no lot
+    /// tracking, no realized P&L). Full Σ-book-position invariants and
+    /// per-book cash land with netting (P1.M3) / tracker analytics (P1.M5).
+    pub fn apply_fill(
+        &mut self,
+        book: BookId,
+        instrument: InstrumentId,
+        side: Side,
+        qty_e2: i64,
+        px_e9: i64,
+    ) -> Option<()> {
+        let (slot, new_pos) = self.compute_fill(book, instrument, side, qty_e2, px_e9)?;
+        if let Some(pos) = self.positions.get_mut(slot) {
+            *pos = new_pos;
+        }
+        Some(())
+    }
+
+    /// Book a two-leg internal cross atomically: buy leg into `buy_book`,
+    /// sell leg from `sell_book`, both computed against CURRENT state via
+    /// `compute_fill` and committed only if BOTH succeed. Either the whole
+    /// cross books or none of it does -- no rollback needed (and none
+    /// attempted): `buy_book != sell_book` means the two legs land in
+    /// disjoint slots (`slot = book * n_instruments + instrument`), so
+    /// neither leg's computation reads state the other would write, and a
+    /// reverse-`apply_fill` rollback would corrupt `avg_px_e9` anyway (the
+    /// reducing branch overwrites it rather than restoring the prior value).
+    /// `None` on overflow in either leg or an unknown book/instrument; the
+    /// keeper never panics.
+    #[must_use]
+    pub fn apply_cross(
+        &mut self,
+        instrument: InstrumentId,
+        buy_book: BookId,
+        sell_book: BookId,
+        qty_e2: i64,
+        px_e9: i64,
+    ) -> Option<()> {
+        let (buy_slot, buy_pos) =
+            self.compute_fill(buy_book, instrument, Side::Buy, qty_e2, px_e9)?;
+        let (sell_slot, sell_pos) =
+            self.compute_fill(sell_book, instrument, Side::Sell, qty_e2, px_e9)?;
+        // Defensive only: the caller (transfer validation, ADR-005 netting)
+        // already guarantees buy_book != sell_book, so these slots are
+        // always disjoint. If that ever stops holding, committing into the
+        // same slot twice would silently drop one leg's write -- reject
+        // instead of risking that (the keeper never panics, so this is a
+        // `None`, not a `debug_assert!`).
+        if buy_slot == sell_slot {
+            return None;
+        }
+        if let Some(pos) = self.positions.get_mut(buy_slot) {
+            *pos = buy_pos;
+        }
+        if let Some(pos) = self.positions.get_mut(sell_slot) {
+            *pos = sell_pos;
+        }
         Some(())
     }
 
@@ -167,6 +238,53 @@ mod tests {
                 keeper.position(BookId(1), InstrumentId(1001)).unwrap().net_qty_e2,
                 0
             );
+        }
+    }
+
+    #[test]
+    fn apply_cross_happy_path_conserves_firm_position() {
+        let mut keeper = PositionKeeper::new(&[BookId(1), BookId(2)], &[InstrumentId(1001)]);
+        keeper
+            .apply_cross(
+                InstrumentId(1001),
+                BookId(1),
+                BookId(2),
+                500,
+                150_000_000_000,
+            )
+            .unwrap();
+        let buy = keeper.position(BookId(1), InstrumentId(1001)).unwrap();
+        let sell = keeper.position(BookId(2), InstrumentId(1001)).unwrap();
+        assert_eq!(buy.net_qty_e2, 500);
+        assert_eq!(sell.net_qty_e2, -500);
+        assert_eq!(buy.net_qty_e2 + sell.net_qty_e2, 0, "both legs committed");
+    }
+
+    proptest! {
+        #[test]
+        fn apply_cross_is_atomic_on_leg_overflow(
+            qty_e2 in 1i64..=1_000_000,
+            px_e9 in 1i64..=1_000_000_000,
+        ) {
+            // Money-path integrity bug regression (security review): a cross
+            // must never half-book. Force the buy leg to overflow by seeding
+            // book 1 at i64::MAX -- any further Buy addition overflows
+            // `checked_add` -- and assert `apply_cross` returns `None` AND
+            // both books' positions are byte-for-byte unchanged, not just
+            // that the buy leg was left alone while the sell leg silently
+            // committed.
+            let mut keeper = PositionKeeper::new(&[BookId(1), BookId(2)], &[InstrumentId(1001)]);
+            keeper
+                .apply_fill(BookId(1), InstrumentId(1001), Side::Buy, i64::MAX, 1)
+                .unwrap();
+            let before_buy = keeper.position(BookId(1), InstrumentId(1001)).unwrap();
+            let before_sell = keeper.position(BookId(2), InstrumentId(1001)).unwrap();
+
+            let result = keeper.apply_cross(InstrumentId(1001), BookId(1), BookId(2), qty_e2, px_e9);
+
+            prop_assert_eq!(result, None);
+            prop_assert_eq!(keeper.position(BookId(1), InstrumentId(1001)).unwrap(), before_buy);
+            prop_assert_eq!(keeper.position(BookId(2), InstrumentId(1001)).unwrap(), before_sell);
         }
     }
 }

@@ -37,11 +37,21 @@ pub enum RefPxPolicy {
     ArrivalMid,
 }
 
+impl RefPxPolicy {
+    /// Wire/compliance string form (ADR-005 §4). Stamped onto every
+    /// `CrossRecord.policy_id` (`crates/d1/src/cycle.rs::book_cross`) as a
+    /// `&'static str` -- no allocation needed, unlike `Display`/`to_string`.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            RefPxPolicy::ArrivalMid => "ARRIVAL_MID",
+        }
+    }
+}
+
 impl fmt::Display for RefPxPolicy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            RefPxPolicy::ArrivalMid => f.write_str("ARRIVAL_MID"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
@@ -436,6 +446,7 @@ mod tests {
 
     #[test]
     fn ref_px_policy_round_trips() {
+        assert_eq!(RefPxPolicy::ArrivalMid.as_str(), "ARRIVAL_MID");
         assert_eq!(RefPxPolicy::ArrivalMid.to_string(), "ARRIVAL_MID");
         assert_eq!(
             "ARRIVAL_MID".parse::<RefPxPolicy>().unwrap(),

@@ -175,7 +175,11 @@ message InternalTransferRequest {
   // RATES-IR. D1 validates books/instrument/limits, books both legs at the
   // configured reference-price policy, publishes InternalCrossNotice + Kafka.
   hedging.common.v1.Meta meta = 1;
-  string transfer_id = 2;           // UUIDv7; idempotency key
+  string transfer_id = 2;           // UUIDv7; compliance-lineage key for the eventual
+                                     // Kafka posttrade.crosses record (M4). Slice 3
+                                     // dedupes transport redelivery on Meta.msg_id only --
+                                     // business-level transfer idempotency (keyed on this
+                                     // field) lands with M4 lineage.
   hedging.common.v1.InstrumentRef instrument = 3;
   uint32 from_book_id = 4;          // book shedding the risk (sells)
   uint32 to_book_id = 5;            // book receiving the risk (buys)

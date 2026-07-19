@@ -364,6 +364,7 @@ dependencies = [
  "prost",
  "rtrb",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -378,6 +379,7 @@ dependencies = [
  "hdrhistogram",
  "proptest",
  "thiserror",
+ "uuid",
 ]
 
 [[package]]
