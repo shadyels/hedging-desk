@@ -52,6 +52,7 @@ struct BookDef {
 struct InstrumentDef {
     instrument_id: u32,
     symbol: String,
+    currency: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +77,14 @@ pub struct Universe {
     pub instrument_ids: Vec<InstrumentId>,
     /// Ticker symbol -> instrument id.
     pub symbol_to_id: HashMap<String, InstrumentId>,
+    /// Instrument id -> ticker symbol (inverse of `symbol_to_id`). Used by
+    /// post-trade encoding (`d1-posttrade::convert`) to resolve the wire
+    /// `symbol` field from the id-only ring payload.
+    pub id_to_symbol: HashMap<InstrumentId, String>,
+    /// Instrument id -> settlement currency. Used by post-trade encoding
+    /// (`d1-posttrade::convert`) to resolve the wire `currency` field from
+    /// the id-only ring payload.
+    pub id_to_currency: HashMap<InstrumentId, String>,
     /// Cross reference-price policy id from `conventions.cross_px_policy_default`.
     /// Kept as the raw refdata string: `d1` parses it into `d1_netting::RefPxPolicy`
     /// at startup, so an unknown policy is a hard startup error rather than a
@@ -118,16 +127,22 @@ fn parse(path: &Path, raw: &str) -> Result<Universe, RefdataError> {
         .map(|i| InstrumentId(i.instrument_id))
         .collect();
     let cross_px_policy = parsed.conventions.cross_px_policy_default;
-    let symbol_to_id = parsed
-        .instruments
-        .into_iter()
-        .map(|i| (i.symbol, InstrumentId(i.instrument_id)))
-        .collect();
+    let mut symbol_to_id = HashMap::with_capacity(parsed.instruments.len());
+    let mut id_to_symbol = HashMap::with_capacity(parsed.instruments.len());
+    let mut id_to_currency = HashMap::with_capacity(parsed.instruments.len());
+    for i in parsed.instruments {
+        let id = InstrumentId(i.instrument_id);
+        symbol_to_id.insert(i.symbol.clone(), id);
+        id_to_symbol.insert(id, i.symbol);
+        id_to_currency.insert(id, i.currency);
+    }
 
     Ok(Universe {
         book_ids,
         instrument_ids,
         symbol_to_id,
+        id_to_symbol,
+        id_to_currency,
         cross_px_policy,
     })
 }
@@ -154,10 +169,31 @@ mod tests {
     }
 
     #[test]
+    fn id_to_symbol_and_currency_resolve() {
+        let universe = load(&universe_path()).unwrap();
+        assert_eq!(
+            universe.id_to_symbol.get(&InstrumentId(1001)).cloned(),
+            Some("AAPL".to_string())
+        );
+        assert_eq!(
+            universe.id_to_currency.get(&InstrumentId(1001)).cloned(),
+            Some("USD".to_string())
+        );
+        assert_eq!(
+            universe.id_to_symbol.get(&InstrumentId(1003)).cloned(),
+            Some("NESN".to_string())
+        );
+        assert_eq!(
+            universe.id_to_currency.get(&InstrumentId(1003)).cloned(),
+            Some("CHF".to_string())
+        );
+    }
+
+    #[test]
     fn missing_conventions_block_is_a_parse_error() {
         let raw = r#"{
             "books": [{"book_id": 1}],
-            "instruments": [{"instrument_id": 1001, "symbol": "AAPL"}]
+            "instruments": [{"instrument_id": 1001, "symbol": "AAPL", "currency": "USD"}]
         }"#;
         let err = parse(Path::new("test.json"), raw).unwrap_err();
         assert!(matches!(err, RefdataError::Parse { .. }));
@@ -167,7 +203,7 @@ mod tests {
     fn empty_books_or_instruments_is_an_error() {
         let empty_books = r#"{
             "books": [],
-            "instruments": [{"instrument_id": 1001, "symbol": "AAPL"}],
+            "instruments": [{"instrument_id": 1001, "symbol": "AAPL", "currency": "USD"}],
             "conventions": {"cross_px_policy_default": "ARRIVAL_MID"}
         }"#;
         assert!(matches!(
