@@ -9,3 +9,8 @@ workspace = true
 
 [dependencies]
 # Populate only from the approved dependency table in delta-one/CLAUDE.md.
+d1-core = { path = "../d1-core" }
+d1-refdata = { path = "../d1-refdata" }
+apache-avro = "0.21"
+thiserror = "2"
+uuid = { version = "1", features = ["v7"] }

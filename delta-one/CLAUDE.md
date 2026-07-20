@@ -62,6 +62,7 @@ Enforcement: `cargo clippy` with `-D warnings` plus the lint set in `Cargo.toml`
 | `serde` | derive `Deserialize` for `d1-refdata`'s universe.json shape | no -- refdata JSON parse at startup, never on the hot path |
 | `serde_json` | parse `protocol/refdata/universe.json` in `d1-refdata` | no -- refdata JSON parse at startup, never on the hot path |
 | `uuid` (v7) | msg ids | generated off hot path, pre-fetched pool on |
+| `apache-avro` | Avro encoding of post-trade records (ADR-002) | no -- post-trade edge, never on hot path |
 | `ctrlc` | Ctrl-C signal handler (`crates/d1`'s shutdown flag) | no -- registration happens once at startup on the main thread, never in a poll loop |
 
 Anything not in this table needs a row added here + a sentence of justification in the PR description.
