@@ -64,6 +64,8 @@ Define the per-project stack in the PROJECT's CLAUDE.md using this template, and
 - When two subagents make conflicting factual claims (e.g. about test coverage or behavior), do not pick a side — route the conflict to the architect (or a fresh reader) to adjudicate by reading the actual source. Surface it explicitly in the approval dispatch rather than silently resolving it yourself.
 - A detailed approved plan already serves as the architect's SPEC — skip a redundant explorer+SPEC round and dispatch the worker directly with the plan; still run the full test→review→APPROVAL tail. Workers/reviewers start fresh, so each dispatch must be self-contained (goal, plan excerpt, file paths, reuse APIs, gate commands).
 - Agent dispatches can fail transiently on a classifier/model outage ("temporarily unavailable, auto mode cannot determine safety") — this is not a rejection; just retry the same dispatch.
+- Harness-injected `<new-diagnostics>` can be STALE mid-run snapshots that contradict a completed worker's green claim (e.g. "file not found for module", wrong arg-count at shifted line numbers). Do not trust either narrative — adjudicate by re-running the actual gate (`cargo test`/`clippy --all-targets`/`fmt`) against the real tree. Shifted line numbers vs. the current file are the tell.
+- After personally running the full gate suite green to adjudicate a conflict, skip the redundant `tester` round — dispatch straight to review. Re-invoking tester for a result you already hold is pure token waste.
 <!-- END orchestrator-lessons -->
 
 <!-- END subagent-orchestration -->
