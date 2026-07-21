@@ -63,6 +63,10 @@ pub struct CycleOutput {
     /// The firm-level parent order to place, if this cycle's residual demand
     /// wasn't fully absorbed by crosses or suppressed by the no-trade band.
     pub parent_order: Option<Order>,
+    /// This netting cycle's sequence number (`NettingSession::cycle_seq` at
+    /// the time this cycle ran), for `posttrade::cross_events`'s
+    /// `NettingCycleId::Cycle` lineage stamp (P1.M4).
+    pub cycle_id: u64,
 }
 
 /// Books one two-leg internal cross into `keeper` atomically via
@@ -316,6 +320,7 @@ impl NettingSession {
         Ok(CycleOutput {
             crosses_to_book: cross_records,
             parent_order,
+            cycle_id,
         })
     }
 

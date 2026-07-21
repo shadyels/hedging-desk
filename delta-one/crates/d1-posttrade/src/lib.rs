@@ -12,11 +12,45 @@
 //! `d1-gateway-nats::convert` resolves proto fields.
 
 pub mod convert;
+pub mod producer;
 
 use d1_core::{BookId, ClOrdId, ExecId, InstrumentId, OrderStatus, Side};
 use uuid::Uuid;
 
 pub use convert::Schemas;
+pub use producer::run_producer;
+
+/// Kafka topic for booked trade legs (ADR-002), keyed by `instrument_id`.
+pub const TOPIC_TRADES: &str = "posttrade.trades";
+/// Kafka topic for explicit internal crosses (ADR-002/ADR-005), keyed by
+/// `cross_id`.
+pub const TOPIC_CROSSES: &str = "posttrade.crosses";
+/// Kafka topic for pro-rata fill allocations (ADR-002), keyed by
+/// `parent_cl_ord_id`.
+pub const TOPIC_ALLOCATIONS: &str = "posttrade.allocations";
+/// Kafka topic for the order audit trail (ADR-002), keyed by `cl_ord_id`.
+pub const TOPIC_ORDER_AUDIT: &str = "posttrade.orders.audit";
+
+/// Destination topic and partition key for one post-trade event. The key is
+/// rendered with the exact same id-string logic `convert.rs` uses for the
+/// Avro payload's own id fields, so the Kafka key matches the Avro field
+/// byte-for-byte wherever that field is itself a string (`cross_id`,
+/// `parent_cl_ord_id`, `cl_ord_id`); `Trade`'s `instrument_id` is an Avro
+/// `int`, not a string, so its key is that id's plain decimal rendering.
+#[must_use]
+pub fn topic_and_key(event: &PostTradeEvent) -> (&'static str, String) {
+    match event {
+        PostTradeEvent::Trade(t) => (TOPIC_TRADES, t.instrument.0.to_string()),
+        PostTradeEvent::Cross(c) => (TOPIC_CROSSES, c.cross_id.to_string()),
+        PostTradeEvent::Allocation(a) => (
+            TOPIC_ALLOCATIONS,
+            convert::clordid_to_string(&a.parent_cl_ord_id),
+        ),
+        PostTradeEvent::OrderAudit(o) => {
+            (TOPIC_ORDER_AUDIT, convert::clordid_to_string(&o.cl_ord_id))
+        }
+    }
+}
 
 /// One post-trade event to encode. Mirrors the four Avro record types in
 /// `protocol/avro/` (`posttrade_trade`, `posttrade_cross`,
@@ -180,4 +214,7 @@ pub enum PostTradeError {
     /// Avro schema parse or encode failure.
     #[error(transparent)]
     Avro(#[from] apache_avro::Error),
+    /// A Kafka producer or admin (topic-create) operation failed.
+    #[error(transparent)]
+    Kafka(#[from] rdkafka::error::KafkaError),
 }
