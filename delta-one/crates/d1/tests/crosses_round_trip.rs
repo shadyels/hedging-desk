@@ -267,6 +267,11 @@ fn crosses_and_transfers_round_trip() {
         .expect("universe refdata cross_px_policy parses");
 
     let shutdown = Arc::new(AtomicBool::new(false));
+    // Clone the id lists, not `universe` itself: `universe` as a whole moves
+    // into `spawn` below for the (unused-in-this-test, no broker running)
+    // Kafka producer thread's would-be `symbol`/`currency` resolution.
+    let book_ids = universe.book_ids.clone();
+    let instrument_ids = universe.instrument_ids.clone();
     let handles = spawn(
         StartupOrder {
             book: BookId(1),
@@ -281,9 +286,11 @@ fn crosses_and_transfers_round_trip() {
             target_comp_id: target_comp_id(),
         },
         NATS_URL.to_string(),
-        universe.book_ids,
-        universe.instrument_ids,
+        book_ids,
+        instrument_ids,
         policy,
+        universe,
+        None, // no Kafka broker in this test
         &shutdown,
     );
 

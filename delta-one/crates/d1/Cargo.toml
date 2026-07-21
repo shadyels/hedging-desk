@@ -14,6 +14,7 @@ d1-gateway-fix = { path = "../d1-gateway-fix" }
 d1-gateway-nats = { path = "../d1-gateway-nats" }
 d1-refdata = { path = "../d1-refdata" }
 d1-netting = { path = "../d1-netting" }
+d1-posttrade = { path = "../d1-posttrade" }
 rtrb = "0.3"
 anyhow = "1"
 ctrlc = "3"

@@ -6,6 +6,7 @@
 
 pub mod cycle;
 pub mod feed;
+pub mod posttrade;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,6 +22,8 @@ use d1_core::{
 use d1_gateway_fix::{FixCallbacks, FixError};
 use d1_gateway_nats::NatsError;
 use d1_netting::RefPxPolicy;
+use d1_posttrade::{AuditOrigin, NettingCycleId, PostTradeError, PostTradeEvent};
+use d1_refdata::Universe;
 
 /// Ring capacity for every `rtrb` ring this binary owns (ADR-013). Generous
 /// for a demo-sized single session, matching `d1-gateway-fix`'s ring sizing.
@@ -70,6 +73,10 @@ pub struct RunHandles {
     pub nats: JoinHandle<Result<(), NatsError>>,
     /// The synthetic feed-ingest producer thread.
     pub feed: JoinHandle<()>,
+    /// The Kafka post-trade producer thread, `Some` only when a broker
+    /// address was given (`kafka_brokers`) -- `None` in tests, which run
+    /// without a broker.
+    pub posttrade: Option<JoinHandle<Result<(), PostTradeError>>>,
 }
 
 /// Build the `rtrb` rings (ADR-013) and spawn the core/FIX/NATS/feed
@@ -82,6 +89,15 @@ pub struct RunHandles {
 /// these lists for the startup order to book anywhere -- the wildcard-target
 /// guard in `run_core` already handles a startup pair that isn't configured,
 /// so `spawn` does not re-validate that here.
+///
+/// `universe` is handed whole to the Kafka producer thread (P1.M4 Slice 2):
+/// `d1_posttrade::Schemas::encode` resolves `symbol`/`currency` from it,
+/// separately from `book_ids`/`instrument_ids` above (those feed the keeper).
+/// `kafka_brokers` is `Some(addr)` to spawn the producer thread, `None` to
+/// skip it entirely -- tests pass `None` since they run without a broker; the
+/// `posttrade` ring then simply fills and the log-and-drop push helper in
+/// `run_core` drops harmlessly.
+#[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn spawn(
     startup: StartupOrder,
@@ -90,6 +106,8 @@ pub fn spawn(
     book_ids: Vec<BookId>,
     instrument_ids: Vec<InstrumentId>,
     policy: RefPxPolicy,
+    universe: Universe,
+    kafka_brokers: Option<String>,
     shutdown: &Arc<AtomicBool>,
 ) -> RunHandles {
     let (fix_outbound_tx, fix_outbound_rx) = rtrb::RingBuffer::<Order>::new(RING_CAPACITY);
@@ -99,6 +117,7 @@ pub fn spawn(
     let (feed_tx, feed_rx) = rtrb::RingBuffer::<FeedTick>::new(RING_CAPACITY);
     let (cross_tx, cross_rx) = rtrb::RingBuffer::<CrossRecord>::new(RING_CAPACITY);
     let (transfer_tx, transfer_rx) = rtrb::RingBuffer::<TransferRequest>::new(RING_CAPACITY);
+    let (posttrade_tx, posttrade_rx) = rtrb::RingBuffer::<PostTradeEvent>::new(RING_CAPACITY);
 
     let core_shutdown = Arc::clone(shutdown);
     let core = thread::spawn(move || {
@@ -111,6 +130,7 @@ pub fn spawn(
             feed_rx,
             cross_tx,
             transfer_rx,
+            posttrade_tx,
             book_ids,
             instrument_ids,
             policy,
@@ -147,11 +167,32 @@ pub fn spawn(
     let feed =
         thread::spawn(move || feed::run_feed_producer(startup.instrument, feed_tx, &feed_shutdown));
 
+    // `kafka_brokers: None` (tests, no broker available) -- don't spawn: the
+    // ring simply fills and `run_core`'s log-and-drop push helper drops
+    // harmlessly, same ceiling as every other ring in this binary.
+    let posttrade = kafka_brokers.map(|brokers| {
+        let posttrade_shutdown = Arc::clone(shutdown);
+        thread::spawn(move || {
+            let result =
+                d1_posttrade::run_producer(&brokers, universe, posttrade_rx, &posttrade_shutdown);
+            // Log as soon as the thread dies, not just at `main.rs`'s final
+            // join: a broker outage at startup (e.g. `ensure_topics` failing)
+            // would otherwise leave the entire post-trade/compliance audit
+            // trail silently dropped for the rest of the session with no
+            // visibility until shutdown.
+            if let Err(ref err) = result {
+                eprintln!("d1: Kafka post-trade producer exited with error: {err}");
+            }
+            result
+        })
+    });
+
     RunHandles {
         core,
         fix,
         nats,
         feed,
+        posttrade,
     }
 }
 
@@ -185,6 +226,7 @@ fn run_core(
     mut feed_rx: rtrb::Consumer<FeedTick>,
     mut cross_tx: rtrb::Producer<CrossRecord>,
     mut transfer_rx: rtrb::Consumer<TransferRequest>,
+    mut posttrade_tx: rtrb::Producer<PostTradeEvent>,
     book_ids: Vec<BookId>,
     instrument_ids: Vec<InstrumentId>,
     policy: RefPxPolicy,
@@ -209,6 +251,21 @@ fn run_core(
         last_px_e9: 0,
     };
     store.place(order);
+    push_posttrade(
+        &mut posttrade_tx,
+        posttrade::order_audit(
+            cl_ord_id,
+            startup.instrument,
+            startup.side,
+            OrderStatus::New,
+            OrderStatus::New,
+            0,
+            0,
+            startup.qty_e2,
+            AuditOrigin::System,
+            None,
+        ),
+    );
 
     let mut pending = Some(order);
     while let Some(next) = pending.take() {
@@ -274,6 +331,16 @@ fn run_core(
                                         record.cross_id
                                     );
                                 }
+                                // The cross is already booked in `keeper`
+                                // regardless of whether the NATS notice above
+                                // made it out, so the post-trade audit trail
+                                // must not depend on that push either.
+                                for event in posttrade::cross_events(
+                                    record,
+                                    NettingCycleId::Cycle(output.cycle_id),
+                                ) {
+                                    push_posttrade(&mut posttrade_tx, event);
+                                }
                             }
                             if let Some(order) = output.parent_order {
                                 // Push to the wire BEFORE recording the
@@ -300,6 +367,21 @@ fn run_core(
                                         order.instrument,
                                         order.side,
                                         order.order_qty_e2
+                                    );
+                                    push_posttrade(
+                                        &mut posttrade_tx,
+                                        posttrade::order_audit(
+                                            order.cl_ord_id,
+                                            order.instrument,
+                                            order.side,
+                                            OrderStatus::New,
+                                            OrderStatus::New,
+                                            0,
+                                            0,
+                                            order.order_qty_e2,
+                                            AuditOrigin::NettingEngine,
+                                            None,
+                                        ),
                                     );
                                 }
                             }
@@ -362,6 +444,9 @@ fn run_core(
                             record.cross_id
                         );
                     }
+                    for event in posttrade::cross_events(&record, NettingCycleId::Direct) {
+                        push_posttrade(&mut posttrade_tx, event);
+                    }
                 } else {
                     eprintln!(
                         "d1: transfer not booked (overflow) instrument={:?} from_book={:?} to_book={:?} qty_e2={} -- not published",
@@ -373,8 +458,24 @@ fn run_core(
 
         if let Ok(event) = fix_inbound_rx.pop() {
             did_work = true;
+            // Captured before `apply_exec` mutates the order -- the audit
+            // trail's `from_status` (P1.M4). `apply_exec`'s own success
+            // guarantees this lookup also succeeded (same `cl_ord_id`), so
+            // an unexpected `None` here can only mean the store and the
+            // exec disagree about the order's existence.
+            let from_status = store.get(event.cl_ord_id).map(|o| o.status);
             match store.apply_exec(&event) {
                 Ok(fill) => {
+                    // Post-`apply_exec` snapshot, reused below both for the
+                    // audit trail's cum/leaves and for the `ExecReport`.
+                    let current = store.get(event.cl_ord_id);
+                    // ponytail: only fill transitions are audited to
+                    // `posttrade.orders.audit` (Slice 2 sites E/F). A non-fill
+                    // terminal exec (reject/cancel/expire -> `fill == None`)
+                    // leaves the audit trail at its `New` placement record.
+                    // `posttrade::order_audit` already supports these (see the
+                    // `Rejected` unit test); wire the `None` arm when the audit
+                    // topic needs full terminal-transition coverage (Slice 3+).
                     if let Some(fill) = fill {
                         // A parent order's `Fill.book == BookId(0)` (the
                         // reserved firm-level pre-allocation, `live.proto`
@@ -386,6 +487,7 @@ fn run_core(
                         if let Some(parent) = session.parent_mut(event.cl_ord_id) {
                             let side = parent.side;
                             let instrument = parent.instrument;
+                            let cycle_id = parent.cycle_id;
                             for (book, qty_e2) in allocate_fill(parent, fill.qty_e2) {
                                 if qty_e2 == 0 {
                                     continue;
@@ -408,7 +510,48 @@ fn run_core(
                                         "d1: parent fill allocated book={book:?} instrument={instrument:?} qty_e2={qty_e2} px_e9={}",
                                         fill.px_e9
                                     );
+                                    push_posttrade(
+                                        &mut posttrade_tx,
+                                        posttrade::allocation_event(
+                                            event.cl_ord_id,
+                                            event.exec_id,
+                                            instrument,
+                                            book,
+                                            qty_e2,
+                                            fill.px_e9,
+                                            NettingCycleId::Cycle(cycle_id),
+                                        ),
+                                    );
                                 }
+                            }
+                            push_posttrade(
+                                &mut posttrade_tx,
+                                posttrade::external_fill_trade(
+                                    BookId(0),
+                                    instrument,
+                                    side,
+                                    fill.qty_e2,
+                                    fill.px_e9,
+                                    event.exec_id,
+                                    event.cl_ord_id,
+                                ),
+                            );
+                            if let (Some(from_status), Some(order)) = (from_status, current) {
+                                push_posttrade(
+                                    &mut posttrade_tx,
+                                    posttrade::order_audit(
+                                        event.cl_ord_id,
+                                        instrument,
+                                        side,
+                                        from_status,
+                                        event.reported_status,
+                                        fill.qty_e2,
+                                        order.cum_qty_e2,
+                                        order.leaves_qty_e2,
+                                        AuditOrigin::System,
+                                        None,
+                                    ),
+                                );
                             }
                         } else if keeper
                             .apply_fill(
@@ -429,12 +572,41 @@ fn run_core(
                                 "d1: fill qty_e2={} px_e9={} book={:?} instrument={:?}",
                                 fill.qty_e2, fill.px_e9, fill.book, fill.instrument
                             );
+                            push_posttrade(
+                                &mut posttrade_tx,
+                                posttrade::external_fill_trade(
+                                    fill.book,
+                                    fill.instrument,
+                                    fill.side,
+                                    fill.qty_e2,
+                                    fill.px_e9,
+                                    event.exec_id,
+                                    event.cl_ord_id,
+                                ),
+                            );
+                            if let (Some(from_status), Some(order)) = (from_status, current) {
+                                push_posttrade(
+                                    &mut posttrade_tx,
+                                    posttrade::order_audit(
+                                        event.cl_ord_id,
+                                        fill.instrument,
+                                        fill.side,
+                                        from_status,
+                                        event.reported_status,
+                                        fill.qty_e2,
+                                        order.cum_qty_e2,
+                                        order.leaves_qty_e2,
+                                        AuditOrigin::System,
+                                        None,
+                                    ),
+                                );
+                            }
                         }
                     }
                     // ponytail: log-and-drop on a full ring, same ceiling as
                     // every other ring in this binary -- a single demo
                     // session, not a backpressure protocol yet.
-                    match store.get(event.cl_ord_id) {
+                    match current {
                         Some(order) => {
                             let report = ExecReport {
                                 cl_ord_id: event.cl_ord_id,
@@ -467,6 +639,17 @@ fn run_core(
         if !did_work {
             thread::sleep(POLL_INTERVAL);
         }
+    }
+}
+
+/// Push one post-trade event onto the Kafka producer ring, log-and-drop on
+/// full -- same ceiling as every other ring in this binary (a single demo
+/// session, not a backpressure protocol yet). With no producer thread
+/// running (`spawn`'s `kafka_brokers: None`, tests), this ring simply fills
+/// and every subsequent push drops harmlessly.
+fn push_posttrade(tx: &mut rtrb::Producer<PostTradeEvent>, event: PostTradeEvent) {
+    if tx.push(event).is_err() {
+        eprintln!("d1: posttrade ring full, dropping post-trade event");
     }
 }
 

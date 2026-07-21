@@ -24,6 +24,8 @@ const TARGET_COMP_ID: &str = "SIM";
 const DEFAULT_INITIATOR_CFG: &str = "crates/d1-gateway-fix/initiator.cfg";
 /// NATS client port (`deploy/docker-compose.yml`).
 const DEFAULT_NATS_URL: &str = "127.0.0.1:4222";
+/// Kafka broker port (`deploy/docker-compose.yml`'s `PLAINTEXT_HOST` listener).
+const DEFAULT_KAFKA_BROKERS: &str = "localhost:9092";
 /// Relative to `delta-one/`, this binary's cwd (`justfile`'s `cd delta-one && cargo run -p d1`).
 const DEFAULT_UNIVERSE: &str = "../protocol/refdata/universe.json";
 const MAIN_POLL_INTERVAL: Duration = Duration::from_millis(5);
@@ -33,6 +35,7 @@ struct Args {
     cfg: PathBuf,
     nats_url: String,
     universe: PathBuf,
+    kafka_brokers: String,
 }
 
 fn main() -> Result<()> {
@@ -72,6 +75,13 @@ fn main() -> Result<()> {
             .context("registering Ctrl-C handler")?;
     }
 
+    // Clone the id lists (not `universe` itself) for the keeper/market-data
+    // universe: `universe` as a whole is moved into `spawn` below for the
+    // Kafka producer thread's `symbol`/`currency` resolution
+    // (`d1_posttrade::Schemas::encode`), so it can't also be partially moved
+    // from here.
+    let book_ids = universe.book_ids.clone();
+    let instrument_ids = universe.instrument_ids.clone();
     let handles = spawn(
         args.startup,
         FixConfig {
@@ -80,9 +90,11 @@ fn main() -> Result<()> {
             target_comp_id: TARGET_COMP_ID.to_string(),
         },
         args.nats_url,
-        universe.book_ids,
-        universe.instrument_ids,
+        book_ids,
+        instrument_ids,
         policy,
+        universe,
+        Some(args.kafka_brokers),
         &shutdown,
     );
 
@@ -111,6 +123,15 @@ fn main() -> Result<()> {
         Ok(Err(err)) => eprintln!("d1: NATS gateway exited with error: {err}"),
         Err(_) => eprintln!("d1: NATS gateway thread panicked"),
     }
+    if let Some(posttrade) = handles.posttrade {
+        // Same degraded-mode posture as the NATS gateway above: a Kafka
+        // outage shouldn't take down the FIX/NATS planes.
+        match posttrade.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => eprintln!("d1: Kafka post-trade producer exited with error: {err}"),
+            Err(_) => eprintln!("d1: Kafka post-trade producer thread panicked"),
+        }
+    }
 
     Ok(())
 }
@@ -124,6 +145,7 @@ fn parse_args() -> Result<Args> {
     let mut cfg = PathBuf::from(DEFAULT_INITIATOR_CFG);
     let mut nats_url = DEFAULT_NATS_URL.to_string();
     let mut universe = PathBuf::from(DEFAULT_UNIVERSE);
+    let mut kafka_brokers = DEFAULT_KAFKA_BROKERS.to_string();
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -164,6 +186,7 @@ fn parse_args() -> Result<Args> {
             "--cfg" => cfg = PathBuf::from(next_arg(&mut args, "--cfg")?),
             "--nats-url" => nats_url = next_arg(&mut args, "--nats-url")?,
             "--universe" => universe = PathBuf::from(next_arg(&mut args, "--universe")?),
+            "--kafka-brokers" => kafka_brokers = next_arg(&mut args, "--kafka-brokers")?,
             other => bail!("unknown argument '{other}'"),
         }
     }
@@ -181,6 +204,7 @@ fn parse_args() -> Result<Args> {
         cfg,
         nats_url,
         universe,
+        kafka_brokers,
     })
 }
 

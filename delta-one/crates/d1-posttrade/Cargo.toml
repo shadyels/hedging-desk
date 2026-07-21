@@ -14,3 +14,5 @@ d1-refdata = { path = "../d1-refdata" }
 apache-avro = "0.21"
 thiserror = "2"
 uuid = { version = "1", features = ["v7"] }
+rdkafka = { version = "0.39", default-features = false, features = ["cmake-build"] }
+rtrb = "0.3"

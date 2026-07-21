@@ -309,7 +309,10 @@ fn netting_cycle_id_str(id: NettingCycleId) -> String {
 /// `d1-core` ids are fixed 20-byte ASCII arrays; the Avro fields are plain
 /// strings with no length cap, so a lossy decode is exact for every id this
 /// system ever mints (mirrors `d1-gateway-nats::convert::clordid_to_string`).
-fn clordid_to_string(id: &ClOrdId) -> String {
+///
+/// `pub(crate)`: `lib.rs::topic_and_key` reuses this so the Kafka partition
+/// key matches the Avro `parent_cl_ord_id`/`cl_ord_id` field byte-for-byte.
+pub(crate) fn clordid_to_string(id: &ClOrdId) -> String {
     String::from_utf8_lossy(&id.0).into_owned()
 }
 
