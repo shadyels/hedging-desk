@@ -67,6 +67,10 @@ Per-Greek treatment ladder (full rationale and sources in ADR-008): **delta** is
 - UI treats disconnect as stale: full-board grey-out + snapshot refresh on reconnect.
 - Kill switch (Phase 3): NATS command → Delta One cancels working orders, rejects new targets, stays subscribed (observability survives the halt).
 
+**Ordered shutdown contract (P1.M4 Slice 3):** threading pipelines that push data through async gateways require coordinated drains. The `d1-posttrade` Kafka producer thread is the model: it consumes `PostTradeEvent` from a ring pushed by the core thread. Contract: (1) signal the core's `shutdown` flag, (2) join the core thread — it drains all pending events before exiting — (3) signal the producer's `posttrade_shutdown` flag, (4) join the producer thread. This ordering prevents the producer from exiting while the core is still draining, which would silently drop in-flight events. Any future gateway thread (e.g., Rates-IR FIX adapter for Phase 4 rho transfer) follows the same pattern.
+
+**Post-trade topic provisioning (P1.M4 Slice 2):** the `posttrade.trades`, `posttrade.crosses`, `posttrade.allocations`, and `posttrade.orders.audit` topics must exist before the producer starts. Compose sets `KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"` (safe default); the topics are provisioned out-of-band via `scripts/demo.sh` at startup. The producer hard-errors if any topic is missing — this is a deployment prerequisite and a guard against silently losing post-trade data.
+
 ## Demo storyline (implemented as a `sim/` scenario)
 
 1. Underlying gaps down through an autocall barrier.

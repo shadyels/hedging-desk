@@ -2,7 +2,7 @@
 
 Everything fake lives here so nothing fake lives anywhere else. The demo is fully self-contained: no real connectivity.
 
-Code location: sim's Rust binary is the `sim` crate in the `delta-one/` Cargo workspace (ADR-007); this directory holds scenarios (`scenarios/`), golden outputs (`golden/`, created in P1.M4) and these rules.
+Code location: sim's Rust binary is the `sim` crate in the `delta-one/` Cargo workspace (ADR-007); this directory holds scenarios (`scenarios/`), golden outputs (`golden/`, containing four `.jsonl` files of post-trade Avro records decoded to JSON — `posttrade.{trades,crosses,allocations,orders.audit}.jsonl` — one object per line; regenerate with `UPDATE_GOLDEN=1 cargo test -p d1 --test golden_posttrade -- --ignored`) and these rules.
 
 ## Components
 
