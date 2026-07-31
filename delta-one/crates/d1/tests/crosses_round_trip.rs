@@ -291,6 +291,7 @@ fn crosses_and_transfers_round_trip() {
         policy,
         universe,
         None, // no Kafka broker in this test
+        false,
         &shutdown,
     );
 

@@ -16,44 +16,65 @@ use d1_core::{FeedTick, InstrumentId};
 
 const TICK_INTERVAL: Duration = Duration::from_millis(500);
 const PUSH_POLL_INTERVAL: Duration = Duration::from_millis(5);
-const STARTING_PX_E9: i64 = 150_000_000_000; // 150.00, arbitrary demo price
+/// 150.00, arbitrary demo price. `pub(crate)` so `crates/d1/src/lib.rs::run_core`
+/// can prime `MarketData` synchronously at t=0 with the same starting price
+/// this producer ticks from (MEDIUM 2: the arrival mid used to price the
+/// first netting cycle's crosses must not depend on whether the feed
+/// thread's first burst has landed before a target is drained).
+pub(crate) const STARTING_PX_E9: i64 = 150_000_000_000;
 const SPREAD_E9: i64 = 10_000_000; // 0.01
-const DRIFT_E9: i64 = 1_000_000; // 0.001/tick, deterministic not random
+/// Live-mode per-tick drift, deterministic not random. The golden-file
+/// deterministic path (`crates/d1/src/lib.rs::spawn`) passes `0` instead,
+/// pinning every tick's mid at `STARTING_PX_E9` regardless of tick count.
+pub(crate) const DRIFT_E9: i64 = 1_000_000; // 0.001/tick
 
-/// Emit one `FeedTick` for `instrument` onto `feed_tx` every `TICK_INTERVAL`
-/// until `shutdown` is set.
+/// Emit one `FeedTick` per instrument in `instruments` onto `feed_tx` every
+/// `TICK_INTERVAL` until `shutdown` is set. `drift_e9` is added to each
+/// instrument's running price after every tick -- `DRIFT_E9` live, `0` for
+/// the deterministic golden-file path.
+///
+/// Every instrument in the keeper universe is ticked, not just the CLI
+/// startup order's: `d1_core::MarketData`'s arrival mid is what
+/// `cycle::book_cross` prices an internal cross at, so an instrument that
+/// never receives a tick books its crosses at `ref_px_e9 = 0`. One thread
+/// covers all of them because `feed_tx` is an `rtrb` SPSC producer (ADR-013)
+/// -- a thread per instrument would need a ring per instrument.
 pub fn run_feed_producer(
-    instrument: InstrumentId,
+    instruments: &[InstrumentId],
     mut feed_tx: rtrb::Producer<FeedTick>,
+    drift_e9: i64,
     shutdown: &AtomicBool,
 ) {
-    let mut last_px_e9 = STARTING_PX_E9;
+    let mut last_px_e9 = vec![STARTING_PX_E9; instruments.len()];
     let mut exch_ts_ns = 0u64;
 
     while !shutdown.load(Ordering::Relaxed) {
-        let tick = FeedTick {
-            instrument_id: instrument,
-            bid_px_e9: last_px_e9 - SPREAD_E9,
-            ask_px_e9: last_px_e9 + SPREAD_E9,
-            last_px_e9,
-            exch_ts_ns,
-        };
+        for (instrument, px_e9) in instruments.iter().zip(last_px_e9.iter_mut()) {
+            let tick = FeedTick {
+                instrument_id: *instrument,
+                bid_px_e9: *px_e9 - SPREAD_E9,
+                ask_px_e9: *px_e9 + SPREAD_E9,
+                last_px_e9: *px_e9,
+                exch_ts_ns,
+            };
 
-        let mut pending = Some(tick);
-        while let Some(next) = pending.take() {
-            if shutdown.load(Ordering::Relaxed) {
-                return;
-            }
-            match feed_tx.push(next) {
-                Ok(()) => {}
-                Err(rtrb::PushError::Full(returned)) => {
-                    pending = Some(returned);
-                    thread::sleep(PUSH_POLL_INTERVAL);
+            let mut pending = Some(tick);
+            while let Some(next) = pending.take() {
+                if shutdown.load(Ordering::Relaxed) {
+                    return;
+                }
+                match feed_tx.push(next) {
+                    Ok(()) => {}
+                    Err(rtrb::PushError::Full(returned)) => {
+                        pending = Some(returned);
+                        thread::sleep(PUSH_POLL_INTERVAL);
+                    }
                 }
             }
+
+            *px_e9 += drift_e9;
         }
 
-        last_px_e9 += DRIFT_E9;
         exch_ts_ns += TICK_INTERVAL.as_nanos() as u64;
         thread::sleep(TICK_INTERVAL);
     }

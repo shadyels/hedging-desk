@@ -4,13 +4,10 @@
 //! producer or an `rtrb` ring. `crates/d1/src/lib.rs::run_core` calls these
 //! at each booking site and pushes the results onto the `posttrade` ring.
 //!
-//! Demo-grade counterparty labels only (ADR-002 doesn't specify a real venue
-//! registry yet).
-// ponytail: hardcoded "INTERNAL"/"SIM" counterparty strings -- a real venue/
-// broker registry is out of scope for M4; promote when a second real venue
-// exists.
-const COUNTERPARTY_INTERNAL: &str = "INTERNAL";
-const COUNTERPARTY_SIM: &str = "SIM";
+//! `TradeLeg` carries no counterparty field -- `d1-posttrade::convert`
+//! derives it at the encoder edge from `TradeKind` (`"INTERNAL"` for cross
+//! legs) and `d1-refdata::Universe::venue_counterparty` (for external
+//! fills), the same way it resolves `symbol`/`currency`.
 
 use d1_core::{BookId, ClOrdId, CrossRecord, ExecId, InstrumentId, OrderStatus, Side};
 use d1_posttrade::{
@@ -32,7 +29,6 @@ pub fn cross_events(cross: &CrossRecord, cycle: NettingCycleId) -> [PostTradeEve
         cross_id: Some(cross.cross_id),
         parent_cl_ord_id: None,
         exec_id: None,
-        counterparty: COUNTERPARTY_INTERNAL,
     };
     let sell_leg = TradeLeg {
         book: cross.sell_book,
@@ -80,8 +76,10 @@ pub fn allocation_event(
     })
 }
 
-/// A booked fill against an external venue (`TradeKind::ExternalFill`),
-/// demo-labeled counterparty `"SIM"`.
+/// A booked fill against an external venue (`TradeKind::ExternalFill`).
+/// Counterparty is resolved at the encoder edge from
+/// `d1-refdata::Universe::venue_counterparty`, not hardcoded here (see this
+/// module's header comment).
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn external_fill_trade(
@@ -103,7 +101,6 @@ pub fn external_fill_trade(
         cross_id: None,
         parent_cl_ord_id: Some(parent_cl_ord_id),
         exec_id: Some(exec_id),
-        counterparty: COUNTERPARTY_SIM,
     })
 }
 
@@ -179,7 +176,6 @@ mod tests {
         assert_eq!(buy_leg.cross_id, Some(cross.cross_id));
         assert_eq!(buy_leg.parent_cl_ord_id, None);
         assert_eq!(buy_leg.exec_id, None);
-        assert_eq!(buy_leg.counterparty, "INTERNAL");
         assert_eq!(buy_leg.qty_e2, 80_000);
         assert_eq!(buy_leg.px_e9, 150_000_000_000);
 
@@ -190,7 +186,6 @@ mod tests {
         assert_eq!(sell_leg.side, Side::Sell);
         assert_eq!(sell_leg.kind, TradeKind::InternalCrossLeg);
         assert_eq!(sell_leg.cross_id, Some(cross.cross_id));
-        assert_eq!(sell_leg.counterparty, "INTERNAL");
     }
 
     #[test]
@@ -227,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn external_fill_trade_is_external_kind_with_sim_counterparty() {
+    fn external_fill_trade_is_external_kind() {
         let event = external_fill_trade(
             BookId(1),
             InstrumentId(1001),
@@ -249,7 +244,6 @@ mod tests {
         assert_eq!(leg.cross_id, None);
         assert_eq!(leg.parent_cl_ord_id, Some(ClOrdId::from_seq(1)));
         assert_eq!(leg.exec_id, Some(ExecId::from_bytes([2; 20])));
-        assert_eq!(leg.counterparty, "SIM");
     }
 
     #[test]

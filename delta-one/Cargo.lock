@@ -434,6 +434,7 @@ name = "d1"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "apache-avro",
  "async-nats",
  "ctrlc",
  "d1-core",
@@ -445,7 +446,9 @@ dependencies = [
  "futures-util",
  "proptest",
  "prost",
+ "rdkafka",
  "rtrb",
+ "serde_json",
  "tokio",
  "uuid",
 ]

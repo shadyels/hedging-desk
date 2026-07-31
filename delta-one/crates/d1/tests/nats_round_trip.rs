@@ -236,6 +236,7 @@ fn target_position_round_trips_to_execution_report() {
         policy,
         universe,
         None, // no Kafka broker in this test
+        false,
         &shutdown,
     );
 

@@ -134,6 +134,22 @@ pub struct ExecReport {
     pub leaves_qty_e2: i64,
 }
 
+/// Outcome of `apply_exec`: whether the exec was a replayed duplicate
+/// (idempotent no-op, root CLAUDE.md invariant #4) or was actually applied
+/// to the order. `Ok(None)` used to conflate these two cases -- a replayed
+/// `ExecId` and a genuine non-fill status transition both returned it,
+/// which let a duplicate exec masquerade as a real state transition at
+/// every caller (e.g. `crates/d1/src/lib.rs::run_core` emitting a fresh,
+/// undedupable `posttrade.orders.audit` record for a FIX PossDup resend).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecOutcome {
+    /// `ExecId` already seen -- no state changed, caller must emit nothing.
+    Duplicate,
+    /// Applied; `Some(Fill)` if the exec carried fill quantity, `None` for
+    /// a genuine non-fill status transition (e.g. a reject).
+    Applied(Option<Fill>),
+}
+
 /// Preallocated order store: `ClOrdId` -> `Order`, plus exec-id dedupe for
 /// idempotent replay (root CLAUDE.md invariant #4).
 pub struct OrderStore {
@@ -180,12 +196,14 @@ impl OrderStore {
     }
 
     /// Apply an execution event: dedupe replayed `ExecId`s (idempotent
-    /// no-op), reject execs on an unknown or already-terminal order,
-    /// validate the transition, update `cum`/`leaves`/`status`, and return
-    /// `Some(Fill)` when the exec carried a fill quantity.
-    pub fn apply_exec(&mut self, event: &ExecEvent) -> Result<Option<Fill>, OrderError> {
+    /// no-op, returns `ExecOutcome::Duplicate`), reject execs on an unknown
+    /// or already-terminal order, validate the transition, update
+    /// `cum`/`leaves`/`status`, and return `ExecOutcome::Applied(Some(Fill))`
+    /// when the exec carried a fill quantity or `ExecOutcome::Applied(None)`
+    /// for a genuine non-fill status transition.
+    pub fn apply_exec(&mut self, event: &ExecEvent) -> Result<ExecOutcome, OrderError> {
         if self.seen_execs.contains(&event.exec_id) {
-            return Ok(None);
+            return Ok(ExecOutcome::Duplicate);
         }
 
         let &slot = self
@@ -259,7 +277,7 @@ impl OrderStore {
         };
 
         self.seen_execs.insert(event.exec_id);
-        Ok(fill)
+        Ok(ExecOutcome::Applied(fill))
     }
 }
 
@@ -312,13 +330,13 @@ mod tests {
             .unwrap();
         assert_eq!(
             fill1,
-            Some(Fill {
+            ExecOutcome::Applied(Some(Fill {
                 book: BookId(1),
                 instrument: InstrumentId(1001),
                 side: Side::Buy,
                 qty_e2: 4_000,
                 px_e9: 150_000_000_000,
-            })
+            }))
         );
         let order = store.get(id).unwrap();
         assert_eq!(order.status, OrderStatus::PartiallyFilled);
@@ -334,7 +352,16 @@ mod tests {
                 last_px_e9: 150_500_000_000,
             })
             .unwrap();
-        assert_eq!(fill2.unwrap().qty_e2, 6_000);
+        assert_eq!(
+            fill2,
+            ExecOutcome::Applied(Some(Fill {
+                book: BookId(1),
+                instrument: InstrumentId(1001),
+                side: Side::Buy,
+                qty_e2: 6_000,
+                px_e9: 150_500_000_000,
+            }))
+        );
         let order = store.get(id).unwrap();
         assert_eq!(order.status, OrderStatus::Filled);
         assert_eq!(order.cum_qty_e2, 10_000);
@@ -356,7 +383,7 @@ mod tests {
                 last_px_e9: 0,
             })
             .unwrap();
-        assert_eq!(fill, None);
+        assert_eq!(fill, ExecOutcome::Applied(None));
         assert_eq!(store.get(id).unwrap().status, OrderStatus::Rejected);
     }
 
@@ -433,9 +460,13 @@ mod tests {
             last_px_e9: 150_000_000_000,
         };
         let first = store.apply_exec(&event).unwrap();
-        assert!(first.is_some());
+        assert!(matches!(first, ExecOutcome::Applied(Some(_))));
+        // A redelivered ExecId (FIX PossDup / venue re-send, root CLAUDE.md
+        // #4) must come back as `Duplicate`, never re-`Applied` -- the
+        // caller distinguishes this from a genuine non-fill transition to
+        // decide whether to emit an audit record (crates/d1/src/lib.rs).
         let second = store.apply_exec(&event).unwrap();
-        assert_eq!(second, None); // deduped, not re-applied
+        assert_eq!(second, ExecOutcome::Duplicate); // deduped, not re-applied
         assert_eq!(store.get(id).unwrap().cum_qty_e2, 10_000); // not double-counted
     }
 
@@ -459,7 +490,7 @@ mod tests {
                 } else {
                     OrderStatus::PartiallyFilled
                 };
-                let fill = store
+                let outcome = store
                     .apply_exec(&ExecEvent {
                         cl_ord_id: id,
                         exec_id: ExecId::from_bytes([i as u8 + 1; 20]),
@@ -468,6 +499,13 @@ mod tests {
                         last_px_e9: 100_000_000_000,
                     })
                     .unwrap();
+                let fill = match outcome {
+                    ExecOutcome::Applied(f) => f,
+                    ExecOutcome::Duplicate => {
+                        prop_assert!(false, "expected Applied, got Duplicate");
+                        None
+                    }
+                };
                 prop_assert_eq!(fill.map(|f| f.qty_e2), Some(*qty));
             }
 
@@ -486,7 +524,7 @@ mod tests {
                     last_px_e9: 100_000_000_000,
                 })
                 .unwrap();
-            prop_assert_eq!(replay, None);
+            prop_assert_eq!(replay, ExecOutcome::Duplicate);
             prop_assert_eq!(store.get(id).unwrap().cum_qty_e2, order_qty);
         }
     }

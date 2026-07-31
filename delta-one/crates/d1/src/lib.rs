@@ -16,13 +16,13 @@ use std::time::Duration;
 
 use cycle::{NettingSession, allocate_fill};
 use d1_core::{
-    BookId, ClOrdId, CrossRecord, ExecEvent, ExecReport, FeedTick, InstrumentId, MarketData, Order,
-    OrderStatus, OrderStore, PositionKeeper, Side, Target, TransferRequest,
+    BookId, ClOrdId, CrossRecord, ExecEvent, ExecOutcome, ExecReport, FeedTick, InstrumentId,
+    MarketData, Order, OrderStatus, OrderStore, PositionKeeper, Side, Target, TransferRequest,
 };
 use d1_gateway_fix::{FixCallbacks, FixError};
 use d1_gateway_nats::NatsError;
 use d1_netting::RefPxPolicy;
-use d1_posttrade::{AuditOrigin, NettingCycleId, PostTradeError, PostTradeEvent};
+use d1_posttrade::{AuditOrigin, NettingCycleId, PostTradeError, PostTradeEvent, Stamper};
 use d1_refdata::Universe;
 
 /// Ring capacity for every `rtrb` ring this binary owns (ADR-013). Generous
@@ -77,11 +77,25 @@ pub struct RunHandles {
     /// address was given (`kafka_brokers`) -- `None` in tests, which run
     /// without a broker.
     pub posttrade: Option<JoinHandle<Result<(), PostTradeError>>>,
+    /// The producer thread's OWN shutdown flag, `Some` iff `posttrade` is
+    /// `Some`. Deliberately separate from the `shutdown` flag passed into
+    /// `spawn`: the core thread is the only pusher onto the `posttrade`
+    /// ring, so signalling this flag before `core` has been joined lets the
+    /// producer wake, drain an empty ring, flush and exit while the core
+    /// thread is still mid-iteration pushing events -- those are then lost.
+    /// Ordered-shutdown contract for callers: store `true` into the
+    /// `shutdown` passed to `spawn` (stops core/fix/nats/feed), join
+    /// `core`, and ONLY THEN store `true` here before joining `posttrade`.
+    /// `main.rs` and `tests/golden_posttrade.rs` follow this.
+    pub posttrade_shutdown: Option<Arc<AtomicBool>>,
 }
 
 /// Build the `rtrb` rings (ADR-013) and spawn the core/FIX/NATS/feed
 /// threads. Blocks on nothing itself -- the caller decides how/when to flip
-/// `shutdown` and joins the returned handles.
+/// `shutdown` and joins the returned handles. If a Kafka producer thread is
+/// spawned (`kafka_brokers: Some`), it does NOT share `shutdown` -- see
+/// `RunHandles::posttrade_shutdown` for the ordered-shutdown contract that
+/// protects the producer's final drain.
 ///
 /// `book_ids`/`instrument_ids` are the keeper/market-data universe (P1.M3
 /// slice 1: loaded from `protocol/refdata/universe.json` via `d1-refdata` by
@@ -97,6 +111,17 @@ pub struct RunHandles {
 /// skip it entirely -- tests pass `None` since they run without a broker; the
 /// `posttrade` ring then simply fills and the log-and-drop push helper in
 /// `run_core` drops harmlessly.
+///
+/// `deterministic` selects the golden-file reproducible path: `Stamper::Fixed`
+/// (instead of `Stamper::Wall`) for ids/timestamps, and `0` feed drift
+/// (instead of `feed::DRIFT_E9`) so every tick's mid stays pinned at
+/// `feed::STARTING_PX_E9`. Two independent `Stamper`s are built from this
+/// one flag -- one for `NettingSession` in the core thread (`cross_id`), one
+/// moved into the Kafka producer thread (`msg_id`/`trade_id`/etc). Their
+/// `next` bases are deliberately disjoint (core starts at `1_000_000`, the
+/// producer at `1`) so a `cross_id` can never collide with an unrelated
+/// `msg_id` in the golden fixtures -- a `grep` for one id space should never
+/// spuriously hit the other.
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn spawn(
@@ -108,6 +133,7 @@ pub fn spawn(
     policy: RefPxPolicy,
     universe: Universe,
     kafka_brokers: Option<String>,
+    deterministic: bool,
     shutdown: &Arc<AtomicBool>,
 ) -> RunHandles {
     let (fix_outbound_tx, fix_outbound_rx) = rtrb::RingBuffer::<Order>::new(RING_CAPACITY);
@@ -118,6 +144,18 @@ pub fn spawn(
     let (cross_tx, cross_rx) = rtrb::RingBuffer::<CrossRecord>::new(RING_CAPACITY);
     let (transfer_tx, transfer_rx) = rtrb::RingBuffer::<TransferRequest>::new(RING_CAPACITY);
     let (posttrade_tx, posttrade_rx) = rtrb::RingBuffer::<PostTradeEvent>::new(RING_CAPACITY);
+
+    // `next: 1_000_000` -- disjoint from the Kafka producer's `Stamper`
+    // below (`next: 1`), see this function's doc comment.
+    let core_stamper = if deterministic {
+        Stamper::Fixed { next: 1_000_000 }
+    } else {
+        Stamper::Wall
+    };
+    // Cloned before `instrument_ids` moves into the core thread: the feed
+    // must tick every instrument in the keeper universe, not just the CLI
+    // startup order's, or crosses on the others price at `ref_px_e9 = 0`.
+    let feed_instruments = instrument_ids.clone();
 
     let core_shutdown = Arc::clone(shutdown);
     let core = thread::spawn(move || {
@@ -134,6 +172,7 @@ pub fn spawn(
             book_ids,
             instrument_ids,
             policy,
+            core_stamper,
             &core_shutdown,
         );
     });
@@ -163,18 +202,39 @@ pub fn spawn(
         )
     });
 
+    let feed_drift_e9 = if deterministic { 0 } else { feed::DRIFT_E9 };
     let feed_shutdown = Arc::clone(shutdown);
-    let feed =
-        thread::spawn(move || feed::run_feed_producer(startup.instrument, feed_tx, &feed_shutdown));
+    let feed = thread::spawn(move || {
+        feed::run_feed_producer(&feed_instruments, feed_tx, feed_drift_e9, &feed_shutdown);
+    });
 
     // `kafka_brokers: None` (tests, no broker available) -- don't spawn: the
     // ring simply fills and `run_core`'s log-and-drop push helper drops
     // harmlessly, same ceiling as every other ring in this binary.
+    //
+    // The producer gets its OWN shutdown flag (`RunHandles::posttrade_shutdown`
+    // doc comment has the full ordered-shutdown contract), deliberately NOT
+    // cloned from the `shutdown` this function was handed: the core thread
+    // is the only pusher onto `posttrade_tx`, so this flag must not flip
+    // until the caller has joined `core`, or the producer can drain-flush-exit
+    // while `core` is still mid-iteration pushing events.
+    let mut posttrade_shutdown = None;
     let posttrade = kafka_brokers.map(|brokers| {
-        let posttrade_shutdown = Arc::clone(shutdown);
+        let flag = Arc::new(AtomicBool::new(false));
+        posttrade_shutdown = Some(Arc::clone(&flag));
+        let producer_stamper = if deterministic {
+            Stamper::Fixed { next: 1 }
+        } else {
+            Stamper::Wall
+        };
         thread::spawn(move || {
-            let result =
-                d1_posttrade::run_producer(&brokers, universe, posttrade_rx, &posttrade_shutdown);
+            let result = d1_posttrade::run_producer(
+                &brokers,
+                universe,
+                posttrade_rx,
+                producer_stamper,
+                &flag,
+            );
             // Log as soon as the thread dies, not just at `main.rs`'s final
             // join: a broker outage at startup (e.g. `ensure_topics` failing)
             // would otherwise leave the entire post-trade/compliance audit
@@ -193,6 +253,7 @@ pub fn spawn(
         nats,
         feed,
         posttrade,
+        posttrade_shutdown,
     }
 }
 
@@ -230,12 +291,31 @@ fn run_core(
     book_ids: Vec<BookId>,
     instrument_ids: Vec<InstrumentId>,
     policy: RefPxPolicy,
+    stamper: Stamper,
     shutdown: &AtomicBool,
 ) {
     let mut store = OrderStore::new(RING_CAPACITY);
     let mut keeper = PositionKeeper::new(&book_ids, &instrument_ids);
     let mut market_data = MarketData::new(&instrument_ids);
-    let mut session = NettingSession::new(policy, 2); // seq 1 is the startup order below
+    // Prime every instrument's quote synchronously at t=0, before anything
+    // else runs (MEDIUM 2 remediation): the feed thread ticks on its own
+    // 500ms timer, so without this seed the arrival mid used to price the
+    // first netting cycle's crosses depends on whether that thread's first
+    // burst has landed by the time a target is popped off `target_rx` -- a
+    // poll-loop scheduling race, not a guarantee. `bid == ask == last ==
+    // feed::STARTING_PX_E9` averages to the same arrival mid the feed's own
+    // first tick would produce (its symmetric `SPREAD_E9` cancels out), so
+    // this does not change the golden values.
+    for &instrument in &instrument_ids {
+        market_data.ingest(&FeedTick {
+            instrument_id: instrument,
+            bid_px_e9: feed::STARTING_PX_E9,
+            ask_px_e9: feed::STARTING_PX_E9,
+            last_px_e9: feed::STARTING_PX_E9,
+            exch_ts_ns: 0,
+        });
+    }
+    let mut session = NettingSession::new(policy, 2, stamper); // seq 1 is the startup order below
 
     let cl_ord_id = ClOrdId::from_seq(1);
     let order = Order {
@@ -325,21 +405,26 @@ fn run_core(
                             // a single demo session, not a backpressure
                             // protocol yet.
                             for record in &output.crosses_to_book {
-                                if cross_tx.push(*record).is_err() {
-                                    eprintln!(
-                                        "d1: cross ring full, dropping InternalCrossNotice cross_id={}",
-                                        record.cross_id
-                                    );
-                                }
-                                // The cross is already booked in `keeper`
-                                // regardless of whether the NATS notice above
-                                // made it out, so the post-trade audit trail
-                                // must not depend on that push either.
+                                // Ledger first, NATS notice second. The cross
+                                // is already booked in `keeper` regardless of
+                                // whether the notice makes it out, so the
+                                // post-trade audit trail must not depend on
+                                // that push -- and ordering it first is what
+                                // lets an observer treat the NATS notice as
+                                // proof the post-trade events are already
+                                // enqueued (`tests/golden_posttrade.rs` syncs
+                                // on exactly that).
                                 for event in posttrade::cross_events(
                                     record,
                                     NettingCycleId::Cycle(output.cycle_id),
                                 ) {
                                     push_posttrade(&mut posttrade_tx, event);
+                                }
+                                if cross_tx.push(*record).is_err() {
+                                    eprintln!(
+                                        "d1: cross ring full, dropping InternalCrossNotice cross_id={}",
+                                        record.cross_id
+                                    );
                                 }
                             }
                             if let Some(order) = output.parent_order {
@@ -438,14 +523,16 @@ fn run_core(
                         record.sell_book,
                         record.qty_e2
                     );
+                    // Ledger first, NATS notice second -- same ordering
+                    // rationale as the netting-derived cross path above.
+                    for event in posttrade::cross_events(&record, NettingCycleId::Direct) {
+                        push_posttrade(&mut posttrade_tx, event);
+                    }
                     if cross_tx.push(record).is_err() {
                         eprintln!(
                             "d1: cross ring full, dropping InternalCrossNotice cross_id={}",
                             record.cross_id
                         );
-                    }
-                    for event in posttrade::cross_events(&record, NettingCycleId::Direct) {
-                        push_posttrade(&mut posttrade_tx, event);
                     }
                 } else {
                     eprintln!(
@@ -465,17 +552,18 @@ fn run_core(
             // exec disagree about the order's existence.
             let from_status = store.get(event.cl_ord_id).map(|o| o.status);
             match store.apply_exec(&event) {
-                Ok(fill) => {
+                // A redelivered `ExecId` (FIX PossDup after a sequence
+                // reset, or a venue re-send -- root CLAUDE.md #4, the exact
+                // scenario `OrderStore`'s dedupe exists for): no state
+                // changed, so emit nothing -- no audit record, no fill
+                // booking, no `ExecutionReport` republish. Emitting any of
+                // those here would mint a fresh, undedupable record for an
+                // exec that already landed once.
+                Ok(ExecOutcome::Duplicate) => {}
+                Ok(ExecOutcome::Applied(fill)) => {
                     // Post-`apply_exec` snapshot, reused below both for the
                     // audit trail's cum/leaves and for the `ExecReport`.
                     let current = store.get(event.cl_ord_id);
-                    // ponytail: only fill transitions are audited to
-                    // `posttrade.orders.audit` (Slice 2 sites E/F). A non-fill
-                    // terminal exec (reject/cancel/expire -> `fill == None`)
-                    // leaves the audit trail at its `New` placement record.
-                    // `posttrade::order_audit` already supports these (see the
-                    // `Rejected` unit test); wire the `None` arm when the audit
-                    // topic needs full terminal-transition coverage (Slice 3+).
                     if let Some(fill) = fill {
                         // A parent order's `Fill.book == BookId(0)` (the
                         // reserved firm-level pre-allocation, `live.proto`
@@ -602,6 +690,27 @@ fn run_core(
                                 );
                             }
                         }
+                    } else if let (Some(from_status), Some(order)) = (from_status, current) {
+                        // A non-fill terminal exec (reject/cancel/expire):
+                        // no quantity moved, so no `TradeLeg`/allocation, but
+                        // the state transition itself must still land on the
+                        // audit topic -- a compliance stream that silently
+                        // omits rejects is a misleading record.
+                        push_posttrade(
+                            &mut posttrade_tx,
+                            posttrade::order_audit(
+                                event.cl_ord_id,
+                                order.instrument,
+                                order.side,
+                                from_status,
+                                event.reported_status,
+                                event.last_qty_e2,
+                                order.cum_qty_e2,
+                                order.leaves_qty_e2,
+                                AuditOrigin::System,
+                                None,
+                            ),
+                        );
                     }
                     // ponytail: log-and-drop on a full ring, same ceiling as
                     // every other ring in this binary -- a single demo
