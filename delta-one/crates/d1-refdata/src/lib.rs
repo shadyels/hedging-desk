@@ -58,6 +58,7 @@ struct InstrumentDef {
 #[derive(Debug, Deserialize)]
 struct ConventionsDef {
     cross_px_policy_default: String,
+    venue_counterparty_default: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,6 +91,14 @@ pub struct Universe {
     /// at startup, so an unknown policy is a hard startup error rather than a
     /// silent default (ADR-005 §4 — compliance-visible, never hardcoded).
     pub cross_px_policy: String,
+    /// Counterparty label for external-venue fills, from
+    /// `conventions.venue_counterparty_default`. There is exactly one venue
+    /// in this universe (the `sim` FIX acceptor), so this is a single
+    /// refdata-sourced string, not a venue registry -- used by
+    /// `d1-posttrade::convert::encode_trade` to resolve `TradeLeg`'s wire
+    /// `counterparty` field for `TradeKind::ExternalFill` (internal cross
+    /// legs are always `"INTERNAL"`, no lookup needed).
+    pub venue_counterparty: String,
 }
 
 /// Load and parse the universe refdata file at `path`.
@@ -127,6 +136,7 @@ fn parse(path: &Path, raw: &str) -> Result<Universe, RefdataError> {
         .map(|i| InstrumentId(i.instrument_id))
         .collect();
     let cross_px_policy = parsed.conventions.cross_px_policy_default;
+    let venue_counterparty = parsed.conventions.venue_counterparty_default;
     let mut symbol_to_id = HashMap::with_capacity(parsed.instruments.len());
     let mut id_to_symbol = HashMap::with_capacity(parsed.instruments.len());
     let mut id_to_currency = HashMap::with_capacity(parsed.instruments.len());
@@ -144,6 +154,7 @@ fn parse(path: &Path, raw: &str) -> Result<Universe, RefdataError> {
         id_to_symbol,
         id_to_currency,
         cross_px_policy,
+        venue_counterparty,
     })
 }
 
@@ -204,7 +215,7 @@ mod tests {
         let empty_books = r#"{
             "books": [],
             "instruments": [{"instrument_id": 1001, "symbol": "AAPL", "currency": "USD"}],
-            "conventions": {"cross_px_policy_default": "ARRIVAL_MID"}
+            "conventions": {"cross_px_policy_default": "ARRIVAL_MID", "venue_counterparty_default": "SIM"}
         }"#;
         assert!(matches!(
             parse(Path::new("test.json"), empty_books).unwrap_err(),
@@ -214,7 +225,7 @@ mod tests {
         let empty_instruments = r#"{
             "books": [{"book_id": 1}],
             "instruments": [],
-            "conventions": {"cross_px_policy_default": "ARRIVAL_MID"}
+            "conventions": {"cross_px_policy_default": "ARRIVAL_MID", "venue_counterparty_default": "SIM"}
         }"#;
         assert!(matches!(
             parse(Path::new("test.json"), empty_instruments).unwrap_err(),

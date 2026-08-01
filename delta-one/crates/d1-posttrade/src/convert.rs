@@ -3,17 +3,14 @@
 //! state (Slice 2 owns that); mirrors `d1-gateway-nats::convert`'s role for
 //! the NATS/Protobuf side.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use apache_avro::types::Value;
 use apache_avro::{Schema, to_avro_datum};
 use d1_core::{ClOrdId, ExecId, OrderStatus, Side};
 use d1_refdata::Universe;
-use uuid::Uuid;
 
 use crate::{
-    Allocation, Cross, NettingCycleId, OrderAudit, PostTradeError, PostTradeEvent, TradeKind,
-    TradeLeg,
+    Allocation, Cross, NettingCycleId, OrderAudit, PostTradeError, PostTradeEvent, Stamper,
+    TradeKind, TradeLeg,
 };
 
 /// Parsed Avro schemas for the four `protocol/avro/` post-trade records,
@@ -48,44 +45,57 @@ impl Schemas {
     /// Encode one post-trade event as an Avro binary datum against its
     /// record schema. Resolves `symbol`/`currency` from `uni`; errors if the
     /// event names an instrument not in the universe. Mints `msg_id` (and
-    /// `trade_id`/`allocation_id`) fresh (UUIDv7) and stamps `booked_ns`/
-    /// `ts_ns` from the wall clock — this is the edge, off the hot path.
+    /// `trade_id`/`allocation_id`) and stamps `booked_ns`/`ts_ns` via
+    /// `stamper` — this is the edge, off the hot path.
     ///
-    /// **Not idempotent — call exactly once per event.** Each call mints a
-    /// fresh `msg_id`/`trade_id`/`allocation_id` and timestamp, so encoding
-    /// the same event twice produces two different dedupe keys (root
-    /// invariant #4) and two different business ids. Contrast `cross_id`,
-    /// which is minted once at booking time and passed through unchanged —
-    /// its lineage is stable across calls. Slice 2's producer must retry the
-    /// bytes this returns, never re-`encode()` the same event.
+    /// **Idempotency depends on `stamper`.** Under `Stamper::Wall`, each
+    /// call mints a fresh `msg_id`/`trade_id`/`allocation_id` and wall-clock
+    /// timestamp, so encoding the same event twice produces two different
+    /// dedupe keys (root invariant #4) and two different business ids — not
+    /// idempotent, call exactly once per event, and retry the bytes this
+    /// returns rather than re-`encode()`. Under `Stamper::Fixed`, the same
+    /// `(event, stamper state)` always encodes to the same bytes, which is
+    /// what makes the golden-file e2e reproducible. Contrast `cross_id`,
+    /// which is minted once at booking time (not by `Stamper`) and passed
+    /// through unchanged either way — its lineage is stable across calls.
     pub fn encode(
         &self,
         event: &PostTradeEvent,
         uni: &Universe,
+        stamper: &mut Stamper,
     ) -> Result<Vec<u8>, PostTradeError> {
         match event {
-            PostTradeEvent::Trade(t) => encode_trade(&self.trade, t, uni),
-            PostTradeEvent::Cross(c) => encode_cross(&self.cross, c, uni),
-            PostTradeEvent::Allocation(a) => encode_allocation(&self.allocation, a, uni),
-            PostTradeEvent::OrderAudit(o) => encode_order_audit(&self.order_audit, o),
+            PostTradeEvent::Trade(t) => encode_trade(&self.trade, t, uni, stamper),
+            PostTradeEvent::Cross(c) => encode_cross(&self.cross, c, uni, stamper),
+            PostTradeEvent::Allocation(a) => encode_allocation(&self.allocation, a, uni, stamper),
+            PostTradeEvent::OrderAudit(o) => encode_order_audit(&self.order_audit, o, stamper),
         }
     }
 }
 
-fn encode_trade(schema: &Schema, t: &TradeLeg, uni: &Universe) -> Result<Vec<u8>, PostTradeError> {
+fn encode_trade(
+    schema: &Schema,
+    t: &TradeLeg,
+    uni: &Universe,
+    stamper: &mut Stamper,
+) -> Result<Vec<u8>, PostTradeError> {
     let symbol = resolve_symbol(uni, t.instrument)?;
     let currency = resolve_currency(uni, t.instrument)?;
+    let counterparty = match t.kind {
+        TradeKind::InternalCrossLeg => "INTERNAL",
+        TradeKind::ExternalFill => uni.venue_counterparty.as_str(),
+    };
 
     let value = Value::Record(vec![
         (
             "msg_id".to_string(),
-            Value::String(Uuid::now_v7().to_string()),
+            Value::String(stamper.uuid().to_string()),
         ),
         (
             "trade_id".to_string(),
-            Value::String(Uuid::now_v7().to_string()),
+            Value::String(stamper.uuid().to_string()),
         ),
-        ("booked_ns".to_string(), Value::Long(now_ns()?)),
+        ("booked_ns".to_string(), Value::Long(stamper.now_ns()?)),
         ("book_id".to_string(), Value::Int(id_to_i32(t.book.0)?)),
         (
             "instrument_id".to_string(),
@@ -111,26 +121,31 @@ fn encode_trade(schema: &Schema, t: &TradeLeg, uni: &Universe) -> Result<Vec<u8>
         ),
         (
             "counterparty".to_string(),
-            Value::String(t.counterparty.to_string()),
+            Value::String(counterparty.to_string()),
         ),
     ]);
 
     Ok(to_avro_datum(schema, value)?)
 }
 
-fn encode_cross(schema: &Schema, c: &Cross, uni: &Universe) -> Result<Vec<u8>, PostTradeError> {
+fn encode_cross(
+    schema: &Schema,
+    c: &Cross,
+    uni: &Universe,
+    stamper: &mut Stamper,
+) -> Result<Vec<u8>, PostTradeError> {
     let symbol = resolve_symbol(uni, c.instrument)?;
 
     let value = Value::Record(vec![
         (
             "msg_id".to_string(),
-            Value::String(Uuid::now_v7().to_string()),
+            Value::String(stamper.uuid().to_string()),
         ),
         (
             "cross_id".to_string(),
             Value::String(c.cross_id.to_string()),
         ),
-        ("booked_ns".to_string(), Value::Long(now_ns()?)),
+        ("booked_ns".to_string(), Value::Long(stamper.now_ns()?)),
         (
             "instrument_id".to_string(),
             Value::Int(id_to_i32(c.instrument.0)?),
@@ -163,6 +178,7 @@ fn encode_allocation(
     schema: &Schema,
     a: &Allocation,
     uni: &Universe,
+    stamper: &mut Stamper,
 ) -> Result<Vec<u8>, PostTradeError> {
     // Referenced only to confirm the instrument resolves in the universe
     // (allocations don't carry `symbol` on the wire, unlike trades/crosses).
@@ -171,13 +187,13 @@ fn encode_allocation(
     let value = Value::Record(vec![
         (
             "msg_id".to_string(),
-            Value::String(Uuid::now_v7().to_string()),
+            Value::String(stamper.uuid().to_string()),
         ),
         (
             "allocation_id".to_string(),
-            Value::String(Uuid::now_v7().to_string()),
+            Value::String(stamper.uuid().to_string()),
         ),
-        ("booked_ns".to_string(), Value::Long(now_ns()?)),
+        ("booked_ns".to_string(), Value::Long(stamper.now_ns()?)),
         (
             "parent_cl_ord_id".to_string(),
             Value::String(clordid_to_string(&a.parent_cl_ord_id)),
@@ -202,13 +218,17 @@ fn encode_allocation(
     Ok(to_avro_datum(schema, value)?)
 }
 
-fn encode_order_audit(schema: &Schema, o: &OrderAudit) -> Result<Vec<u8>, PostTradeError> {
+fn encode_order_audit(
+    schema: &Schema,
+    o: &OrderAudit,
+    stamper: &mut Stamper,
+) -> Result<Vec<u8>, PostTradeError> {
     let value = Value::Record(vec![
         (
             "msg_id".to_string(),
-            Value::String(Uuid::now_v7().to_string()),
+            Value::String(stamper.uuid().to_string()),
         ),
-        ("ts_ns".to_string(), Value::Long(now_ns()?)),
+        ("ts_ns".to_string(), Value::Long(stamper.now_ns()?)),
         (
             "cl_ord_id".to_string(),
             Value::String(clordid_to_string(&o.cl_ord_id)),
@@ -261,13 +281,6 @@ fn resolve_currency(
 
 fn id_to_i32(id: u32) -> Result<i32, PostTradeError> {
     i32::try_from(id).map_err(|_| PostTradeError::IdOverflow(id))
-}
-
-fn now_ns() -> Result<i64, PostTradeError> {
-    let elapsed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(PostTradeError::ClockBeforeEpoch)?;
-    Ok(i64::try_from(elapsed.as_nanos()).unwrap_or(i64::MAX))
 }
 
 fn nullable_string(value: Option<String>) -> Value {
@@ -343,9 +356,10 @@ mod tests {
 
     use apache_avro::from_avro_datum;
     use d1_core::{BookId, InstrumentId};
+    use uuid::Uuid;
 
     use super::*;
-    use crate::{AuditOrigin, PostTradeEvent};
+    use crate::{AuditOrigin, FIXED_BOOKED_NS, PostTradeEvent};
 
     fn test_universe() -> Universe {
         let mut symbol_to_id = HashMap::new();
@@ -362,6 +376,7 @@ mod tests {
             id_to_symbol,
             id_to_currency,
             cross_px_policy: "ARRIVAL_MID".to_string(),
+            venue_counterparty: "SIM".to_string(),
         }
     }
 
@@ -372,19 +387,12 @@ mod tests {
         }
     }
 
-    fn assert_valid_uuid(value: &Value) {
-        let Value::String(s) = value else {
-            panic!("expected a Value::String")
-        };
-        let parsed = Uuid::parse_str(s).unwrap();
-        assert!(!parsed.is_nil());
-    }
-
     #[test]
     fn encode_decode_trade_internal_cross_leg() {
         let schemas = Schemas::new().unwrap();
         let uni = test_universe();
-        let cross_id = Uuid::now_v7();
+        let mut stamper = Stamper::Fixed { next: 1 };
+        let cross_id = Uuid::from_u128(999);
         let leg = TradeLeg {
             book: BookId(1),
             instrument: InstrumentId(1001),
@@ -395,15 +403,24 @@ mod tests {
             cross_id: Some(cross_id),
             parent_cl_ord_id: None,
             exec_id: None,
-            counterparty: "INTERNAL",
         };
 
-        let bytes = schemas.encode(&PostTradeEvent::Trade(leg), &uni).unwrap();
+        let bytes = schemas
+            .encode(&PostTradeEvent::Trade(leg), &uni, &mut stamper)
+            .unwrap();
         let decoded = from_avro_datum(&schemas.trade, &mut &bytes[..], None).unwrap();
 
-        assert_valid_uuid(field(&decoded, "msg_id"));
-        assert_valid_uuid(field(&decoded, "trade_id"));
-        assert!(matches!(field(&decoded, "booked_ns"), Value::Long(n) if *n > 0));
+        // Stamper::Fixed { next: 1 }: encode_trade mints msg_id then
+        // trade_id, in that order -- ids 1 then 2.
+        assert_eq!(
+            field(&decoded, "msg_id"),
+            &Value::String(Uuid::from_u128(1).to_string())
+        );
+        assert_eq!(
+            field(&decoded, "trade_id"),
+            &Value::String(Uuid::from_u128(2).to_string())
+        );
+        assert_eq!(field(&decoded, "booked_ns"), &Value::Long(FIXED_BOOKED_NS));
         assert_eq!(field(&decoded, "book_id"), &Value::Int(1));
         assert_eq!(field(&decoded, "instrument_id"), &Value::Int(1001));
         assert_eq!(
@@ -433,6 +450,8 @@ mod tests {
             field(&decoded, "exec_id"),
             &Value::Union(0, Box::new(Value::Null))
         );
+        // Derived from `TradeKind::InternalCrossLeg` at the encoder edge,
+        // never from the universe's venue default.
         assert_eq!(
             field(&decoded, "counterparty"),
             &Value::String("INTERNAL".to_string())
@@ -443,6 +462,7 @@ mod tests {
     fn encode_decode_trade_external_fill() {
         let schemas = Schemas::new().unwrap();
         let uni = test_universe();
+        let mut stamper = Stamper::Fixed { next: 1 };
         let cl_ord_id = ClOrdId::from_seq(42);
         let exec_id = ExecId::from_bytes(*b"00000000000000EXEC-1");
         let leg = TradeLeg {
@@ -455,12 +475,21 @@ mod tests {
             cross_id: None,
             parent_cl_ord_id: Some(cl_ord_id),
             exec_id: Some(exec_id),
-            counterparty: "NYSE",
         };
 
-        let bytes = schemas.encode(&PostTradeEvent::Trade(leg), &uni).unwrap();
+        let bytes = schemas
+            .encode(&PostTradeEvent::Trade(leg), &uni, &mut stamper)
+            .unwrap();
         let decoded = from_avro_datum(&schemas.trade, &mut &bytes[..], None).unwrap();
 
+        assert_eq!(
+            field(&decoded, "msg_id"),
+            &Value::String(Uuid::from_u128(1).to_string())
+        );
+        assert_eq!(
+            field(&decoded, "trade_id"),
+            &Value::String(Uuid::from_u128(2).to_string())
+        );
         assert_eq!(field(&decoded, "side"), &Value::Enum(1, "SELL".to_string()));
         assert_eq!(
             field(&decoded, "trade_kind"),
@@ -484,9 +513,11 @@ mod tests {
                 Box::new(Value::String("00000000000000EXEC-1".to_string()))
             )
         );
+        // Derived from `TradeKind::ExternalFill` at the encoder edge: the
+        // universe's `venue_counterparty`, not a per-leg literal.
         assert_eq!(
             field(&decoded, "counterparty"),
-            &Value::String("NYSE".to_string())
+            &Value::String(uni.venue_counterparty.clone())
         );
     }
 
@@ -494,7 +525,8 @@ mod tests {
     fn encode_decode_cross_cycle_and_direct() {
         let schemas = Schemas::new().unwrap();
         let uni = test_universe();
-        let cross_id = Uuid::now_v7();
+        let mut stamper = Stamper::Fixed { next: 1 };
+        let cross_id = Uuid::from_u128(777);
         let base = Cross {
             cross_id,
             instrument: InstrumentId(1001),
@@ -506,15 +538,20 @@ mod tests {
             netting_cycle_id: NettingCycleId::Cycle(7),
         };
 
-        let bytes = schemas.encode(&PostTradeEvent::Cross(base), &uni).unwrap();
+        let bytes = schemas
+            .encode(&PostTradeEvent::Cross(base), &uni, &mut stamper)
+            .unwrap();
         let decoded = from_avro_datum(&schemas.cross, &mut &bytes[..], None).unwrap();
 
-        assert_valid_uuid(field(&decoded, "msg_id"));
+        assert_eq!(
+            field(&decoded, "msg_id"),
+            &Value::String(Uuid::from_u128(1).to_string())
+        );
         assert_eq!(
             field(&decoded, "cross_id"),
             &Value::String(cross_id.to_string())
         );
-        assert!(matches!(field(&decoded, "booked_ns"), Value::Long(n) if *n > 0));
+        assert_eq!(field(&decoded, "booked_ns"), &Value::Long(FIXED_BOOKED_NS));
         assert_eq!(field(&decoded, "buy_book_id"), &Value::Int(1));
         assert_eq!(field(&decoded, "sell_book_id"), &Value::Int(2));
         assert_eq!(field(&decoded, "ref_px_e9"), &Value::Long(150_000_000_000));
@@ -532,9 +569,15 @@ mod tests {
             ..base
         };
         let bytes = schemas
-            .encode(&PostTradeEvent::Cross(direct), &uni)
+            .encode(&PostTradeEvent::Cross(direct), &uni, &mut stamper)
             .unwrap();
         let decoded = from_avro_datum(&schemas.cross, &mut &bytes[..], None).unwrap();
+        // Same `stamper`, second call: the counter keeps advancing (id 2),
+        // proving `Fixed` state carries across calls within one producer.
+        assert_eq!(
+            field(&decoded, "msg_id"),
+            &Value::String(Uuid::from_u128(2).to_string())
+        );
         assert_eq!(
             field(&decoded, "netting_cycle_id"),
             &Value::String("DIRECT".to_string())
@@ -545,6 +588,7 @@ mod tests {
     fn encode_decode_allocation() {
         let schemas = Schemas::new().unwrap();
         let uni = test_universe();
+        let mut stamper = Stamper::Fixed { next: 1 };
         let alloc = Allocation {
             parent_cl_ord_id: ClOrdId::from_seq(7),
             exec_id: ExecId::from_bytes(*b"00000000000000EXEC-9"),
@@ -556,10 +600,19 @@ mod tests {
         };
 
         let bytes = schemas
-            .encode(&PostTradeEvent::Allocation(alloc), &uni)
+            .encode(&PostTradeEvent::Allocation(alloc), &uni, &mut stamper)
             .unwrap();
         let decoded = from_avro_datum(&schemas.allocation, &mut &bytes[..], None).unwrap();
 
+        assert_eq!(
+            field(&decoded, "msg_id"),
+            &Value::String(Uuid::from_u128(1).to_string())
+        );
+        assert_eq!(
+            field(&decoded, "allocation_id"),
+            &Value::String(Uuid::from_u128(2).to_string())
+        );
+        assert_eq!(field(&decoded, "booked_ns"), &Value::Long(FIXED_BOOKED_NS));
         assert_eq!(
             field(&decoded, "parent_cl_ord_id"),
             &Value::String("00000000000000000007".to_string())
@@ -578,6 +631,7 @@ mod tests {
     #[test]
     fn encode_decode_order_audit() {
         let schemas = Schemas::new().unwrap();
+        let mut stamper = Stamper::Fixed { next: 1 };
         let audit = OrderAudit {
             cl_ord_id: ClOrdId::from_seq(1),
             instrument: InstrumentId(1001),
@@ -592,12 +646,19 @@ mod tests {
         };
 
         let bytes = schemas
-            .encode(&PostTradeEvent::OrderAudit(audit), &test_universe())
+            .encode(
+                &PostTradeEvent::OrderAudit(audit),
+                &test_universe(),
+                &mut stamper,
+            )
             .unwrap();
         let decoded = from_avro_datum(&schemas.order_audit, &mut &bytes[..], None).unwrap();
 
-        assert_valid_uuid(field(&decoded, "msg_id"));
-        assert!(matches!(field(&decoded, "ts_ns"), Value::Long(n) if *n > 0));
+        assert_eq!(
+            field(&decoded, "msg_id"),
+            &Value::String(Uuid::from_u128(1).to_string())
+        );
+        assert_eq!(field(&decoded, "ts_ns"), &Value::Long(FIXED_BOOKED_NS));
         assert_eq!(field(&decoded, "side"), &Value::Enum(0, "BUY".to_string()));
         assert_eq!(
             field(&decoded, "transition"),
@@ -617,6 +678,7 @@ mod tests {
     fn encode_unknown_instrument_errors() {
         let schemas = Schemas::new().unwrap();
         let uni = test_universe();
+        let mut stamper = Stamper::Fixed { next: 1 };
         let leg = TradeLeg {
             book: BookId(1),
             instrument: InstrumentId(9999), // absent from test_universe()
@@ -627,11 +689,10 @@ mod tests {
             cross_id: None,
             parent_cl_ord_id: Some(ClOrdId::from_seq(1)),
             exec_id: Some(ExecId::from_bytes([1; 20])),
-            counterparty: "NYSE",
         };
 
         let err = schemas
-            .encode(&PostTradeEvent::Trade(leg), &uni)
+            .encode(&PostTradeEvent::Trade(leg), &uni, &mut stamper)
             .unwrap_err();
         assert!(matches!(
             err,
@@ -643,6 +704,7 @@ mod tests {
     fn encode_id_overflow_errors() {
         let schemas = Schemas::new().unwrap();
         let uni = test_universe();
+        let mut stamper = Stamper::Fixed { next: 1 };
         let leg = TradeLeg {
             book: BookId(u32::MAX), // doesn't fit Avro `int` (i32)
             instrument: InstrumentId(1001),
@@ -653,11 +715,10 @@ mod tests {
             cross_id: None,
             parent_cl_ord_id: Some(ClOrdId::from_seq(1)),
             exec_id: Some(ExecId::from_bytes([1; 20])),
-            counterparty: "NYSE",
         };
 
         let err = schemas
-            .encode(&PostTradeEvent::Trade(leg), &uni)
+            .encode(&PostTradeEvent::Trade(leg), &uni, &mut stamper)
             .unwrap_err();
         assert!(matches!(err, PostTradeError::IdOverflow(u32::MAX)));
     }

@@ -95,6 +95,15 @@ fn main() -> Result<()> {
         policy,
         universe,
         Some(args.kafka_brokers),
+        // Deterministic/`Stamper::Fixed` mode is a test-only seam
+        // (`d1::spawn`'s `deterministic` param, driven directly by
+        // `tests/golden_posttrade.rs`) -- deliberately not exposed as a CLI
+        // flag on this production binary. Fixed ids restart from 1 on every
+        // process start, which would collide with a prior session's
+        // `msg_id`s in any consumer that dedupes across restarts (root
+        // invariant #4), and `FIXED_BOOKED_NS` would stamp every record with
+        // the same fabricated timestamp on the compliance ledger.
+        false,
         &shutdown,
     );
 
@@ -124,6 +133,13 @@ fn main() -> Result<()> {
         Err(_) => eprintln!("d1: NATS gateway thread panicked"),
     }
     if let Some(posttrade) = handles.posttrade {
+        // Ordered-shutdown contract (`d1::RunHandles::posttrade_shutdown`
+        // doc comment): only signal the producer's OWN shutdown flag now,
+        // after `core` above has already been joined, so its final drain
+        // sees every event `core` ever pushed rather than racing it.
+        if let Some(flag) = handles.posttrade_shutdown {
+            flag.store(true, Ordering::Relaxed);
+        }
         // Same degraded-mode posture as the NATS gateway above: a Kafka
         // outage shouldn't take down the FIX/NATS planes.
         match posttrade.join() {

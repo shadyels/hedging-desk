@@ -18,6 +18,7 @@
 use d1::cycle::{NettingSession, allocate_fill};
 use d1_core::{BookId, InstrumentId, PositionKeeper, Side, Target};
 use d1_netting::RefPxPolicy;
+use d1_posttrade::Stamper;
 use proptest::prelude::*;
 
 const INSTRUMENT: InstrumentId = InstrumentId(1001);
@@ -103,7 +104,7 @@ proptest! {
     ) {
         let book_ids: Vec<BookId> = books.iter().map(|&b| BookId(b)).collect();
         let mut keeper = PositionKeeper::new(&book_ids, &[INSTRUMENT]);
-        let mut session = NettingSession::new(RefPxPolicy::ArrivalMid, 1);
+        let mut session = NettingSession::new(RefPxPolicy::ArrivalMid, 1, Stamper::Wall);
 
         // Feed one target per book, ascending book id, no-trade band = 0.
         let mut parent_ids = Vec::new();

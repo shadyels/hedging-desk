@@ -14,11 +14,70 @@
 pub mod convert;
 pub mod producer;
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use d1_core::{BookId, ClOrdId, ExecId, InstrumentId, OrderStatus, Side};
 use uuid::Uuid;
 
 pub use convert::Schemas;
 pub use producer::run_producer;
+
+/// Fixed `booked_ns`/`ts_ns` value `Stamper::Fixed` stamps onto every
+/// record, so a golden-file encoder run is reproducible byte-for-byte
+/// instead of a wall-clock latency measurement. Obviously synthetic
+/// (2023-11-14T22:13:20Z), never a real booking time.
+pub const FIXED_BOOKED_NS: i64 = 1_700_000_000_000_000_000;
+
+/// Source of per-record ids and timestamps. `Wall` is the live path --
+/// fresh `Uuid::now_v7()` ids, wall-clock timestamps; `Fixed` makes
+/// `convert.rs`'s encoder output reproducible for the golden-file e2e test:
+/// sequential ids from a counter, one constant timestamp for every record
+/// (`FIXED_BOOKED_NS`) -- a fixture is not a latency measurement.
+/// `Fixed`'s ids are minted via `Uuid::from_u128`, which does NOT set the
+/// version/variant nibbles a real UUIDv7 carries -- a deliberate, contained
+/// deviation for readable/sequential golden-file ids, never used on the
+/// `Wall` (live) path.
+#[derive(Debug)]
+pub enum Stamper {
+    /// Live path: wall-clock ids and timestamps.
+    Wall,
+    /// Deterministic path: sequential `Uuid::from_u128` ids starting from
+    /// `next`, `FIXED_BOOKED_NS` for every timestamp.
+    Fixed {
+        /// Next id value `uuid()` will mint; incremented after each call.
+        next: u64,
+    },
+}
+
+impl Stamper {
+    /// Mint the next id: `Uuid::now_v7()` under `Wall`, or the next
+    /// sequential `Uuid::from_u128(next)` (post-incrementing `next`) under
+    /// `Fixed`.
+    pub fn uuid(&mut self) -> Uuid {
+        match self {
+            Self::Wall => Uuid::now_v7(),
+            Self::Fixed { next } => {
+                let id = Uuid::from_u128(u128::from(*next));
+                *next += 1;
+                id
+            }
+        }
+    }
+
+    /// Current stamp in nanoseconds since the Unix epoch: the wall clock
+    /// under `Wall`, or the constant `FIXED_BOOKED_NS` under `Fixed`.
+    pub fn now_ns(&mut self) -> Result<i64, PostTradeError> {
+        match self {
+            Self::Wall => {
+                let elapsed = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(PostTradeError::ClockBeforeEpoch)?;
+                Ok(i64::try_from(elapsed.as_nanos()).unwrap_or(i64::MAX))
+            }
+            Self::Fixed { .. } => Ok(FIXED_BOOKED_NS),
+        }
+    }
+}
 
 /// Kafka topic for booked trade legs (ADR-002), keyed by `instrument_id`.
 pub const TOPIC_TRADES: &str = "posttrade.trades";
@@ -100,8 +159,6 @@ pub struct TradeLeg {
     pub parent_cl_ord_id: Option<ClOrdId>,
     /// Set for `ExternalFill`: the exec id of the fill.
     pub exec_id: Option<ExecId>,
-    /// "INTERNAL" for cross legs, the venue/broker id otherwise.
-    pub counterparty: &'static str,
 }
 
 /// Lineage back to the netting cycle that produced a cross or allocation.
@@ -217,4 +274,12 @@ pub enum PostTradeError {
     /// A Kafka producer or admin (topic-create) operation failed.
     #[error(transparent)]
     Kafka(#[from] rdkafka::error::KafkaError),
+    /// One or more required `posttrade.*` topics don't exist on the broker
+    /// at startup. `deploy/docker-compose.yml` disables auto-topic-create
+    /// (`KAFKA_AUTO_CREATE_TOPICS_ENABLE=false`), so without provisioning
+    /// every send to a missing topic would otherwise be silently dropped.
+    #[error(
+        "missing Kafka topic(s): {0} -- provision them first (see scripts/demo.sh) before starting d1's post-trade producer"
+    )]
+    MissingTopics(String),
 }

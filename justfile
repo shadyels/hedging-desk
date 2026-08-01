@@ -66,4 +66,4 @@ lint:
 
 # --- the showcase ---------------------------------------------------------
 demo:
-    ./scripts/demo.sh   # up -> sim tracker-flow -> assert golden Kafka output -> leave UI running
+    ./scripts/demo.sh   # up -> provision posttrade topics -> run 3 round-trip tests -> down (sim tracker-flow replay and UI deferred to Phase 3)

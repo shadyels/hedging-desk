@@ -16,7 +16,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use d1_core::{BookId, ClOrdId, ExecEvent, InstrumentId, Order, OrderStatus, OrderStore, Side};
+use d1_core::{
+    BookId, ClOrdId, ExecEvent, ExecOutcome, InstrumentId, Order, OrderStatus, OrderStore, Side,
+};
 use d1_gateway_fix::FixCallbacks;
 
 const ROUND_TRIP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -237,7 +239,8 @@ fn immediate_full_fill_reaches_filled_and_dedupes_replay() {
         })
         .expect("apply_exec");
     assert_eq!(
-        replay, None,
+        replay,
+        ExecOutcome::Duplicate,
         "replayed ExecID must be deduped, not re-applied"
     );
     assert_eq!(

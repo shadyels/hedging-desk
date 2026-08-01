@@ -19,6 +19,7 @@ use d1_core::{
     TransferRequest,
 };
 use d1_netting::{BookDemand, Cross, MAX_BOOKS, NettingError, RefPxPolicy, net};
+use d1_posttrade::Stamper;
 
 /// One book's currently-known EXO target for one instrument.
 #[derive(Debug, Clone, Copy)]
@@ -78,6 +79,7 @@ pub struct CycleOutput {
 /// must not publish anything for it. The single booking path ADR-009
 /// requires both `on_target` (netting-derived crosses) and `on_transfer`
 /// (directed transfers) to share.
+#[allow(clippy::too_many_arguments)]
 fn book_cross(
     keeper: &mut PositionKeeper,
     instrument: InstrumentId,
@@ -86,6 +88,7 @@ fn book_cross(
     qty_e2: i64,
     px_e9: i64,
     policy: RefPxPolicy,
+    stamper: &mut Stamper,
 ) -> Option<CrossRecord> {
     if keeper
         .apply_cross(instrument, buy_book, sell_book, qty_e2, px_e9)
@@ -97,7 +100,7 @@ fn book_cross(
         return None;
     }
     Some(CrossRecord {
-        cross_id: uuid::Uuid::now_v7(),
+        cross_id: stamper.uuid(),
         instrument,
         buy_book,
         sell_book,
@@ -116,20 +119,25 @@ pub struct NettingSession {
     cycle_seq: u64,
     next_cl_ord_seq: u64,
     policy: RefPxPolicy,
+    stamper: Stamper,
 }
 
 impl NettingSession {
     /// New session. `next_cl_ord_seq` is the first `ClOrdId` sequence number
     /// this session may mint -- the caller owns sequencing for whatever it
     /// places before wiring this in (e.g. `run_core`'s CLI startup order).
+    /// `stamper` mints every `cross_id` this session books
+    /// (`book_cross`) -- `Stamper::Fixed` for the deterministic golden-file
+    /// path, `Stamper::Wall` otherwise (`crates/d1/src/lib.rs::spawn`).
     #[must_use]
-    pub fn new(policy: RefPxPolicy, next_cl_ord_seq: u64) -> Self {
+    pub fn new(policy: RefPxPolicy, next_cl_ord_seq: u64, stamper: Stamper) -> Self {
         Self {
             targets: HashMap::new(),
             parents: HashMap::new(),
             cycle_seq: 0,
             next_cl_ord_seq,
             policy,
+            stamper,
         }
     }
 
@@ -224,6 +232,7 @@ impl NettingSession {
         // Book cross legs immediately via the shared `book_cross` path: nets
         // to zero firm-wide and makes re-netting idempotent (root CLAUDE.md
         // #2: never leave a cross silently unbooked).
+        let stamper = &mut self.stamper;
         let cross_records: Vec<CrossRecord> = crosses
             .iter()
             .filter_map(|c| {
@@ -235,6 +244,7 @@ impl NettingSession {
                     c.qty_e2,
                     c.px_e9,
                     c.policy,
+                    stamper,
                 )
             })
             .collect();
@@ -346,6 +356,7 @@ impl NettingSession {
             req.qty_e2,
             ref_px_e9,
             self.policy,
+            &mut self.stamper,
         )
     }
 
@@ -584,7 +595,7 @@ mod tests {
         // opposite demand arrives, both are present in the same cycle and
         // cross.
         let mut keeper = PositionKeeper::new(&[BookId(1), BookId(2)], &[InstrumentId(1001)]);
-        let mut session = NettingSession::new(RefPxPolicy::ArrivalMid, 100);
+        let mut session = NettingSession::new(RefPxPolicy::ArrivalMid, 100, Stamper::Wall);
 
         let out1 = session
             .on_target(target(1, 1001, 500, 1_000), &mut keeper, 1)
@@ -609,7 +620,7 @@ mod tests {
     #[test]
     fn demand_includes_inflight_unchanged_restatement_places_no_order() {
         let mut keeper = PositionKeeper::new(&[BookId(1)], &[InstrumentId(1001)]);
-        let mut session = NettingSession::new(RefPxPolicy::ArrivalMid, 1);
+        let mut session = NettingSession::new(RefPxPolicy::ArrivalMid, 1, Stamper::Wall);
 
         let out1 = session
             .on_target(target(1, 1001, 500, 0), &mut keeper, 1)
@@ -631,7 +642,7 @@ mod tests {
     #[test]
     fn negative_band_errors_not_panics() {
         let mut keeper = PositionKeeper::new(&[BookId(1)], &[InstrumentId(1001)]);
-        let mut session = NettingSession::new(RefPxPolicy::ArrivalMid, 1);
+        let mut session = NettingSession::new(RefPxPolicy::ArrivalMid, 1, Stamper::Wall);
         let err = session
             .on_target(target(1, 1001, 500, -1), &mut keeper, 1)
             .unwrap_err();
@@ -648,7 +659,7 @@ mod tests {
         // subsequent cycle for the instrument kept re-including it and kept
         // failing.
         let mut keeper = PositionKeeper::new(&[BookId(1), BookId(2)], &[InstrumentId(1001)]);
-        let mut session = NettingSession::new(RefPxPolicy::ArrivalMid, 1);
+        let mut session = NettingSession::new(RefPxPolicy::ArrivalMid, 1, Stamper::Wall);
 
         let err = session
             .on_target(target(1, 1001, 500, -1), &mut keeper, 1)
@@ -667,7 +678,7 @@ mod tests {
     #[test]
     fn on_transfer_books_both_legs_and_stamps_lineage() {
         let mut keeper = PositionKeeper::new(&[BookId(1), BookId(5)], &[InstrumentId(1001)]);
-        let mut session = NettingSession::new(RefPxPolicy::ArrivalMid, 1);
+        let mut session = NettingSession::new(RefPxPolicy::ArrivalMid, 1, Stamper::Wall);
 
         let record = session
             .on_transfer(
@@ -709,7 +720,7 @@ mod tests {
         // must return `None` and leave both books' positions untouched, not
         // half-book one leg.
         let mut keeper = PositionKeeper::new(&[BookId(1), BookId(5)], &[InstrumentId(1001)]);
-        let mut session = NettingSession::new(RefPxPolicy::ArrivalMid, 1);
+        let mut session = NettingSession::new(RefPxPolicy::ArrivalMid, 1, Stamper::Wall);
 
         // Force the buy leg (to_book) to overflow.
         keeper
@@ -755,7 +766,7 @@ mod tests {
             // positions, only redistribute it -- `to_book` gains exactly
             // `qty_e2`, `from_book` loses exactly `qty_e2`.
             let mut keeper = PositionKeeper::new(&[BookId(1), BookId(5)], &[InstrumentId(1001)]);
-            let mut session = NettingSession::new(RefPxPolicy::ArrivalMid, 1);
+            let mut session = NettingSession::new(RefPxPolicy::ArrivalMid, 1, Stamper::Wall);
 
             let before_sum = keeper.position(BookId(1), InstrumentId(1001)).unwrap().net_qty_e2
                 + keeper.position(BookId(5), InstrumentId(1001)).unwrap().net_qty_e2;
