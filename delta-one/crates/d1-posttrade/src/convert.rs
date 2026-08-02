@@ -13,6 +13,19 @@ use crate::{
     TradeKind, TradeLeg,
 };
 
+/// Raw `posttrade_trade.avsc` text, as both parsed here and registered
+/// verbatim with the Schema Registry by `registry::SchemaIds::register`.
+/// One source for both so a registered schema can never drift from the one
+/// the encoder actually writes against.
+pub const TRADE_AVSC: &str = include_str!("../../../../protocol/avro/posttrade_trade.avsc");
+/// Raw `posttrade_cross.avsc` text; see [`TRADE_AVSC`].
+pub const CROSS_AVSC: &str = include_str!("../../../../protocol/avro/posttrade_cross.avsc");
+/// Raw `posttrade_allocation.avsc` text; see [`TRADE_AVSC`].
+pub const ALLOCATION_AVSC: &str =
+    include_str!("../../../../protocol/avro/posttrade_allocation.avsc");
+/// Raw `order_audit.avsc` text; see [`TRADE_AVSC`].
+pub const ORDER_AUDIT_AVSC: &str = include_str!("../../../../protocol/avro/order_audit.avsc");
+
 /// Parsed Avro schemas for the four `protocol/avro/` post-trade records,
 /// parsed once at construction (`Schema::parse_str` is not free — do it
 /// once, not per encode call).
@@ -27,18 +40,10 @@ impl Schemas {
     /// Parse all four post-trade Avro schemas from `protocol/avro/`.
     pub fn new() -> Result<Self, PostTradeError> {
         Ok(Self {
-            trade: Schema::parse_str(include_str!(
-                "../../../../protocol/avro/posttrade_trade.avsc"
-            ))?,
-            cross: Schema::parse_str(include_str!(
-                "../../../../protocol/avro/posttrade_cross.avsc"
-            ))?,
-            allocation: Schema::parse_str(include_str!(
-                "../../../../protocol/avro/posttrade_allocation.avsc"
-            ))?,
-            order_audit: Schema::parse_str(include_str!(
-                "../../../../protocol/avro/order_audit.avsc"
-            ))?,
+            trade: Schema::parse_str(TRADE_AVSC)?,
+            cross: Schema::parse_str(CROSS_AVSC)?,
+            allocation: Schema::parse_str(ALLOCATION_AVSC)?,
+            order_audit: Schema::parse_str(ORDER_AUDIT_AVSC)?,
         })
     }
 

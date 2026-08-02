@@ -13,6 +13,7 @@
 
 pub mod convert;
 pub mod producer;
+pub mod registry;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -21,6 +22,23 @@ use uuid::Uuid;
 
 pub use convert::Schemas;
 pub use producer::run_producer;
+pub use registry::{FRAME_LEN, MAGIC_BYTE, SchemaIds, frame};
+
+/// Everything the post-trade plane needs to run: a Kafka broker list and the
+/// Schema Registry backing it (ADR-002).
+///
+/// One struct rather than two independent options because the registry is
+/// not optional *given* Kafka — a producer that cannot resolve schema ids
+/// would publish records no consumer can decode. Bundling them makes
+/// "Kafka enabled, registry absent" unconstructable, per `delta-one/CLAUDE.md`'s
+/// rule that unrepresentable states should be unconstructable via types.
+#[derive(Debug, Clone)]
+pub struct PostTradeConfig {
+    /// `bootstrap.servers` for the Kafka producer.
+    pub brokers: String,
+    /// Base URL of the Confluent Schema Registry (e.g. `http://localhost:8081`).
+    pub registry_url: String,
+}
 
 /// Fixed `booked_ns`/`ts_ns` value `Stamper::Fixed` stamps onto every
 /// record, so a golden-file encoder run is reproducible byte-for-byte
@@ -282,4 +300,31 @@ pub enum PostTradeError {
         "missing Kafka topic(s): {0} -- provision them first (see scripts/demo.sh) before starting d1's post-trade producer"
     )]
     MissingTopics(String),
+    /// Registering a schema with the Confluent Schema Registry failed —
+    /// unreachable registry, or a non-2xx response (e.g. a schema rejected
+    /// as BACKWARD-incompatible). Hard failure: without an id there is no
+    /// valid Confluent frame, and publishing unframed records would leave
+    /// the compliance topics undecodable (ADR-002).
+    #[error("schema registry: registering subject {subject} at {url} failed: {source}")]
+    SchemaRegistry {
+        /// Subject being registered (`<topic>-value`).
+        subject: String,
+        /// Full URL of the registration request.
+        url: String,
+        /// Underlying transport or status error.
+        source: Box<ureq::Error>,
+    },
+    /// The registry answered, but not with a usable schema id.
+    #[error("schema registry: subject {subject} returned no usable schema id: {body}")]
+    SchemaRegistryResponse {
+        /// Subject being registered (`<topic>-value`).
+        subject: String,
+        /// The response body (or a description of why the id was unusable).
+        body: String,
+    },
+    /// A post-trade event mapped to a topic with no registered schema id.
+    /// Unreachable for the four `posttrade.*` topics `topic_and_key` emits;
+    /// guarded rather than defaulted because a wrong id decodes to garbage.
+    #[error("no registered schema id for topic {0}")]
+    UnknownTopic(String),
 }

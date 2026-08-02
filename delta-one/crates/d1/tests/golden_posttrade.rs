@@ -2,7 +2,7 @@
 //! as `crosses_round_trip.rs` (startup fill -> book-1 band-suppressed target
 //! -> book-2 opposite target -> internal cross + residual external fill ->
 //! directed `InternalTransferRequest`), but with a real Kafka broker wired in
-//! (`d1::spawn`'s `kafka_brokers: Some(..)`, `deterministic: true`), then
+//! (`d1::spawn`'s `posttrade_cfg: Some(..)`, `deterministic: true`), then
 //! diffs the resulting `posttrade.*` Avro records -- decoded to one compact
 //! JSON object per line -- against the committed golden files in
 //! `sim/golden/`. `d1-posttrade::Stamper::Fixed` pins every id/timestamp and
@@ -10,11 +10,20 @@
 //! clean broker are expected to be byte-for-byte identical Avro (and
 //! therefore line-for-line identical JSON).
 //!
-//! Requires a NATS server on `127.0.0.1:4222` and a Kafka broker on
+//! Requires a NATS server on `127.0.0.1:4222`, a Kafka broker on
 //! `127.0.0.1:9092` with the four `posttrade.*` topics already provisioned
 //! (`just up`, then `scripts/demo.sh`'s topic-create step -- topics are
 //! **not** created here, matching `d1-posttrade::run_producer`'s own
-//! hard-error-on-missing-topic contract). Marked `#[ignore]` so plain `cargo
+//! hard-error-on-missing-topic contract), and a Confluent Schema Registry on
+//! `127.0.0.1:8081`. Schema *subjects*, unlike topics, are **not** provisioned
+//! out of band: `run_producer` registers all four itself at startup
+//! (idempotently), so this test passes against a registry with no subjects.
+//!
+//! Every consumed record is checked for the Confluent frame
+//! (`d1_posttrade::registry::frame`) before decoding, and the golden fixtures
+//! store *decoded* JSON -- so they are unchanged by framing and act as an
+//! independent check that the 5-byte prefix did not disturb the datum.
+//! Marked `#[ignore]` so plain `cargo
 //! test`/`just test` stays green without Docker; run explicitly with
 //! `--ignored`. Also auto-skips at runtime if either server turns out to be
 //! unreachable. Mirrors `crosses_round_trip.rs`'s setup/skip pattern exactly,
@@ -22,7 +31,12 @@
 //!
 //! `UPDATE_GOLDEN=1` rewrites `sim/golden/posttrade.*.jsonl` instead of
 //! asserting against them.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // integration test, not hot-path code
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)] // integration test, not hot-path code
 
 use std::collections::HashMap;
 use std::net::TcpStream;
@@ -34,13 +48,15 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use apache_avro::Schema;
-use d1::{FixConfig, StartupOrder, spawn};
+use d1::{FixConfig, PostTradeConfig, StartupOrder, spawn};
 use d1_core::{BookId, InstrumentId, Side};
 use d1_gateway_nats::pb::hedging::common::v1::{InstrumentRef, Meta};
 use d1_gateway_nats::pb::hedging::live::v1::{
     ExecutionReport, InternalCrossNotice, InternalTransferRequest, OrdStatus, TargetPosition,
 };
-use d1_posttrade::{TOPIC_ALLOCATIONS, TOPIC_CROSSES, TOPIC_ORDER_AUDIT, TOPIC_TRADES};
+use d1_posttrade::{
+    FRAME_LEN, MAGIC_BYTE, TOPIC_ALLOCATIONS, TOPIC_CROSSES, TOPIC_ORDER_AUDIT, TOPIC_TRADES,
+};
 use futures_util::StreamExt;
 use prost::Message as _;
 use rdkafka::Offset;
@@ -51,6 +67,11 @@ use rdkafka::topic_partition_list::TopicPartitionList;
 
 const NATS_URL: &str = "127.0.0.1:4222";
 const KAFKA_BROKERS: &str = "127.0.0.1:9092";
+/// Confluent Schema Registry (`deploy/docker-compose.yml`). The producer
+/// registers the four post-trade schemas here at startup and frames every
+/// record with the id it gets back (ADR-002).
+const SCHEMA_REGISTRY: &str = "http://127.0.0.1:8081";
+const SCHEMA_REGISTRY_ADDR: &str = "127.0.0.1:8081";
 // Distinct from every other tests/*.rs FIX_PORT -- quickfix's SessionID
 // registry is process-global, but each `tests/*.rs` integration test file
 // compiles to its own binary/process, so this only needs to avoid the OS
@@ -263,6 +284,16 @@ fn kafka_reachable() -> bool {
     .is_ok()
 }
 
+fn schema_registry_reachable() -> bool {
+    TcpStream::connect_timeout(
+        &SCHEMA_REGISTRY_ADDR
+            .parse()
+            .expect("SCHEMA_REGISTRY_ADDR is a valid socket addr"),
+        Duration::from_millis(300),
+    )
+    .is_ok()
+}
+
 fn spawn_sim_acceptor(cfg_path: &Path) -> SimAcceptor {
     let child = Command::new(env!("CARGO"))
         .args([
@@ -385,11 +416,45 @@ fn high_watermark(consumer: &BaseConsumer, topic: &str) -> i64 {
     high
 }
 
-/// Decode one raw Avro datum against `schema` and re-encode it as a single
-/// compact JSON line, via `apache_avro`'s `TryFrom<types::Value> for
+/// Strip and validate the Confluent wire-format prefix
+/// (`0x00 || schema_id BE32`, `d1_posttrade::registry::frame`), returning the
+/// schema id and the bare Avro datum.
+///
+/// Asserting here rather than blindly slicing is deliberate: an unframed or
+/// mis-framed record would otherwise still decode (Avro datums are not
+/// self-delimiting, so a 5-byte shift usually yields *some* value) and the
+/// golden diff would report a confusing field-level mismatch instead of the
+/// actual fault.
+fn split_confluent_frame(topic: &str, payload: &[u8]) -> (u32, Vec<u8>) {
+    assert!(
+        payload.len() >= FRAME_LEN,
+        "golden_posttrade: {topic} record is {} byte(s), shorter than the {FRAME_LEN}-byte Confluent frame -- is the producer still publishing raw Avro datums?",
+        payload.len()
+    );
+    let (prefix, datum) = payload.split_at(FRAME_LEN);
+    assert_eq!(
+        prefix[0], MAGIC_BYTE,
+        "golden_posttrade: {topic} record has magic byte {:#04x}, expected {MAGIC_BYTE:#04x} (ADR-002 Confluent wire format)",
+        prefix[0]
+    );
+    let schema_id = u32::from_be_bytes([prefix[1], prefix[2], prefix[3], prefix[4]]);
+    assert!(
+        schema_id > 0,
+        "golden_posttrade: {topic} record carries schema id 0 -- the registry never assigns 0, so the prefix is not a real frame"
+    );
+    (schema_id, datum.to_vec())
+}
+
+/// Decode one framed post-trade record against `schema` and re-encode it as a
+/// single compact JSON line, via `apache_avro`'s `TryFrom<types::Value> for
 /// serde_json::Value` (`apache-avro` 0.21 `src/types.rs`).
-fn decode_to_json_line(schema: &Schema, payload: &[u8]) -> String {
-    let avro_value = apache_avro::from_avro_datum(schema, &mut &payload[..], None)
+///
+/// The JSON this produces is what `sim/golden/*.jsonl` stores, so those
+/// fixtures are unchanged by framing — which makes them an independent check
+/// that the prefix was added without disturbing the datum.
+fn decode_to_json_line(schema: &Schema, topic: &str, payload: &[u8]) -> String {
+    let (_schema_id, datum) = split_confluent_frame(topic, payload);
+    let avro_value = apache_avro::from_avro_datum(schema, &mut &datum[..], None)
         .expect("decode Avro datum against schema");
     let json = serde_json::Value::try_from(avro_value).expect("Avro value to JSON");
     serde_json::to_string(&json).expect("serialize JSON line")
@@ -429,7 +494,7 @@ fn consume_range(
         match consumer.poll(KAFKA_POLL_INTERVAL) {
             Some(Ok(msg)) => {
                 let payload = msg.payload().expect("message has a payload");
-                lines.push(decode_to_json_line(schema, payload));
+                lines.push(decode_to_json_line(schema, topic, payload));
             }
             Some(Err(err)) => panic!("golden_posttrade: consume {topic} failed: {err}"),
             None => {}
@@ -505,7 +570,7 @@ fn compare_or_update_golden(topic: &str, golden_path: &Path, lines: &[String]) {
 }
 
 #[test]
-#[ignore = "requires a NATS server on 127.0.0.1:4222 and a Kafka broker on 127.0.0.1:9092 with posttrade.* topics provisioned (`just up`, then scripts/demo.sh's topic-create step)"]
+#[ignore = "requires a NATS server on 127.0.0.1:4222, a Kafka broker on 127.0.0.1:9092 with posttrade.* topics provisioned, and a Schema Registry on 127.0.0.1:8081 (`just up`, then scripts/demo.sh's topic-create step)"]
 fn posttrade_golden_file() {
     if !nats_reachable() {
         println!("golden_posttrade: NATS unreachable at {NATS_URL}, skipping (`just up` first)");
@@ -514,6 +579,12 @@ fn posttrade_golden_file() {
     if !kafka_reachable() {
         println!(
             "golden_posttrade: Kafka unreachable at {KAFKA_BROKERS}, skipping (`just up` first)"
+        );
+        return;
+    }
+    if !schema_registry_reachable() {
+        println!(
+            "golden_posttrade: Schema Registry unreachable at {SCHEMA_REGISTRY}, skipping (`just up` first)"
         );
         return;
     }
@@ -565,7 +636,10 @@ fn posttrade_golden_file() {
         instrument_ids,
         policy,
         universe,
-        Some(KAFKA_BROKERS.to_string()),
+        Some(PostTradeConfig {
+            brokers: KAFKA_BROKERS.to_string(),
+            registry_url: SCHEMA_REGISTRY.to_string(),
+        }),
         true, // deterministic: pinned ids/timestamps/mid, the golden-file path
         &shutdown,
     );
@@ -740,7 +814,7 @@ fn posttrade_golden_file() {
                 Err(_) => panic!("posttrade producer thread panicked"),
             }
         }
-        _ => panic!("posttrade producer thread was never spawned (kafka_brokers was None)"),
+        _ => panic!("posttrade producer thread was never spawned (posttrade_cfg was None)"),
     }
 
     let hwm_end: HashMap<&str, i64> = TOPICS

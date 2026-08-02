@@ -23,6 +23,8 @@ use d1_gateway_fix::{FixCallbacks, FixError};
 use d1_gateway_nats::NatsError;
 use d1_netting::RefPxPolicy;
 use d1_posttrade::{AuditOrigin, NettingCycleId, PostTradeError, PostTradeEvent, Stamper};
+
+pub use d1_posttrade::PostTradeConfig;
 use d1_refdata::Universe;
 
 /// Ring capacity for every `rtrb` ring this binary owns (ADR-013). Generous
@@ -74,7 +76,7 @@ pub struct RunHandles {
     /// The synthetic feed-ingest producer thread.
     pub feed: JoinHandle<()>,
     /// The Kafka post-trade producer thread, `Some` only when a broker
-    /// address was given (`kafka_brokers`) -- `None` in tests, which run
+    /// address was given (`posttrade_cfg`) -- `None` in tests, which run
     /// without a broker.
     pub posttrade: Option<JoinHandle<Result<(), PostTradeError>>>,
     /// The producer thread's OWN shutdown flag, `Some` iff `posttrade` is
@@ -93,7 +95,7 @@ pub struct RunHandles {
 /// Build the `rtrb` rings (ADR-013) and spawn the core/FIX/NATS/feed
 /// threads. Blocks on nothing itself -- the caller decides how/when to flip
 /// `shutdown` and joins the returned handles. If a Kafka producer thread is
-/// spawned (`kafka_brokers: Some`), it does NOT share `shutdown` -- see
+/// spawned (`posttrade_cfg: Some`), it does NOT share `shutdown` -- see
 /// `RunHandles::posttrade_shutdown` for the ordered-shutdown contract that
 /// protects the producer's final drain.
 ///
@@ -107,10 +109,13 @@ pub struct RunHandles {
 /// `universe` is handed whole to the Kafka producer thread (P1.M4 Slice 2):
 /// `d1_posttrade::Schemas::encode` resolves `symbol`/`currency` from it,
 /// separately from `book_ids`/`instrument_ids` above (those feed the keeper).
-/// `kafka_brokers` is `Some(addr)` to spawn the producer thread, `None` to
-/// skip it entirely -- tests pass `None` since they run without a broker; the
-/// `posttrade` ring then simply fills and the log-and-drop push helper in
-/// `run_core` drops harmlessly.
+/// `posttrade_cfg` is `Some(PostTradeConfig { brokers, registry_url })` to
+/// spawn the producer thread, `None` to skip it entirely -- tests pass `None`
+/// since they run without a broker; the `posttrade` ring then simply fills and
+/// the log-and-drop push helper in `run_core` drops harmlessly. Broker and
+/// registry travel together because a producer that cannot resolve Confluent
+/// schema ids would publish records no consumer can decode (ADR-002), so
+/// "Kafka without a registry" is deliberately unconstructable.
 ///
 /// `deterministic` selects the golden-file reproducible path: `Stamper::Fixed`
 /// (instead of `Stamper::Wall`) for ids/timestamps, and `0` feed drift
@@ -132,7 +137,7 @@ pub fn spawn(
     instrument_ids: Vec<InstrumentId>,
     policy: RefPxPolicy,
     universe: Universe,
-    kafka_brokers: Option<String>,
+    posttrade_cfg: Option<PostTradeConfig>,
     deterministic: bool,
     shutdown: &Arc<AtomicBool>,
 ) -> RunHandles {
@@ -208,7 +213,7 @@ pub fn spawn(
         feed::run_feed_producer(&feed_instruments, feed_tx, feed_drift_e9, &feed_shutdown);
     });
 
-    // `kafka_brokers: None` (tests, no broker available) -- don't spawn: the
+    // `posttrade_cfg: None` (tests, no broker available) -- don't spawn: the
     // ring simply fills and `run_core`'s log-and-drop push helper drops
     // harmlessly, same ceiling as every other ring in this binary.
     //
@@ -219,7 +224,7 @@ pub fn spawn(
     // until the caller has joined `core`, or the producer can drain-flush-exit
     // while `core` is still mid-iteration pushing events.
     let mut posttrade_shutdown = None;
-    let posttrade = kafka_brokers.map(|brokers| {
+    let posttrade = posttrade_cfg.map(|cfg| {
         let flag = Arc::new(AtomicBool::new(false));
         posttrade_shutdown = Some(Arc::clone(&flag));
         let producer_stamper = if deterministic {
@@ -229,7 +234,8 @@ pub fn spawn(
         };
         thread::spawn(move || {
             let result = d1_posttrade::run_producer(
-                &brokers,
+                &cfg.brokers,
+                &cfg.registry_url,
                 universe,
                 posttrade_rx,
                 producer_stamper,
@@ -754,7 +760,7 @@ fn run_core(
 /// Push one post-trade event onto the Kafka producer ring, log-and-drop on
 /// full -- same ceiling as every other ring in this binary (a single demo
 /// session, not a backpressure protocol yet). With no producer thread
-/// running (`spawn`'s `kafka_brokers: None`, tests), this ring simply fills
+/// running (`spawn`'s `posttrade_cfg: None`, tests), this ring simply fills
 /// and every subsequent push drops harmlessly.
 fn push_posttrade(tx: &mut rtrb::Producer<PostTradeEvent>, event: PostTradeEvent) {
     if tx.push(event).is_err() {

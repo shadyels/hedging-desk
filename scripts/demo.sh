@@ -8,6 +8,8 @@
 # crosses/transfers storyline, driven with a real Kafka broker wired in,
 # diffed against sim/golden/).
 # Deferred pieces, by milestone -- not implemented here, not pretended:
+# A later follow-up added Confluent Schema Registry framing (ADR-002), so the
+# registry must be up before golden_posttrade runs -- waited on below.
 #   - sim tracker-flow scenario replay (sim's replay.rs is still M1-scoped
 #     and never feeds d1) and UI left running (Phase 3): both land later.
 set -euo pipefail
@@ -31,6 +33,20 @@ for _ in $(seq 1 50); do
 done
 if [[ "$nats_up" -ne 1 ]]; then
   echo "scripts/demo.sh: NATS never came up on 127.0.0.1:4222 (8222/varz unreachable)" >&2
+  exit 1
+fi
+
+echo "scripts/demo.sh: waiting for Schema Registry on 127.0.0.1:8081..."
+registry_up=0
+for _ in $(seq 1 100); do
+  if curl -sf http://127.0.0.1:8081/subjects >/dev/null 2>&1; then
+    registry_up=1
+    break
+  fi
+  sleep 0.5
+done
+if [[ "$registry_up" -ne 1 ]]; then
+  echo "scripts/demo.sh: Schema Registry never came up on 127.0.0.1:8081" >&2
   exit 1
 fi
 
@@ -60,6 +76,11 @@ fi
 # don't touch Kafka. 1 partition / replication-factor 1 matches the
 # single-broker compose and is what makes per-topic record order
 # deterministic (P1.M4 slice 3's golden diff depends on that).
+# Schema *subjects*, unlike topics, are deliberately NOT provisioned here:
+# `d1-posttrade::registry::SchemaIds::register` POSTs all four at producer
+# startup and the registry returns the existing id for an already-registered
+# identical schema, so this is idempotent and needs no out-of-band step. The
+# registry reachability wait above is what golden_posttrade.rs depends on.
 echo "scripts/demo.sh: provisioning posttrade.* topics..."
 for topic in posttrade.trades posttrade.crosses posttrade.allocations posttrade.orders.audit; do
   docker compose -f deploy/docker-compose.yml exec -T kafka \
