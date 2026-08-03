@@ -41,11 +41,56 @@ pub enum RefdataError {
         /// Which required array was empty (`books` or `instruments`).
         field: &'static str,
     },
+    /// A book named a `benchmark_symbol` with no matching entry under
+    /// `benchmarks`. A tracker book whose benchmark silently resolved to an
+    /// empty constituent list would publish a benchmark return of exactly
+    /// zero, making its tracking error a plausible-looking fiction (ADR-010).
+    #[error("universe refdata at {path:?}: book {book} names unknown benchmark {symbol:?}")]
+    UnknownBenchmark {
+        /// Path whose benchmark reference did not resolve.
+        path: PathBuf,
+        /// Book that named the missing benchmark.
+        book: u32,
+        /// The unresolvable benchmark symbol.
+        symbol: String,
+    },
+    /// A benchmark constituent is not in the `instruments` universe, so it
+    /// would have no `MarketData` slot and therefore no price to compute a
+    /// return from — same fail-loud posture as `UnknownBenchmark`.
+    #[error(
+        "universe refdata at {path:?}: benchmark {symbol:?} constituent {instrument_id} is not in the instrument universe"
+    )]
+    BenchmarkConstituentNotInUniverse {
+        /// Path whose constituent did not resolve.
+        path: PathBuf,
+        /// Benchmark holding the dangling constituent.
+        symbol: String,
+        /// The instrument id that is not in `instruments`.
+        instrument_id: u32,
+    },
 }
 
 #[derive(Debug, Deserialize)]
 struct BookDef {
     book_id: u32,
+    /// Present only on tracker books; absent books simply have no analytics.
+    #[serde(default)]
+    benchmark_symbol: Option<String>,
+    /// Endowed cash base for a tracker book, `_e9`. Absent (or 0) means the
+    /// book starts flat — legal, but every NAV return is then 0/0.
+    #[serde(default, rename = "initial_cash_e9_DEMO_PLACEHOLDER")]
+    initial_cash_e9: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct BenchmarkDef {
+    constituents: Vec<ConstituentDef>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConstituentDef {
+    instrument_id: u32,
+    weight_e9: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -59,6 +104,8 @@ struct InstrumentDef {
 struct ConventionsDef {
     cross_px_policy_default: String,
     venue_counterparty_default: String,
+    #[serde(rename = "cash_yield_annual_e9_DEMO_PLACEHOLDER")]
+    cash_yield_annual_e9: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,6 +113,27 @@ struct UniverseFile {
     books: Vec<BookDef>,
     instruments: Vec<InstrumentDef>,
     conventions: ConventionsDef,
+    #[serde(default)]
+    benchmarks: HashMap<String, BenchmarkDef>,
+}
+
+/// One benchmark-tracking book, resolved against the instrument universe.
+/// Only books carrying a `benchmark_symbol` appear (ADR-010: analytics are a
+/// tracker-book concept, not a firm-wide one).
+#[derive(Debug, Clone)]
+pub struct TrackerBook {
+    /// The tracker book itself.
+    pub book: BookId,
+    /// Benchmark ticker, e.g. `"SPX"`. Carried through to the Avro
+    /// `benchmark_symbol` field on `posttrade.tracker.analytics`.
+    pub benchmark_symbol: String,
+    /// `(instrument, weight_e9)` pairs read as PORTFOLIO weights: they
+    /// normalise to `1.0e9` and the benchmark return is the fixed-weight sum
+    /// `Σ w_c · r_c`, implicitly rebalanced at every sample. `universe.json`
+    /// does not state which reading it intends; this is the documented one.
+    pub constituents: Vec<(InstrumentId, i64)>,
+    /// Endowed cash base seeded into `PositionKeeper` at startup.
+    pub initial_cash_e9: i64,
 }
 
 /// Book/instrument ids parsed from refdata, plus a symbol lookup for
@@ -76,6 +144,14 @@ pub struct Universe {
     pub book_ids: Vec<BookId>,
     /// All instrument ids in the universe, in file order.
     pub instrument_ids: Vec<InstrumentId>,
+    /// Benchmark-tracking books, resolved against the instrument universe
+    /// (ADR-010). A book without a `benchmark_symbol` simply does not
+    /// appear here.
+    pub tracker_books: Vec<TrackerBook>,
+    /// Demo cash-yield convention, `_e9` fixed point annualized, from
+    /// `conventions.cash_yield_annual_e9`. Consumed by tracker analytics
+    /// (`PositionKeeper::accrue_cash`, ADR-010).
+    pub cash_yield_annual_e9: i64,
     /// Ticker symbol -> instrument id.
     pub symbol_to_id: HashMap<String, InstrumentId>,
     /// Instrument id -> ticker symbol (inverse of `symbol_to_id`). Used by
@@ -137,6 +213,7 @@ fn parse(path: &Path, raw: &str) -> Result<Universe, RefdataError> {
         .collect();
     let cross_px_policy = parsed.conventions.cross_px_policy_default;
     let venue_counterparty = parsed.conventions.venue_counterparty_default;
+    let cash_yield_annual_e9 = parsed.conventions.cash_yield_annual_e9;
     let mut symbol_to_id = HashMap::with_capacity(parsed.instruments.len());
     let mut id_to_symbol = HashMap::with_capacity(parsed.instruments.len());
     let mut id_to_currency = HashMap::with_capacity(parsed.instruments.len());
@@ -147,9 +224,51 @@ fn parse(path: &Path, raw: &str) -> Result<Universe, RefdataError> {
         id_to_currency.insert(id, i.currency);
     }
 
+    // Only books carrying a `benchmark_symbol` produce a `TrackerBook`; a
+    // book without one has no analytics and is silently absent, not an
+    // error (ADR-010: analytics are a tracker-book concept, not firm-wide).
+    let mut tracker_books = Vec::new();
+    for b in &parsed.books {
+        let Some(symbol) = &b.benchmark_symbol else {
+            continue;
+        };
+        let benchmark =
+            parsed
+                .benchmarks
+                .get(symbol)
+                .ok_or_else(|| RefdataError::UnknownBenchmark {
+                    path: path.to_path_buf(),
+                    book: b.book_id,
+                    symbol: symbol.clone(),
+                })?;
+        let mut constituents = Vec::with_capacity(benchmark.constituents.len());
+        for c in &benchmark.constituents {
+            let id = InstrumentId(c.instrument_id);
+            // A dangling constituent has no `MarketData` slot and therefore
+            // no price to compute a return from -- fail loud rather than
+            // silently dropping it from the benchmark composition.
+            if !id_to_currency.contains_key(&id) {
+                return Err(RefdataError::BenchmarkConstituentNotInUniverse {
+                    path: path.to_path_buf(),
+                    symbol: symbol.clone(),
+                    instrument_id: c.instrument_id,
+                });
+            }
+            constituents.push((id, c.weight_e9));
+        }
+        tracker_books.push(TrackerBook {
+            book: BookId(b.book_id),
+            benchmark_symbol: symbol.clone(),
+            constituents,
+            initial_cash_e9: b.initial_cash_e9,
+        });
+    }
+
     Ok(Universe {
         book_ids,
         instrument_ids,
+        tracker_books,
+        cash_yield_annual_e9,
         symbol_to_id,
         id_to_symbol,
         id_to_currency,
@@ -215,7 +334,7 @@ mod tests {
         let empty_books = r#"{
             "books": [],
             "instruments": [{"instrument_id": 1001, "symbol": "AAPL", "currency": "USD"}],
-            "conventions": {"cross_px_policy_default": "ARRIVAL_MID", "venue_counterparty_default": "SIM"}
+            "conventions": {"cross_px_policy_default": "ARRIVAL_MID", "venue_counterparty_default": "SIM", "cash_yield_annual_e9_DEMO_PLACEHOLDER": 40000000}
         }"#;
         assert!(matches!(
             parse(Path::new("test.json"), empty_books).unwrap_err(),
@@ -225,7 +344,7 @@ mod tests {
         let empty_instruments = r#"{
             "books": [{"book_id": 1}],
             "instruments": [],
-            "conventions": {"cross_px_policy_default": "ARRIVAL_MID", "venue_counterparty_default": "SIM"}
+            "conventions": {"cross_px_policy_default": "ARRIVAL_MID", "venue_counterparty_default": "SIM", "cash_yield_annual_e9_DEMO_PLACEHOLDER": 40000000}
         }"#;
         assert!(matches!(
             parse(Path::new("test.json"), empty_instruments).unwrap_err(),
@@ -233,6 +352,57 @@ mod tests {
                 field: "instruments",
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn parses_tracker_books() {
+        let universe = load(&universe_path()).unwrap();
+        assert_eq!(universe.tracker_books.len(), 1);
+        let tracker = universe.tracker_books.first().unwrap();
+        assert_eq!(tracker.book, BookId(1));
+        assert_eq!(tracker.benchmark_symbol, "SPX");
+        assert_eq!(
+            tracker.constituents,
+            vec![
+                (InstrumentId(1001), 600_000_000),
+                (InstrumentId(1002), 400_000_000),
+            ]
+        );
+        assert_eq!(tracker.initial_cash_e9, 10_000_000_000_000_000);
+        assert_eq!(universe.cash_yield_annual_e9, 40_000_000);
+    }
+
+    #[test]
+    fn unknown_benchmark_symbol_is_an_error() {
+        let raw = r#"{
+            "books": [{"book_id": 1, "benchmark_symbol": "NOPE", "initial_cash_e9_DEMO_PLACEHOLDER": 100}],
+            "instruments": [{"instrument_id": 1001, "symbol": "AAPL", "currency": "USD"}],
+            "conventions": {"cross_px_policy_default": "ARRIVAL_MID", "venue_counterparty_default": "SIM", "cash_yield_annual_e9_DEMO_PLACEHOLDER": 40000000}
+        }"#;
+        let err = parse(Path::new("test.json"), raw).unwrap_err();
+        assert!(matches!(
+            err,
+            RefdataError::UnknownBenchmark { book: 1, ref symbol, .. } if symbol == "NOPE"
+        ));
+    }
+
+    #[test]
+    fn benchmark_constituent_not_in_universe_is_an_error() {
+        let raw = r#"{
+            "books": [{"book_id": 1, "benchmark_symbol": "SPX", "initial_cash_e9_DEMO_PLACEHOLDER": 100}],
+            "instruments": [{"instrument_id": 1001, "symbol": "AAPL", "currency": "USD"}],
+            "conventions": {"cross_px_policy_default": "ARRIVAL_MID", "venue_counterparty_default": "SIM", "cash_yield_annual_e9_DEMO_PLACEHOLDER": 40000000},
+            "benchmarks": {"SPX": {"constituents": [{"instrument_id": 9999, "weight_e9": 1000000000}]}}
+        }"#;
+        let err = parse(Path::new("test.json"), raw).unwrap_err();
+        assert!(matches!(
+            err,
+            RefdataError::BenchmarkConstituentNotInUniverse {
+                ref symbol,
+                instrument_id: 9999,
+                ..
+            } if symbol == "SPX"
         ));
     }
 }

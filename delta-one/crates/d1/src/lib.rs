@@ -319,6 +319,7 @@ fn run_core(
             ask_px_e9: feed::STARTING_PX_E9,
             last_px_e9: feed::STARTING_PX_E9,
             exch_ts_ns: 0,
+            div_per_share_e9: 0,
         });
     }
     let mut session = NettingSession::new(policy, 2, stamper); // seq 1 is the startup order below

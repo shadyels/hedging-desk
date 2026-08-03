@@ -377,6 +377,8 @@ mod tests {
         Universe {
             book_ids: vec![BookId(1), BookId(2)],
             instrument_ids: vec![InstrumentId(1001)],
+            tracker_books: Vec::new(),
+            cash_yield_annual_e9: 40_000_000,
             symbol_to_id,
             id_to_symbol,
             id_to_currency,

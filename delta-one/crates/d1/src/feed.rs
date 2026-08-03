@@ -27,6 +27,12 @@ const SPREAD_E9: i64 = 10_000_000; // 0.01
 /// deterministic path (`crates/d1/src/lib.rs::spawn`) passes `0` instead,
 /// pinning every tick's mid at `STARTING_PX_E9` regardless of tick count.
 pub(crate) const DRIFT_E9: i64 = 1_000_000; // 0.001/tick
+/// Demo dividend schedule: fires once, the moment the synthetic
+/// `exch_ts_ns` clock first crosses this boundary -- mirrors
+/// `sim/scenarios/tracker-flow.yaml`'s `action: dividend` on AAPL @9000ms.
+pub(crate) const DIVIDEND_AT_NS: u64 = 9_000_000_000;
+/// AAPL's demo dividend amount, `_e9` fixed point (0.25/share).
+pub(crate) const DIVIDEND_PER_SHARE_E9: i64 = 250_000_000;
 
 /// Emit one `FeedTick` per instrument in `instruments` onto `feed_tx` every
 /// `TICK_INTERVAL` until `shutdown` is set. `drift_e9` is added to each
@@ -47,15 +53,32 @@ pub fn run_feed_producer(
 ) {
     let mut last_px_e9 = vec![STARTING_PX_E9; instruments.len()];
     let mut exch_ts_ns = 0u64;
+    // Latched so the demo dividend fires exactly once per session, on the
+    // first tick whose clock has reached `DIVIDEND_AT_NS`.
+    let mut dividend_fired = false;
 
     while !shutdown.load(Ordering::Relaxed) {
-        for (instrument, px_e9) in instruments.iter().zip(last_px_e9.iter_mut()) {
+        for (i, (instrument, px_e9)) in instruments.iter().zip(last_px_e9.iter_mut()).enumerate() {
+            // Rides the FIRST instrument's tick (AAPL in universe.json
+            // order) the moment the clock first crosses `DIVIDEND_AT_NS` --
+            // see `FeedTick::div_per_share_e9`'s doc comment for why this
+            // travels on the tick stream instead of its own ring. This
+            // slice only puts the field on the wire; crediting the cash
+            // (`PositionKeeper::credit_dividend`) is `run_core`'s job
+            // (Slice 2).
+            let div_per_share_e9 = if i == 0 && !dividend_fired && exch_ts_ns >= DIVIDEND_AT_NS {
+                dividend_fired = true;
+                DIVIDEND_PER_SHARE_E9
+            } else {
+                0
+            };
             let tick = FeedTick {
                 instrument_id: *instrument,
                 bid_px_e9: *px_e9 - SPREAD_E9,
                 ask_px_e9: *px_e9 + SPREAD_E9,
                 last_px_e9: *px_e9,
                 exch_ts_ns,
+                div_per_share_e9,
             };
 
             let mut pending = Some(tick);
