@@ -551,6 +551,7 @@ name = "d1-posttrade"
 version = "0.1.0"
 dependencies = [
  "apache-avro",
+ "d1-analytics",
  "d1-core",
  "d1-refdata",
  "rdkafka",

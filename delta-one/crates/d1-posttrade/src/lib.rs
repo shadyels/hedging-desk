@@ -17,6 +17,7 @@ pub mod registry;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use d1_analytics::TrackerRecord;
 use d1_core::{BookId, ClOrdId, ExecId, InstrumentId, OrderStatus, Side};
 use uuid::Uuid;
 
@@ -107,6 +108,11 @@ pub const TOPIC_CROSSES: &str = "posttrade.crosses";
 pub const TOPIC_ALLOCATIONS: &str = "posttrade.allocations";
 /// Kafka topic for the order audit trail (ADR-002), keyed by `cl_ord_id`.
 pub const TOPIC_ORDER_AUDIT: &str = "posttrade.orders.audit";
+/// Kafka topic for the daily index-tracker analytics record (ADR-010 §4),
+/// keyed by `book_id`. Unlike the four topics above, exactly one record is
+/// published per tracker book per session (`crates/d1/src/lib.rs::run_core`
+/// pushes it after the drain loop exits, never on a periodic cadence).
+pub const TOPIC_TRACKER_ANALYTICS: &str = "posttrade.tracker.analytics";
 
 /// Destination topic and partition key for one post-trade event. The key is
 /// rendered with the exact same id-string logic `convert.rs` uses for the
@@ -126,12 +132,15 @@ pub fn topic_and_key(event: &PostTradeEvent) -> (&'static str, String) {
         PostTradeEvent::OrderAudit(o) => {
             (TOPIC_ORDER_AUDIT, convert::clordid_to_string(&o.cl_ord_id))
         }
+        PostTradeEvent::Tracker(r, _sampling_interval_s) => {
+            (TOPIC_TRACKER_ANALYTICS, r.book.0.to_string())
+        }
     }
 }
 
-/// One post-trade event to encode. Mirrors the four Avro record types in
+/// One post-trade event to encode. Mirrors the five Avro record types in
 /// `protocol/avro/` (`posttrade_trade`, `posttrade_cross`,
-/// `posttrade_allocation`, `order_audit`).
+/// `posttrade_allocation`, `order_audit`, `tracker_analytics`).
 #[derive(Debug, Clone, Copy)]
 pub enum PostTradeEvent {
     /// A booked trade leg (external fill or internal cross leg).
@@ -142,6 +151,16 @@ pub enum PostTradeEvent {
     Allocation(Allocation),
     /// An order state transition, for compliance replay.
     OrderAudit(OrderAudit),
+    /// One tracker book's end-of-session analytics (ADR-010 §4), plus the
+    /// `sampling_interval_s` the record was sampled at
+    /// (`d1.toml [tracker]`, `TrackerConfig::sampling_interval_s`).
+    /// `TrackerRecord` itself (`d1-analytics`, the pure calculator's output
+    /// type) carries no notion of its own sampling cadence -- a consumer
+    /// cannot interpret `tracking_error_ann_e9` without knowing how long a
+    /// period is, so this is carried alongside the record rather than
+    /// threading it as a separate parameter through `Schemas::encode` and
+    /// `run_producer`.
+    Tracker(TrackerRecord, u32),
 }
 
 /// Which side of a trade produced a `TradeLeg`: an external venue fill, or
@@ -323,8 +342,24 @@ pub enum PostTradeError {
         body: String,
     },
     /// A post-trade event mapped to a topic with no registered schema id.
-    /// Unreachable for the four `posttrade.*` topics `topic_and_key` emits;
+    /// Unreachable for the five `posttrade.*` topics `topic_and_key` emits;
     /// guarded rather than defaulted because a wrong id decodes to garbage.
     #[error("no registered schema id for topic {0}")]
     UnknownTopic(String),
+    /// A `u64` timestamp (e.g. `TrackerRecord::window_end_ns`) did not fit in
+    /// the Avro `long` (`i64`) field it maps to.
+    #[error("timestamp {0} does not fit in an Avro `long` (i64)")]
+    TimestampOverflow(u64),
+    /// A `TrackerRecord.book` has no resolvable benchmark in the refdata
+    /// universe: either the book itself has no entry in
+    /// `Universe::tracker_books` (unreachable in practice -- every
+    /// `TrackerRecord` this crate ever sees was produced for a book drawn
+    /// from that same list, `crates/d1/src/lib.rs::run_core`'s
+    /// `tracker_states`), or its `benchmark_symbol` (already validated
+    /// against the benchmarks map by `d1-refdata::parse`) is not itself
+    /// listed as a quotable instrument in the universe. Guarded rather than
+    /// defaulted -- same posture as `UnknownTopic`: a made-up symbol would
+    /// silently mislabel a compliance record.
+    #[error("book {0:?} has no resolvable tracker benchmark in the refdata universe")]
+    UnknownTrackerBenchmark(BookId),
 }

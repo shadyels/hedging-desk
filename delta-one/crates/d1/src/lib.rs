@@ -917,6 +917,39 @@ fn run_core(
             thread::sleep(POLL_INTERVAL);
         }
     }
+
+    // P1.M5 Slice 3 (ADR-010 §4): emit exactly one Kafka
+    // `posttrade.tracker.analytics` record per tracker book, HERE -- after
+    // the drain loop above has exited, never inside it. Two reasons, both
+    // load-bearing:
+    //
+    // 1. Ordering/goldens. `rtrb` is FIFO, so an event pushed after the loop
+    //    is provably the LAST event the producer thread ever pops off this
+    //    ring, which is what keeps the four existing golden fixtures
+    //    byte-identical instead of shifting every `msg_id` in the
+    //    `Stamper::Fixed` sequence forward by one. Safe because the
+    //    ordered-shutdown contract (`RunHandles::posttrade_shutdown`'s doc
+    //    comment) joins `core` -- this function -- before signalling the
+    //    producer, so the producer's final `drain()` provably catches this
+    //    push.
+    // 2. Contract. ADR-010 §4 specifies a DAILY Avro record, and
+    //    end-of-session is this demo's "day" -- there is no periodic Kafka
+    //    publish at all here; `publish_interval_s` (`d1.toml [tracker]`)
+    //    governs only the NATS cadence above, never this one.
+    //
+    // ponytail: a real deployment triggers this on an end-of-day boundary
+    // this process never observes -- the synthetic feed clock has no
+    // calendar/wall-clock concept to detect one. Upgrade to a real EOD
+    // scheduler when this ever runs against a live feed instead of one demo
+    // session.
+    for state in &tracker_states {
+        if let Some(record) = analytics(state.book, &state.window, cash_yield_annual_e9) {
+            push_posttrade(
+                &mut posttrade_tx,
+                PostTradeEvent::Tracker(record, tracker_cfg.sampling_interval_s),
+            );
+        }
+    }
 }
 
 /// Push one post-trade event onto the Kafka producer ring, log-and-drop on

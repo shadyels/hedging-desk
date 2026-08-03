@@ -1,4 +1,4 @@
-//! Confluent Schema Registry integration (ADR-002): register the four
+//! Confluent Schema Registry integration (ADR-002): register the five
 //! post-trade Avro schemas at producer startup, cache the ids the registry
 //! assigns, and wrap each encoded datum in the Confluent wire format.
 //!
@@ -10,12 +10,13 @@
 //! registry, including across a schema evolution.
 //!
 //! Off the hot path (crate table in `delta-one/CLAUDE.md`): `String`, heap
-//! allocation and blocking HTTP are all fine here. The four registration
+//! allocation and blocking HTTP are all fine here. The five registration
 //! calls happen once, at producer-thread startup, before the drain loop.
 
 use crate::{
-    PostTradeError, TOPIC_ALLOCATIONS, TOPIC_CROSSES, TOPIC_ORDER_AUDIT, TOPIC_TRADES,
-    convert::{ALLOCATION_AVSC, CROSS_AVSC, ORDER_AUDIT_AVSC, TRADE_AVSC},
+    PostTradeError, TOPIC_ALLOCATIONS, TOPIC_CROSSES, TOPIC_ORDER_AUDIT, TOPIC_TRACKER_ANALYTICS,
+    TOPIC_TRADES,
+    convert::{ALLOCATION_AVSC, CROSS_AVSC, ORDER_AUDIT_AVSC, TRACKER_ANALYTICS_AVSC, TRADE_AVSC},
 };
 
 /// Confluent wire-format magic byte: the first byte of every framed payload,
@@ -45,7 +46,7 @@ pub fn frame(schema_id: u32, datum: &[u8]) -> Vec<u8> {
     framed
 }
 
-/// Schema Registry ids for the four `posttrade.*` subjects, resolved once at
+/// Schema Registry ids for the five `posttrade.*` subjects, resolved once at
 /// producer startup by [`SchemaIds::register`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SchemaIds {
@@ -53,10 +54,11 @@ pub struct SchemaIds {
     cross: u32,
     allocation: u32,
     order_audit: u32,
+    tracker: u32,
 }
 
 impl SchemaIds {
-    /// Register all four post-trade schemas with the registry at
+    /// Register all five post-trade schemas with the registry at
     /// `registry_url` and return the ids it assigned.
     ///
     /// Registration is idempotent by the registry's own contract: POSTing a
@@ -79,12 +81,17 @@ impl SchemaIds {
             cross: register_subject(registry_url, TOPIC_CROSSES, CROSS_AVSC)?,
             allocation: register_subject(registry_url, TOPIC_ALLOCATIONS, ALLOCATION_AVSC)?,
             order_audit: register_subject(registry_url, TOPIC_ORDER_AUDIT, ORDER_AUDIT_AVSC)?,
+            tracker: register_subject(
+                registry_url,
+                TOPIC_TRACKER_ANALYTICS,
+                TRACKER_ANALYTICS_AVSC,
+            )?,
         })
     }
 
     /// The registered schema id for `topic`.
     ///
-    /// Returns `None` for any topic outside the four `posttrade.*` subjects;
+    /// Returns `None` for any topic outside the five `posttrade.*` subjects;
     /// the producer treats that as an encode failure rather than guessing an
     /// id, since a wrong id produces a record that decodes to garbage.
     #[must_use]
@@ -94,6 +101,7 @@ impl SchemaIds {
             TOPIC_CROSSES => Some(self.cross),
             TOPIC_ALLOCATIONS => Some(self.allocation),
             TOPIC_ORDER_AUDIT => Some(self.order_audit),
+            TOPIC_TRACKER_ANALYTICS => Some(self.tracker),
             _ => None,
         }
     }
@@ -209,17 +217,26 @@ mod tests {
     }
 
     #[test]
-    fn for_topic_covers_the_four_subjects_and_rejects_others() {
+    fn for_topic_covers_the_five_subjects_and_rejects_others() {
         let ids = SchemaIds {
             trade: 1,
             cross: 2,
             allocation: 3,
             order_audit: 4,
+            tracker: 5,
         };
         assert_eq!(ids.for_topic(TOPIC_TRADES), Some(1));
         assert_eq!(ids.for_topic(TOPIC_CROSSES), Some(2));
         assert_eq!(ids.for_topic(TOPIC_ALLOCATIONS), Some(3));
         assert_eq!(ids.for_topic(TOPIC_ORDER_AUDIT), Some(4));
-        assert_eq!(ids.for_topic("posttrade.tracker.analytics"), None);
+        // The tripwire this milestone lands: `posttrade.tracker.analytics`
+        // now resolves instead of falling through to `None` (P1.M5 Slice 3).
+        assert_eq!(
+            ids.for_topic(TOPIC_TRACKER_ANALYTICS),
+            Some(5),
+            "posttrade.tracker.analytics must resolve now that P1.M5 Slice 3 has landed"
+        );
+        // A genuinely unknown subject still falls through.
+        assert_eq!(ids.for_topic("posttrade.nonexistent"), None);
     }
 }

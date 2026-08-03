@@ -69,7 +69,7 @@ fi
 # Only golden_posttrade.rs wires a Kafka broker into d1::spawn (both
 # nats_round_trip.rs and crosses_round_trip.rs pass kafka_brokers: None, no
 # producer thread, no topic dependency); it hard-errors at startup if any of
-# these four topics is missing (deploy/docker-compose.yml disables
+# these five topics is missing (deploy/docker-compose.yml disables
 # KAFKA_AUTO_CREATE_TOPICS_ENABLE). Provisioned here, before the first cargo
 # test, purely so it's done once up front rather than reordering this loop
 # around golden_posttrade specifically -- harmless for the two tests that
@@ -77,12 +77,12 @@ fi
 # single-broker compose and is what makes per-topic record order
 # deterministic (P1.M4 slice 3's golden diff depends on that).
 # Schema *subjects*, unlike topics, are deliberately NOT provisioned here:
-# `d1-posttrade::registry::SchemaIds::register` POSTs all four at producer
+# `d1-posttrade::registry::SchemaIds::register` POSTs all five at producer
 # startup and the registry returns the existing id for an already-registered
 # identical schema, so this is idempotent and needs no out-of-band step. The
 # registry reachability wait above is what golden_posttrade.rs depends on.
 echo "scripts/demo.sh: provisioning posttrade.* topics..."
-for topic in posttrade.trades posttrade.crosses posttrade.allocations posttrade.orders.audit; do
+for topic in posttrade.trades posttrade.crosses posttrade.allocations posttrade.orders.audit posttrade.tracker.analytics; do
   docker compose -f deploy/docker-compose.yml exec -T kafka \
     /opt/kafka/bin/kafka-topics.sh --create --if-not-exists \
     --bootstrap-server localhost:9092 \

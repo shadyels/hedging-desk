@@ -11,6 +11,11 @@ workspace = true
 # Populate only from the approved dependency table in delta-one/CLAUDE.md.
 d1-core = { path = "../d1-core" }
 d1-refdata = { path = "../d1-refdata" }
+# Depended on by BOTH `crates/d1` (NATS/Kafka sampling driver) and
+# `d1-posttrade` (this crate, Kafka daily-record encoding) -- precisely why
+# `d1-analytics` must stay a standalone crate rather than being folded into
+# either one.
+d1-analytics = { path = "../d1-analytics" }
 apache-avro = "0.21"
 thiserror = "2"
 uuid = { version = "1", features = ["v7"] }

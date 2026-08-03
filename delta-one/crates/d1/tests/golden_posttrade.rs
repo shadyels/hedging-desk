@@ -11,12 +11,12 @@
 //! therefore line-for-line identical JSON).
 //!
 //! Requires a NATS server on `127.0.0.1:4222`, a Kafka broker on
-//! `127.0.0.1:9092` with the four `posttrade.*` topics already provisioned
+//! `127.0.0.1:9092` with the five `posttrade.*` topics already provisioned
 //! (`just up`, then `scripts/demo.sh`'s topic-create step -- topics are
 //! **not** created here, matching `d1-posttrade::run_producer`'s own
 //! hard-error-on-missing-topic contract), and a Confluent Schema Registry on
 //! `127.0.0.1:8081`. Schema *subjects*, unlike topics, are **not** provisioned
-//! out of band: `run_producer` registers all four itself at startup
+//! out of band: `run_producer` registers all five itself at startup
 //! (idempotently), so this test passes against a registry with no subjects.
 //!
 //! Every consumed record is checked for the Confluent frame
@@ -56,7 +56,8 @@ use d1_gateway_nats::pb::hedging::live::v1::{
     ExecutionReport, InternalCrossNotice, InternalTransferRequest, OrdStatus, TargetPosition,
 };
 use d1_posttrade::{
-    FRAME_LEN, MAGIC_BYTE, TOPIC_ALLOCATIONS, TOPIC_CROSSES, TOPIC_ORDER_AUDIT, TOPIC_TRADES,
+    FIXED_BOOKED_NS, FRAME_LEN, MAGIC_BYTE, TOPIC_ALLOCATIONS, TOPIC_CROSSES, TOPIC_ORDER_AUDIT,
+    TOPIC_TRACKER_ANALYTICS, TOPIC_TRADES,
 };
 use futures_util::StreamExt;
 use prost::Message as _;
@@ -69,7 +70,7 @@ use rdkafka::topic_partition_list::TopicPartitionList;
 const NATS_URL: &str = "127.0.0.1:4222";
 const KAFKA_BROKERS: &str = "127.0.0.1:9092";
 /// Confluent Schema Registry (`deploy/docker-compose.yml`). The producer
-/// registers the four post-trade schemas here at startup and frames every
+/// registers the five post-trade schemas here at startup and frames every
 /// record with the id it gets back (ADR-002).
 const SCHEMA_REGISTRY: &str = "http://127.0.0.1:8081";
 const SCHEMA_REGISTRY_ADDR: &str = "127.0.0.1:8081";
@@ -106,24 +107,30 @@ const TRANSFER_FROM_BOOK: u32 = 1;
 const TRANSFER_TO_BOOK: u32 = 5;
 const TRANSFER_QTY_E2: i64 = 10_000;
 
-/// The four `posttrade.*` topics, in the order golden files are produced.
-const TOPICS: [&str; 4] = [
+/// The five `posttrade.*` topics, in the order golden files are produced.
+/// `TOPIC_TRACKER_ANALYTICS` is consumed and count-checked like the other
+/// four, but -- unlike them -- is never byte-diffed against a committed
+/// fixture (see `assert_tracker_record`'s doc comment).
+const TOPICS: [&str; 5] = [
     TOPIC_TRADES,
     TOPIC_CROSSES,
     TOPIC_ALLOCATIONS,
     TOPIC_ORDER_AUDIT,
+    TOPIC_TRACKER_ANALYTICS,
 ];
 
 /// Expected record count per topic for this exact storyline (startup fill,
-/// book1/book2 cross + residual, directed transfer). Asserted unconditionally
-/// -- including under `UPDATE_GOLDEN=1` -- so a half-broken run (e.g. a
-/// dropped ring push) can never regenerate a golden file that then passes
-/// vacuously on every later run (LOW-3).
-const EXPECTED_COUNTS: [(&str, usize); 4] = [
+/// book1/book2 cross + residual, directed transfer, one end-of-session
+/// tracker record). Asserted unconditionally -- including under
+/// `UPDATE_GOLDEN=1` -- so a half-broken run (e.g. a dropped ring push) can
+/// never regenerate a golden file that then passes vacuously on every later
+/// run (LOW-3).
+const EXPECTED_COUNTS: [(&str, usize); 5] = [
     (TOPIC_TRADES, 6),
     (TOPIC_CROSSES, 2),
     (TOPIC_ALLOCATIONS, 1),
     (TOPIC_ORDER_AUDIT, 4),
+    (TOPIC_TRACKER_ANALYTICS, 1),
 ];
 
 async fn await_report(subscriber: &mut async_nats::Subscriber, cl_ord_id: &str) -> ExecutionReport {
@@ -331,6 +338,7 @@ struct GoldenSchemas {
     crosses: Schema,
     allocations: Schema,
     order_audit: Schema,
+    tracker: Schema,
 }
 
 impl GoldenSchemas {
@@ -352,6 +360,10 @@ impl GoldenSchemas {
                 "../../../../protocol/avro/order_audit.avsc"
             ))
             .expect("parse order_audit.avsc"),
+            tracker: Schema::parse_str(include_str!(
+                "../../../../protocol/avro/tracker_analytics.avsc"
+            ))
+            .expect("parse tracker_analytics.avsc"),
         }
     }
 
@@ -361,6 +373,7 @@ impl GoldenSchemas {
             TOPIC_CROSSES => &self.crosses,
             TOPIC_ALLOCATIONS => &self.allocations,
             TOPIC_ORDER_AUDIT => &self.order_audit,
+            TOPIC_TRACKER_ANALYTICS => &self.tracker,
             other => panic!("golden_posttrade: no schema mapped for topic {other}"),
         }
     }
@@ -570,6 +583,53 @@ fn compare_or_update_golden(topic: &str, golden_path: &Path, lines: &[String]) {
     );
 }
 
+/// Property-assert (never byte-diff) the single `posttrade.tracker.analytics`
+/// record this storyline produces. `exch_ts_ns` is deterministic per tick,
+/// but the NUMBER of ticks before shutdown depends on real handshake timing,
+/// so `n_obs` -- the variance denominator -- varies run to run; a committed
+/// byte-for-byte fixture here would be permanently flaky. `lines` has
+/// already been through `decode_to_json_line` -> `split_confluent_frame`, so
+/// the Confluent-frame check has already happened by the time this runs.
+fn assert_tracker_record(lines: &[String]) {
+    let parsed: serde_json::Value = lines
+        .first()
+        .map(|line| serde_json::from_str(line).expect("parse tracker JSON line"))
+        .unwrap_or_else(|| panic!("golden_posttrade: no tracker record to assert on"));
+
+    assert_eq!(parsed["book_id"].as_i64(), Some(1), "book_id");
+    assert_eq!(
+        parsed["benchmark_symbol"].as_str(),
+        Some("SPX"),
+        "benchmark_symbol"
+    );
+    assert_eq!(parsed["kind"].as_str(), Some("EX_POST"), "kind");
+
+    let n_obs = parsed["n_obs"].as_i64().expect("n_obs is a JSON number");
+    assert!(
+        n_obs >= 2,
+        "n_obs must be >= 2 (analytics()'s own floor), got {n_obs}"
+    );
+
+    let window_start_ns = parsed["window_start_ns"]
+        .as_i64()
+        .expect("window_start_ns is a JSON number");
+    let window_end_ns = parsed["window_end_ns"]
+        .as_i64()
+        .expect("window_end_ns is a JSON number");
+    assert!(
+        window_start_ns < window_end_ns,
+        "window_start_ns ({window_start_ns}) must be < window_end_ns ({window_end_ns})"
+    );
+    // The permanent guard against regressing to `Stamper::now_ns` for this
+    // field: under `Stamper::Fixed` that is the constant `FIXED_BOOKED_NS`,
+    // which would make `window_start_ns == window_end_ns` a plausible-looking
+    // (but wrong) fixed value instead of the feed's real synthetic clock.
+    assert_ne!(
+        window_start_ns, FIXED_BOOKED_NS,
+        "window_start_ns must come from the feed's exch_ts_ns clock, never Stamper::now_ns"
+    );
+}
+
 #[test]
 #[ignore = "requires a NATS server on 127.0.0.1:4222, a Kafka broker on 127.0.0.1:9092 with posttrade.* topics provisioned, and a Schema Registry on 127.0.0.1:8081 (`just up`, then scripts/demo.sh's topic-create step)"]
 fn posttrade_golden_file() {
@@ -619,6 +679,10 @@ fn posttrade_golden_file() {
     let shutdown = Arc::new(AtomicBool::new(false));
     let book_ids = universe.book_ids.clone();
     let instrument_ids = universe.instrument_ids.clone();
+    // Tracker analytics needs real feed run time, not just round-trip
+    // handshake time -- see the wait after the storyline below for why this
+    // is captured here, right before the feed thread starts.
+    let run_start = Instant::now();
     let handles = spawn(
         StartupOrder {
             book: BookId(1),
@@ -637,10 +701,14 @@ fn posttrade_golden_file() {
         instrument_ids,
         policy,
         universe,
-        // Slice 3 (a later dispatch) owns this test's tracker-analytics
-        // golden coverage; this slice only needs it to compile and keep the
-        // existing storyline's counts/assertions passing. `sampling_interval_s: 1`
-        // per this slice's own spec.
+        // `sampling_interval_s: 1` (carried over from Slice 2). Getting
+        // `assert_tracker_record`'s `n_obs >= 2` floor needs the THIRD
+        // sampling-boundary crossing of the feed's `exch_ts_ns` clock (see
+        // `TrackerState::sample`'s doc comment in `crates/d1/src/lib.rs`),
+        // which -- given the feed's real-time 500ms tick cadence
+        // (`crates/d1/src/feed.rs::TICK_INTERVAL`) -- takes several real
+        // seconds of feed run time, well past what the FIX/NATS handshake
+        // alone burns; `run_start`/`TRACKER_MIN_RUNTIME` below top that up.
         TrackerConfig {
             sampling_interval_s: 1,
             te_window_obs: 250,
@@ -799,9 +867,32 @@ fn posttrade_golden_file() {
     // sync point can return before its `TradeLeg`/`Cross` records are
     // enqueued, truncating the golden file.
     //
-    // The sleep below is genuine belt-and-braces given that ordering, not a
-    // substitute for it -- it only gives the core thread's poll loop one
-    // more spin before shutdown is signalled.
+    // The 250ms sleep below is genuine belt-and-braces given that ordering,
+    // not a substitute for it -- it only gives the core thread's poll loop
+    // one more spin before shutdown is signalled.
+    //
+    // `TRACKER_MIN_RUNTIME` is a SEPARATE wait, for a different reason: the
+    // tracker record needs the THIRD crossing of the feed's `exch_ts_ns`
+    // sampling boundary (`TrackerState::sample`'s doc comment,
+    // `crates/d1/src/lib.rs`) to reach `n_obs >= 2`, and the feed only
+    // advances that clock in real time, `feed::TICK_INTERVAL` (500ms) per
+    // wave (`crates/d1/src/feed.rs::run_feed_producer`). With
+    // `sampling_interval_s: 1` that crossing lands ~3 real seconds after the
+    // feed thread starts (waves at 0/.5/1.0/1.5/2.0/2.5/3.0s; the wave
+    // ticking `exch_ts_ns == 3_000_000_000` is the third crossing) --
+    // comfortably past the FIX/NATS round trip above, which the sim-side log
+    // shows completing in roughly a second. Topping up to a fixed floor
+    // (rather than sleeping the whole floor unconditionally on every run)
+    // keeps a fast run from waiting longer than it has to.
+    //
+    // ponytail: coupled to `feed::TICK_INTERVAL`'s real-time cadence, the one
+    // ceiling every synthetic-feed test already accepts (`feed.rs`'s own doc
+    // comment) -- a real feed replaces this with an actual EOD boundary, not
+    // a wall-clock budget in a test.
+    const TRACKER_MIN_RUNTIME: Duration = Duration::from_millis(4_000);
+    if let Some(remaining) = TRACKER_MIN_RUNTIME.checked_sub(run_start.elapsed()) {
+        thread::sleep(remaining);
+    }
     thread::sleep(Duration::from_millis(250));
 
     shutdown.store(true, Ordering::Relaxed);
@@ -861,6 +952,17 @@ fn posttrade_golden_file() {
             "golden_posttrade: {topic} produced {} record(s), expected exactly {expected} for this storyline",
             lines.len()
         );
+        // The tracker topic is property-asserted, never byte-diffed
+        // (`assert_tracker_record`'s doc comment: `n_obs` depends on real
+        // handshake timing, so a committed fixture would be permanently
+        // flaky) -- skip `compare_or_update_golden` for it, including under
+        // `UPDATE_GOLDEN=1` (there is no `sim/golden/posttrade.tracker.analytics.jsonl`
+        // to write).
+        if topic == TOPIC_TRACKER_ANALYTICS {
+            assert_tracker_record(&lines);
+            continue;
+        }
+
         let golden_path = golden_dir.join(format!("{topic}.jsonl"));
         compare_or_update_golden(topic, &golden_path, &lines);
     }

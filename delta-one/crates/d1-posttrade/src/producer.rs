@@ -16,7 +16,7 @@ use rdkafka::producer::{BaseRecord, DefaultProducerContext, Producer, ThreadedPr
 use crate::registry::{SchemaIds, frame};
 use crate::{
     PostTradeError, PostTradeEvent, Schemas, Stamper, TOPIC_ALLOCATIONS, TOPIC_CROSSES,
-    TOPIC_ORDER_AUDIT, TOPIC_TRADES, topic_and_key,
+    TOPIC_ORDER_AUDIT, TOPIC_TRACKER_ANALYTICS, TOPIC_TRADES, topic_and_key,
 };
 
 /// Poll/backoff interval for the drain loop, matching
@@ -27,7 +27,7 @@ const FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the startup topic-existence metadata fetch waits for the broker.
 const METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Run the Kafka producer until `shutdown` is set: verify the four
+/// Run the Kafka producer until `shutdown` is set: verify the five
 /// `posttrade.*` topics already exist, then drain `rx` to empty each poll,
 /// encoding (via `stamper`) and publishing each event. Blocks the calling
 /// thread -- spawn it from `crates/d1/src/lib.rs::spawn`, same shape as
@@ -155,7 +155,7 @@ fn drain(
     did_work
 }
 
-/// Verify the four `posttrade.*` topics already exist on the broker before
+/// Verify the five `posttrade.*` topics already exist on the broker before
 /// this producer starts sending -- a hard startup error, not a warning, if
 /// any are missing.
 ///
@@ -173,6 +173,7 @@ fn check_topics(producer: &ThreadedProducer<DefaultProducerContext>) -> Result<(
         TOPIC_CROSSES,
         TOPIC_ALLOCATIONS,
         TOPIC_ORDER_AUDIT,
+        TOPIC_TRACKER_ANALYTICS,
     ]
     .into_iter()
     .filter(|&topic| !metadata.topics().iter().any(|t| t.name() == topic))
