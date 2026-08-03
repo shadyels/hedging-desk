@@ -6,7 +6,7 @@
 
 | File | Line | Simplified | Ceiling | Upgrade |
 |------|------|-----------|---------|---------|
-| `delta-one/crates/d1-core/src/keeper.rs` | 117 | Weighted-average cost-basis | no lot tracking, no realized P&L | P1.M3 netting / P1.M5 tracker analytics |
+| `delta-one/crates/d1-core/src/keeper.rs` | 117 | Weighted-average cost-basis (no lot tracking, no realized P&L) — **per-book cash half DELIVERED P1.M5 Slice 1** | cash is now tracked per book (`seed_cash` at startup, moved on every fill, `credit_dividend` on a dividend tick, `accrue_cash` per sample); lot tracking, realized P&L and the Σ-book-position invariants remain | partially closed — cost-basis simplification still stands |
 | `delta-one/crates/d1-core/src/order.rs` | 28 | FIX OrderCancelRequest not driven | Slice 1 only | FIX gateway P1.M2 Slice 2 |
 | `delta-one/crates/d1-core/src/order.rs` | 32 | FIX OrderCancelReplaceRequest not driven | Slice 1 only | FIX gateway P1.M2 Slice 2 |
 | `delta-one/crates/d1-core/src/order.rs` | 147 | Append-only slab, no freelist | single-session memory | freelist + eviction policy for long uptime (P1.M2 Slices 2-3) |
@@ -23,11 +23,11 @@
 | `delta-one/crates/d1-gateway-fix/src/convert.rs` | 228 | Lenient precision handling | tolerance for mismatch | tighten if real venue needs exact preservation |
 | `delta-one/crates/d1/src/lib.rs` | 323 | Log-and-drop on full ring | demo-sized ring | backpressure protocol |
 | `delta-one/crates/d1/src/lib.rs` | 352 | ⚠️ **no-trigger** — dropped push orphans registration | inflight weight permanent | none named |
-| `delta-one/crates/d1/src/lib.rs` | 408 | No numeric upper bound on `qty_e2` | no compile-time constraint | Tier-1 risk check in `d1.toml` (ADR-008) |
+| `delta-one/crates/d1/src/lib.rs` | 408 | No numeric upper bound on `qty_e2` — **NOT delivered by P1.M5** | still open: a business max-transfer-size limit is a Tier-1 risk check, not a code constant. Overflow itself stays guarded by `apply_cross`'s `checked_*` arithmetic rejecting the cross outright | Tier-1 risk check in `d1.toml` (ADR-008), P4 |
 | `delta-one/crates/d1/src/lib.rs` | 606 | Log-and-drop on full ring (ExecReport) | demo-sized ring | backpressure protocol |
 | `delta-one/crates/d1-posttrade/src/producer.rs` | 56 | Plaintext Kafka broker connection (no SASL/TLS) | matches compose `PLAINTEXT`-only listener; local-demo only | `security.protocol=SASL_SSL` + broker listener before any non-localhost broker |
 | `delta-one/crates/d1-posttrade/src/producer.rs` | 83 | Log-and-drop on local-queue-full send | demo-sized producer queue | retry/backpressure protocol |
-| `delta-one/crates/d1/src/lib.rs` | 771 | `arrival_mid_px_e9` returns `0` for a never-ticked instrument; `book_cross` books at that price with no guard | unreachable today (feed covers whole keeper universe + t=0 priming is unconditional) | reject cross when `ref_px_e9 == 0` / when the quote has never ticked |
+| `delta-one/crates/d1/src/lib.rs` | 771 | `arrival_mid_px_e9` returns `0` for a never-ticked instrument; `book_cross` books at that price with no guard | unreachable today (feed covers whole keeper universe + t=0 priming is unconditional); a cash-aware keeper makes the consequence worse — a real position with zero cash paid means free NAV and therefore garbage TE | reject cross when `ref_px_e9 == 0` / when the quote has never ticked |
 | `delta-one/crates/d1-netting/src/lib.rs` | 23 | One `CrossRefPrice` variant only | arrival-mid default only | add `ExecVwap` when ADR-005 §29 resolved |
 | `delta-one/crates/d1-netting/src/lib.rs` | 196 | Band computed as `min()` over books | suboptimal netting band | instrument-level band in `protocol/refdata/universe.json` (ADR-005 §2 / ROADMAP.md:12) |
 | `delta-one/crates/sim/src/acceptor.rs` | 221 | ⚠️ **no-trigger** — static counter for demo | single-process only | none named ("no ADR-worthy") |
@@ -74,10 +74,10 @@ These are deliberate design choices or deferred decisions, not tech debt to upgr
 - **P1.M2 Slice 2 FIX wiring:** `order.rs:28,32` (cancel/replace), `ids.rs:48` (ExecID validation), `convert.rs:34` (TransactTime)
 - **P1.M2 Slices 2-3 long-uptime:** `order.rs:147` (freelist), `d1-gateway-nats/lib.rs:173` (eviction)
 - **P1.M3 netting:** `keeper.rs:117` (cost-basis full invariants)
-- **P1.M5 tracker analytics:** `keeper.rs:117`, `lib.rs:408` (per-book cash, qty upper bound)
+- **P1.M5 tracker analytics:** `keeper.rs:117` per-book cash — **delivered** (Slice 1). `lib.rs:408` qty upper bound — **not** delivered; it was mis-scoped here, being a Tier-1 risk check (ADR-008), not a cash concern. Re-targeted to P4.
 - **ADR-005 compliance:** `d1-netting/lib.rs:23` (ExecVwap), `lib.rs:196` (instrument band), `convert.rs:51` (OrdType enum)
 
-**Next milestone:** Review before P1.M5 start.
+**P1.M5 markers (tracker analytics):** benchmark composition is a PRICE return while book NAV is a TOTAL return — constituent dividends land entirely in tracking difference, appearing as an ~8bps active-return spike on the ex-dividend sample, which in a short window dominates the variance; end-of-session Kafka cadence is a process-boundary limitation (a real deployment triggers on EOD, this process never sees it); `publish_interval_s` is parsed and range-validated but not wired (publishes on every sample, not separately cadenced); second corporate-action transport type needed (currently only `FeedTick.div_per_share_e9`); integration-coverage gap: `DIVIDEND_AT_NS` (9s) never fires during golden run, cannot be closed without rewriting all four golden fixtures.
 
 ---
 

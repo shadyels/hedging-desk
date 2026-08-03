@@ -22,4 +22,4 @@
 
 - Easier: the tracker-desk half of the demo gets a professional scorecard (TE/TD/cash-drag on the risk board) instead of positions only.
 - Harder: position keeper must now track per-book cash from fills and sim dividend events; the sim gains a dividend event type (P1.M5).
-- Demo honesty: benchmark composition and cash yield are labeled DEMO placeholders; TE quoted in the showcase is real math on synthetic data.
+- Demo honesty: benchmark composition and cash yield are labeled DEMO placeholders; the benchmark return is price-only while book NAV is total return, so constituent dividends land entirely in tracking difference (in the demo this appears as an ~8bps spike in active return on the ex-dividend sample; this is real math on synthetic data, not a fiction, but the return basis asymmetry should be noted when TE surfaces on the P3.M1 risk board); TE quoted in the showcase is real math on synthetic data.
