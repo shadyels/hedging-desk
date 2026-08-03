@@ -541,7 +541,14 @@ fn run_core(
                         }
                     }
                 }
-                next_sample_ns = next_sample_ns.saturating_add(sampling_interval_ns);
+                // Catches up to the tick's actual clock instead of advancing
+                // by exactly one interval (L3 remediation): if tick spacing
+                // ever exceeds `sampling_interval_ns`, the old
+                // `next_sample_ns + interval` form would fire every
+                // subsequent tick against an unchanged boundary -- zero-length
+                // periods, zero returns, TE silently diluted toward zero.
+                next_sample_ns =
+                    (tick.exch_ts_ns / sampling_interval_ns + 1) * sampling_interval_ns;
             }
         }
 
@@ -943,11 +950,20 @@ fn run_core(
     // scheduler when this ever runs against a live feed instead of one demo
     // session.
     for state in &tracker_states {
-        if let Some(record) = analytics(state.book, &state.window, cash_yield_annual_e9) {
-            push_posttrade(
+        match analytics(state.book, &state.window, cash_yield_annual_e9) {
+            Some(record) => push_posttrade(
                 &mut posttrade_tx,
                 PostTradeEvent::Tracker(record, tracker_cfg.sampling_interval_s),
-            );
+            ),
+            // Silent otherwise: a short session (fewer than 2 samples ever
+            // pushed into the window) produces no compliance record and, up
+            // to this point, no log line explaining why -- every other
+            // failure in this driver logs loudly (L1 remediation).
+            None => eprintln!(
+                "d1: no end-of-session tracker record for book={:?} -- window has {} observation(s), need >= 2",
+                state.book,
+                state.window.len()
+            ),
         }
     }
 }
@@ -1112,12 +1128,24 @@ fn cash_weight_e9(cash_e9: i64, nav_e9: i64) -> Option<i64> {
 /// The tracker book's fixed-weight benchmark return over one period,
 /// `Σ w_c · r_c` (ADR-010 §3), using `prev_mids_e9` as each constituent's
 /// starting mid -- read-only here; `refresh_constituent_mids` is the
-/// separate commit step, called only once this (and the book return) have
-/// both succeeded (`TrackerState::sample`), so a failure here never leaves
-/// `prev_mids_e9` half-updated. Mids come from the existing
-/// `arrival_mid_px_e9` helper, per this slice's spec -- no new pricing path.
-/// `None` on the first constituent whose return can't be computed (no prior
-/// mid yet, or overflow) or on `i128`/`i64` overflow in the weighted sum.
+/// separate commit step (`TrackerState::sample`), called UNCONDITIONALLY
+/// after this (and the book return) are attempted, whether or not either one
+/// succeeded -- see `sample`'s own doc comment for why a failed return must
+/// not permanently wedge the baseline on stale data. Mids come from the
+/// existing `arrival_mid_px_e9` helper, per this slice's spec -- no new
+/// pricing path. `None` on the first constituent whose return can't be
+/// computed (no prior mid yet, or overflow) or on `i128`/`i64` overflow in
+/// the weighted sum.
+///
+/// ponytail: this is a PRICE return (`arrival_mid_px_e9`), while the book's
+/// own NAV return (`book_nav_e9`) is a TOTAL return -- it includes cash,
+/// which receives dividend credits (`PositionKeeper::credit_dividend`).
+/// Constituent dividends therefore still land entirely in tracking
+/// difference even after the ex-div price drop (M6 remediation,
+/// `crates/d1/src/feed.rs::run_feed_producer`) keeps the book itself from
+/// creating value out of nothing. Closing this gap needs a total-return
+/// benchmark index (per-constituent dividend data), which the demo universe
+/// does not carry -- future work, not this slice's scope.
 fn bench_return_e9(
     market_data: &MarketData,
     constituents: &[(InstrumentId, i64)],

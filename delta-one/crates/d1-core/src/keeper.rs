@@ -168,12 +168,15 @@ impl PositionKeeper {
     ) -> Option<()> {
         let (slot, new_pos, book_idx, new_cash) =
             self.compute_fill(book, instrument, side, qty_e2, px_e9)?;
-        if let Some(pos) = self.positions.get_mut(slot) {
-            *pos = new_pos;
-        }
-        if let Some(cash) = self.cash_e9.get_mut(book_idx) {
-            *cash = new_cash;
-        }
+        // `get_mut` failing here is unreachable (`slot`/`book_idx` came from
+        // this same table via `compute_fill`'s successful `self.slot()`
+        // lookup) -- but silently returning `Some(())` anyway would be
+        // exactly the "cash moved silently nowhere while the caller was told
+        // it succeeded" shape root invariant #2 bans (L4 remediation).
+        let pos = self.positions.get_mut(slot)?;
+        *pos = new_pos;
+        let cash = self.cash_e9.get_mut(book_idx)?;
+        *cash = new_cash;
         Some(())
     }
 
@@ -214,18 +217,19 @@ impl PositionKeeper {
         if buy_slot == sell_slot {
             return None;
         }
-        if let Some(pos) = self.positions.get_mut(buy_slot) {
-            *pos = buy_pos;
-        }
-        if let Some(pos) = self.positions.get_mut(sell_slot) {
-            *pos = sell_pos;
-        }
-        if let Some(cash) = self.cash_e9.get_mut(buy_book_idx) {
-            *cash = buy_cash;
-        }
-        if let Some(cash) = self.cash_e9.get_mut(sell_book_idx) {
-            *cash = sell_cash;
-        }
+        // Same L4 remediation as `apply_fill`: every `get_mut` below is
+        // unreachable-on-failure (both slots came from this same table via
+        // `compute_fill`'s successful lookups), but `Some(())` from a
+        // skipped write-back would still be a silent partial-cross --
+        // root invariant #2's exact shape.
+        let pos = self.positions.get_mut(buy_slot)?;
+        *pos = buy_pos;
+        let pos = self.positions.get_mut(sell_slot)?;
+        *pos = sell_pos;
+        let cash = self.cash_e9.get_mut(buy_book_idx)?;
+        *cash = buy_cash;
+        let cash = self.cash_e9.get_mut(sell_book_idx)?;
+        *cash = sell_cash;
         Some(())
     }
 
@@ -308,6 +312,16 @@ impl PositionKeeper {
                 i64::try_from(i128::from(pos.net_qty_e2) * i128::from(div_per_share_e9) / 100)
                     .ok()?;
             let cash = self.cash_e9.get_mut(bi)?;
+            // Makes the two-pass coupling explicit (L8 remediation) rather
+            // than leaving it implicit in the comment above alone: pass 1
+            // already recomputed this exact `checked_add` for this exact
+            // (position, div_per_share_e9) pair and proved it succeeds, so
+            // this failing here in a debug build would mean pass 2 diverged
+            // from what pass 1 validated.
+            debug_assert!(
+                cash.checked_add(delta).is_some(),
+                "credit_dividend pass 2 checked_add failed for a value pass 1 already validated (bi={bi})"
+            );
             *cash = cash.checked_add(delta)?;
         }
         Some(())

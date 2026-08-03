@@ -65,9 +65,14 @@ pub fn run_feed_producer(
             // travels on the tick stream instead of its own ring. This
             // slice only puts the field on the wire; crediting the cash
             // (`PositionKeeper::credit_dividend`) is `run_core`'s job
-            // (Slice 2).
+            // (Slice 2). The running price is dropped by the same amount on
+            // this SAME tick (M6 remediation) -- without this, the book
+            // would book the dividend cash AND keep the pre-div price,
+            // creating value out of nothing; this is what makes this
+            // field's doc comment's "ex-price move" claim true.
             let div_per_share_e9 = if i == 0 && !dividend_fired && exch_ts_ns >= DIVIDEND_AT_NS {
                 dividend_fired = true;
+                *px_e9 -= DIVIDEND_PER_SHARE_E9;
                 DIVIDEND_PER_SHARE_E9
             } else {
                 0

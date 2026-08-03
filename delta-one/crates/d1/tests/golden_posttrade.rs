@@ -54,9 +54,10 @@ use d1_core::{BookId, InstrumentId, Side};
 use d1_gateway_nats::pb::hedging::common::v1::{InstrumentRef, Meta};
 use d1_gateway_nats::pb::hedging::live::v1::{
     ExecutionReport, InternalCrossNotice, InternalTransferRequest, OrdStatus, TargetPosition,
+    TrackerAnalytics,
 };
 use d1_posttrade::{
-    FIXED_BOOKED_NS, FRAME_LEN, MAGIC_BYTE, TOPIC_ALLOCATIONS, TOPIC_CROSSES, TOPIC_ORDER_AUDIT,
+    FRAME_LEN, MAGIC_BYTE, TOPIC_ALLOCATIONS, TOPIC_CROSSES, TOPIC_ORDER_AUDIT,
     TOPIC_TRACKER_ANALYTICS, TOPIC_TRADES,
 };
 use futures_util::StreamExt;
@@ -80,6 +81,12 @@ const SCHEMA_REGISTRY_ADDR: &str = "127.0.0.1:8081";
 // still holding another test's port from a very recent run.
 const FIX_PORT: u16 = 15_032;
 const ROUND_TRIP_TIMEOUT: Duration = Duration::from_secs(15);
+/// Deterministic sync point for the tracker sampling driver (M4 remediation):
+/// the third crossing of the feed's `exch_ts_ns` sampling boundary needs
+/// several real seconds of `feed::TICK_INTERVAL` (500ms) real-time cadence,
+/// well past a NATS/Kafka round trip -- generous but bounded rather than a
+/// blind wall-clock floor.
+const TRACKER_TIMEOUT: Duration = Duration::from_secs(15);
 const KAFKA_METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 const KAFKA_CONSUME_TIMEOUT: Duration = Duration::from_secs(20);
 const KAFKA_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -192,6 +199,45 @@ async fn await_cross(
             Err(_) => panic!(
                 "no InternalCrossNotice buy_book={buy_book_id} sell_book={sell_book_id} qty_e2={qty_e2} within {ROUND_TRIP_TIMEOUT:?}"
             ),
+        }
+    }
+}
+
+/// Read from `subscriber` until a `TrackerAnalytics` with `n_obs >=
+/// min_n_obs` arrives, panicking on `TRACKER_TIMEOUT`. This is the
+/// deterministic sync point for the sampling driver's real-time cadence: the
+/// NATS gateway publishes a `TrackerAnalytics` on `d1.tracker.<book>` on
+/// every sample (`d1_gateway_nats::convert::tracker_subject`), computed from
+/// the same rolling window `analytics()` reads at end-of-session for the
+/// Kafka record -- so once one of these reports `n_obs >= min_n_obs`, the
+/// third sampling-boundary crossing (`TrackerState::sample`'s doc comment,
+/// `crates/d1/src/lib.rs`) has already happened. Records below `min_n_obs`
+/// are skipped, not failed -- mirrors `await_cross`'s filter shape.
+async fn await_tracker(
+    subscriber: &mut async_nats::Subscriber,
+    min_n_obs: u32,
+) -> TrackerAnalytics {
+    let deadline = Instant::now() + TRACKER_TIMEOUT;
+    loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .unwrap_or_default();
+        assert!(
+            !remaining.is_zero(),
+            "no TrackerAnalytics with n_obs >= {min_n_obs} within {TRACKER_TIMEOUT:?}"
+        );
+        match tokio::time::timeout(remaining, subscriber.next()).await {
+            Ok(Some(msg)) => {
+                let record =
+                    TrackerAnalytics::decode(msg.payload).expect("decode TrackerAnalytics");
+                if record.n_obs >= min_n_obs {
+                    return record;
+                }
+            }
+            Ok(None) => panic!("subscription ended early"),
+            Err(_) => {
+                panic!("no TrackerAnalytics with n_obs >= {min_n_obs} within {TRACKER_TIMEOUT:?}")
+            }
         }
     }
 }
@@ -620,13 +666,31 @@ fn assert_tracker_record(lines: &[String]) {
         window_start_ns < window_end_ns,
         "window_start_ns ({window_start_ns}) must be < window_end_ns ({window_end_ns})"
     );
-    // The permanent guard against regressing to `Stamper::now_ns` for this
-    // field: under `Stamper::Fixed` that is the constant `FIXED_BOOKED_NS`,
-    // which would make `window_start_ns == window_end_ns` a plausible-looking
-    // (but wrong) fixed value instead of the feed's real synthetic clock.
-    assert_ne!(
-        window_start_ns, FIXED_BOOKED_NS,
-        "window_start_ns must come from the feed's exch_ts_ns clock, never Stamper::now_ns"
+
+    // The permanent guard against regressing to `Stamper::now_ns`: `as_of_ns`
+    // is the field that actually goes through the `now_ns`-vs-`window_end_ns`
+    // decision (`d1-posttrade/src/convert.rs::encode_tracker`) -- under
+    // `Stamper::Fixed`, `now_ns` collapses to the constant `FIXED_BOOKED_NS`,
+    // a plausible-looking but wrong value, instead of the feed's real
+    // synthetic clock. (`window_start_ns` above is sourced straight from
+    // `TrackerRecord` and never touches the stamper either way, so it can
+    // never regress to `FIXED_BOOKED_NS` under any implementation --
+    // asserting on it would be vacuous.)
+    let as_of_ns = parsed["as_of_ns"]
+        .as_i64()
+        .expect("as_of_ns is a JSON number");
+    assert_eq!(
+        as_of_ns, window_end_ns,
+        "as_of_ns must equal window_end_ns, never Stamper::now_ns"
+    );
+
+    // The single new Avro field this slice adds (and the justification for
+    // the `PostTradeEvent::Tracker(_, u32)` deviation) -- assert it carries
+    // the value this test's `TrackerConfig` actually configured.
+    assert_eq!(
+        parsed["sampling_interval_s"].as_i64(),
+        Some(1),
+        "sampling_interval_s"
     );
 }
 
@@ -679,10 +743,6 @@ fn posttrade_golden_file() {
     let shutdown = Arc::new(AtomicBool::new(false));
     let book_ids = universe.book_ids.clone();
     let instrument_ids = universe.instrument_ids.clone();
-    // Tracker analytics needs real feed run time, not just round-trip
-    // handshake time -- see the wait after the storyline below for why this
-    // is captured here, right before the feed thread starts.
-    let run_start = Instant::now();
     let handles = spawn(
         StartupOrder {
             book: BookId(1),
@@ -704,11 +764,9 @@ fn posttrade_golden_file() {
         // `sampling_interval_s: 1` (carried over from Slice 2). Getting
         // `assert_tracker_record`'s `n_obs >= 2` floor needs the THIRD
         // sampling-boundary crossing of the feed's `exch_ts_ns` clock (see
-        // `TrackerState::sample`'s doc comment in `crates/d1/src/lib.rs`),
-        // which -- given the feed's real-time 500ms tick cadence
-        // (`crates/d1/src/feed.rs::TICK_INTERVAL`) -- takes several real
-        // seconds of feed run time, well past what the FIX/NATS handshake
-        // alone burns; `run_start`/`TRACKER_MIN_RUNTIME` below top that up.
+        // `TrackerState::sample`'s doc comment in `crates/d1/src/lib.rs`) --
+        // `await_tracker` below is the deterministic sync point for that,
+        // not a wall-clock floor.
         TrackerConfig {
             sampling_interval_s: 1,
             te_window_obs: 250,
@@ -742,6 +800,10 @@ fn posttrade_golden_file() {
             .subscribe(format!("d1.exec.0.{CROSS_INSTRUMENT_ID}"))
             .await
             .expect("subscribe residual exec subject");
+        let mut tracker_subscriber = client
+            .subscribe("d1.tracker.1")
+            .await
+            .expect("subscribe d1.tracker.1");
 
         // Sync point: seeing the startup order's own report proves the
         // gateway's subscriptions (targets, transfers) are already live and
@@ -854,6 +916,17 @@ fn posttrade_golden_file() {
         );
         assert_eq!(transfer_cross.px_policy_id, "ARRIVAL_MID");
         assert_ne!(transfer_cross.cross_id, cross.cross_id);
+
+        // Deterministic sync point for the tracker sampling driver (M4
+        // remediation): rather than a wall-clock floor over
+        // `feed::TICK_INTERVAL`'s real-time cadence, wait for the live NATS
+        // `TrackerAnalytics` itself to report `n_obs >= 2` -- the same
+        // `n_obs >= 2` floor `assert_tracker_record` checks on the Kafka
+        // side, computed from the same rolling window (`TrackerState::sample`
+        // in `crates/d1/src/lib.rs`). Faster than a fixed floor on a fast
+        // box, robust on a slow/loaded one.
+        let tracker = await_tracker(&mut tracker_subscriber, 2).await;
+        assert_eq!(tracker.book_id, 1);
     });
 
     // All NATS sync points above only prove the corresponding `cross_tx`/
@@ -869,30 +942,9 @@ fn posttrade_golden_file() {
     //
     // The 250ms sleep below is genuine belt-and-braces given that ordering,
     // not a substitute for it -- it only gives the core thread's poll loop
-    // one more spin before shutdown is signalled.
-    //
-    // `TRACKER_MIN_RUNTIME` is a SEPARATE wait, for a different reason: the
-    // tracker record needs the THIRD crossing of the feed's `exch_ts_ns`
-    // sampling boundary (`TrackerState::sample`'s doc comment,
-    // `crates/d1/src/lib.rs`) to reach `n_obs >= 2`, and the feed only
-    // advances that clock in real time, `feed::TICK_INTERVAL` (500ms) per
-    // wave (`crates/d1/src/feed.rs::run_feed_producer`). With
-    // `sampling_interval_s: 1` that crossing lands ~3 real seconds after the
-    // feed thread starts (waves at 0/.5/1.0/1.5/2.0/2.5/3.0s; the wave
-    // ticking `exch_ts_ns == 3_000_000_000` is the third crossing) --
-    // comfortably past the FIX/NATS round trip above, which the sim-side log
-    // shows completing in roughly a second. Topping up to a fixed floor
-    // (rather than sleeping the whole floor unconditionally on every run)
-    // keeps a fast run from waiting longer than it has to.
-    //
-    // ponytail: coupled to `feed::TICK_INTERVAL`'s real-time cadence, the one
-    // ceiling every synthetic-feed test already accepts (`feed.rs`'s own doc
-    // comment) -- a real feed replaces this with an actual EOD boundary, not
-    // a wall-clock budget in a test.
-    const TRACKER_MIN_RUNTIME: Duration = Duration::from_millis(4_000);
-    if let Some(remaining) = TRACKER_MIN_RUNTIME.checked_sub(run_start.elapsed()) {
-        thread::sleep(remaining);
-    }
+    // one more spin before shutdown is signalled. `await_tracker` above
+    // already proved the tracker record itself reached `n_obs >= 2` before
+    // this point, so no separate wall-clock floor is needed for that.
     thread::sleep(Duration::from_millis(250));
 
     shutdown.store(true, Ordering::Relaxed);

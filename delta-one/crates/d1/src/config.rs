@@ -59,7 +59,34 @@ pub fn load(path: &Path) -> Result<TrackerConfig> {
         std::fs::read_to_string(path).with_context(|| format!("reading d1 config at {path:?}"))?;
     let parsed: RootConfig = toml::from_str(&raw)
         .with_context(|| format!("parsing [tracker] section of d1 config at {path:?}"))?;
-    Ok(parsed.tracker)
+    let cfg = parsed.tracker;
+    // Fail loud on a degenerate `[tracker]` config, same posture as the
+    // missing-file/missing-section cases above: `te_window_obs < 2` makes
+    // `d1_analytics::analytics` unconditionally return `None` (its own `n <
+    // 2` floor) and `sampling_interval_s == 0` silently disables the
+    // sampling driver (`crates/d1/src/lib.rs::run_core`'s `sampling_interval_ns
+    // > 0` guard) -- both would ship a process that looks configured for
+    // tracker analytics but publishes none of it, with no error anywhere.
+    anyhow::ensure!(
+        cfg.te_window_obs >= 2,
+        "[tracker].te_window_obs must be >= 2 (analytics needs at least 2 observations), got {}",
+        cfg.te_window_obs
+    );
+    // Upper bound (security review, LOW): `TrackerWindow::new` sizes a
+    // `VecDeque::with_capacity(te_window_obs)` straight from this config, so
+    // a pathological value panics the startup allocation instead of failing
+    // gracefully -- same fail-loud-at-config-parse posture as the lower
+    // bound above, not a hot-path check.
+    anyhow::ensure!(
+        cfg.te_window_obs <= 10_000,
+        "[tracker].te_window_obs must be <= 10_000, got {}",
+        cfg.te_window_obs
+    );
+    anyhow::ensure!(
+        cfg.sampling_interval_s > 0,
+        "[tracker].sampling_interval_s must be > 0 (0 silently disables sampling)"
+    );
+    Ok(cfg)
 }
 
 #[cfg(test)]
@@ -94,5 +121,44 @@ mod tests {
     #[test]
     fn missing_file_is_an_error() {
         assert!(load(Path::new("/nonexistent/path/d1.toml")).is_err());
+    }
+
+    #[test]
+    fn te_window_obs_below_two_is_an_error() {
+        let dir = std::env::temp_dir().join("d1-config-test-window-too-small");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("d1.toml");
+        std::fs::write(
+            &path,
+            "[tracker]\nsampling_interval_s = 60\nte_window_obs = 1\npublish_interval_s = 60\n",
+        )
+        .unwrap();
+        assert!(load(&path).is_err());
+    }
+
+    #[test]
+    fn te_window_obs_above_upper_bound_is_an_error() {
+        let dir = std::env::temp_dir().join("d1-config-test-window-too-large");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("d1.toml");
+        std::fs::write(
+            &path,
+            "[tracker]\nsampling_interval_s = 60\nte_window_obs = 10001\npublish_interval_s = 60\n",
+        )
+        .unwrap();
+        assert!(load(&path).is_err());
+    }
+
+    #[test]
+    fn zero_sampling_interval_is_an_error() {
+        let dir = std::env::temp_dir().join("d1-config-test-zero-sampling");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("d1.toml");
+        std::fs::write(
+            &path,
+            "[tracker]\nsampling_interval_s = 0\nte_window_obs = 250\npublish_interval_s = 60\n",
+        )
+        .unwrap();
+        assert!(load(&path).is_err());
     }
 }

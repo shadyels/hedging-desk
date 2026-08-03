@@ -180,9 +180,13 @@ pub fn analytics(
     let last = window.samples.back()?;
 
     // Pass 1: sums needed for the means (active return, cash weight, bench
-    // return). Sigma(a_i) over up to 250 observations reaches ~2.5e20 for
-    // near-i64::MAX active returns -- i128 throughout, per this module's
-    // width-discipline doc comment.
+    // return). `active = book_return_e9 - bench_return_e9`, each an `i64` up
+    // to ~9.223e18 in magnitude, so a single `active` can reach ~1.845e19
+    // (one at +i64::MAX, the other near i64::MIN); Sigma over up to 250
+    // observations then reaches ~4.6e21 -- past `i64::MAX` by many orders of
+    // magnitude, which is exactly why every accumulator here is `i128`
+    // throughout (this module's width-discipline doc comment) rather than a
+    // defensive nicety.
     let mut sum_active_e9: i128 = 0;
     let mut sum_bench_e9: i128 = 0;
     let mut sum_cash_wt_e9: i128 = 0;
@@ -195,9 +199,14 @@ pub fn analytics(
     let mean_active_e9 = sum_active_e9.checked_div(n_i128)?;
     let mean_cash_wt_e9 = sum_cash_wt_e9.checked_div(n_i128)?;
 
-    // Pass 2: sample-variance numerator, Sigma(a_i - mean)^2, e18 scale --
-    // ~2.5e20 for a 250-observation window of near-extreme active returns
-    // (this module's width-discipline doc comment's own worked bound).
+    // Pass 2: sample-variance numerator, Sigma(a_i - mean)^2. `dev = active -
+    // mean_active` can itself reach ~3.7e19 (both terms bounded by the
+    // ~1.845e19 figure above, worst case opposite signs), so a SINGLE
+    // squared term `dev * dev` can reach ~1.4e39 -- past `i128::MAX`
+    // (~1.7014e38). This is not a hypothetical: extreme-but-representable
+    // `i64` inputs (see `full_range_sweep_never_panics` below) genuinely
+    // drive this term past `i128`, and `checked_mul` returning `None` there
+    // is load-bearing for this function's total-ness, not belt-and-braces.
     let mut sum_sq_dev_e18: i128 = 0;
     for s in &window.samples {
         let active = i128::from(s.book_return_e9).checked_sub(i128::from(s.bench_return_e9))?;

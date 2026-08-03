@@ -68,6 +68,60 @@ pub enum RefdataError {
         /// The instrument id that is not in `instruments`.
         instrument_id: u32,
     },
+    /// A benchmark constituent's `weight_e9` is not positive, or the same
+    /// instrument appears twice in one benchmark's constituent list. Either
+    /// would make `d1-analytics`'s fixed-weight `Σ w_c · r_c` benchmark
+    /// return (ADR-010 §3) silently wrong rather than reflecting the stated
+    /// composition.
+    #[error(
+        "universe refdata at {path:?}: benchmark {symbol:?} has a non-positive or duplicate weight_e9 for instrument {instrument_id}"
+    )]
+    BenchmarkWeightInvalid {
+        /// Path whose weight is invalid.
+        path: PathBuf,
+        /// Benchmark holding the invalid weight.
+        symbol: String,
+        /// The offending instrument id.
+        instrument_id: u32,
+    },
+    /// A tracker book's `benchmark_symbol` is not itself listed as a
+    /// quotable instrument in `instruments`. `d1-posttrade::convert`'s
+    /// `resolve_tracker_benchmark_symbol` and `crates/d1/src/lib.rs::spawn`'s
+    /// `tracker_benchmarks` both resolve `benchmark_symbol` through
+    /// `symbol_to_id` -- left unchecked here, a universe.json that passes
+    /// startup validation can still yield zero records on
+    /// `posttrade.tracker.analytics` (discovered only at end-of-session
+    /// Kafka encode time) while the NATS plane silently publishes with
+    /// `benchmark` unset, same fail-loud posture as `UnknownBenchmark` and
+    /// `BenchmarkConstituentNotInUniverse` above.
+    #[error(
+        "universe refdata at {path:?}: book {book} benchmark {symbol:?} is not itself listed as a quotable instrument"
+    )]
+    BenchmarkSymbolNotQuotable {
+        /// Path whose benchmark symbol did not resolve as an instrument.
+        path: PathBuf,
+        /// Book that named the unquotable benchmark.
+        book: u32,
+        /// The benchmark symbol that is not itself a quotable instrument.
+        symbol: String,
+    },
+    /// A benchmark's `weight_e9` values do not sum to `1_000_000_000` --
+    /// `universe.json`'s own documented convention (PORTFOLIO weights,
+    /// normalised to 1.0e9). Left unenforced, the fixed-weight benchmark
+    /// return is silently scaled by whatever the weights actually sum to,
+    /// corrupting every TE/TD/cash-drag figure published for that book with
+    /// no error anywhere.
+    #[error(
+        "universe refdata at {path:?}: benchmark {symbol:?} weight_e9 values sum to {sum}, expected 1_000_000_000"
+    )]
+    BenchmarkWeightsDoNotSumToOne {
+        /// Path whose benchmark weights are unbalanced.
+        path: PathBuf,
+        /// The unbalanced benchmark.
+        symbol: String,
+        /// The actual sum.
+        sum: i64,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -241,7 +295,22 @@ fn parse(path: &Path, raw: &str) -> Result<Universe, RefdataError> {
                     book: b.book_id,
                     symbol: symbol.clone(),
                 })?;
+        // The benchmark symbol must ALSO resolve through `symbol_to_id` --
+        // `d1-posttrade`/`d1`'s NATS gateway both need that (see
+        // `BenchmarkSymbolNotQuotable`'s doc comment), and this loop is the
+        // only place with both `tracker_books` and `symbol_to_id` (built
+        // above) in scope to catch it at startup.
+        if !symbol_to_id.contains_key(symbol) {
+            return Err(RefdataError::BenchmarkSymbolNotQuotable {
+                path: path.to_path_buf(),
+                book: b.book_id,
+                symbol: symbol.clone(),
+            });
+        }
         let mut constituents = Vec::with_capacity(benchmark.constituents.len());
+        let mut seen_instruments =
+            std::collections::HashSet::with_capacity(benchmark.constituents.len());
+        let mut weight_sum_e9: i64 = 0;
         for c in &benchmark.constituents {
             let id = InstrumentId(c.instrument_id);
             // A dangling constituent has no `MarketData` slot and therefore
@@ -254,7 +323,28 @@ fn parse(path: &Path, raw: &str) -> Result<Universe, RefdataError> {
                     instrument_id: c.instrument_id,
                 });
             }
+            if c.weight_e9 <= 0 || !seen_instruments.insert(c.instrument_id) {
+                return Err(RefdataError::BenchmarkWeightInvalid {
+                    path: path.to_path_buf(),
+                    symbol: symbol.clone(),
+                    instrument_id: c.instrument_id,
+                });
+            }
+            weight_sum_e9 = weight_sum_e9.checked_add(c.weight_e9).ok_or_else(|| {
+                RefdataError::BenchmarkWeightInvalid {
+                    path: path.to_path_buf(),
+                    symbol: symbol.clone(),
+                    instrument_id: c.instrument_id,
+                }
+            })?;
             constituents.push((id, c.weight_e9));
+        }
+        if weight_sum_e9 != 1_000_000_000 {
+            return Err(RefdataError::BenchmarkWeightsDoNotSumToOne {
+                path: path.to_path_buf(),
+                symbol: symbol.clone(),
+                sum: weight_sum_e9,
+            });
         }
         tracker_books.push(TrackerBook {
             book: BookId(b.book_id),
@@ -391,7 +481,10 @@ mod tests {
     fn benchmark_constituent_not_in_universe_is_an_error() {
         let raw = r#"{
             "books": [{"book_id": 1, "benchmark_symbol": "SPX", "initial_cash_e9_DEMO_PLACEHOLDER": 100}],
-            "instruments": [{"instrument_id": 1001, "symbol": "AAPL", "currency": "USD"}],
+            "instruments": [
+                {"instrument_id": 1001, "symbol": "AAPL", "currency": "USD"},
+                {"instrument_id": 9998, "symbol": "SPX", "currency": "USD"}
+            ],
             "conventions": {"cross_px_policy_default": "ARRIVAL_MID", "venue_counterparty_default": "SIM", "cash_yield_annual_e9_DEMO_PLACEHOLDER": 40000000},
             "benchmarks": {"SPX": {"constituents": [{"instrument_id": 9999, "weight_e9": 1000000000}]}}
         }"#;
@@ -403,6 +496,82 @@ mod tests {
                 instrument_id: 9999,
                 ..
             } if symbol == "SPX"
+        ));
+    }
+
+    #[test]
+    fn benchmark_symbol_not_quotable_is_an_error() {
+        // SPX's constituents all resolve fine and weights sum to 1.0e9, but
+        // "SPX" itself is never listed under `instruments` -- the missing
+        // third invariant (M5): `d1-posttrade::convert` and the NATS gateway
+        // both need `benchmark_symbol` to resolve through `symbol_to_id`.
+        let raw = r#"{
+            "books": [{"book_id": 1, "benchmark_symbol": "SPX", "initial_cash_e9_DEMO_PLACEHOLDER": 100}],
+            "instruments": [{"instrument_id": 1001, "symbol": "AAPL", "currency": "USD"}],
+            "conventions": {"cross_px_policy_default": "ARRIVAL_MID", "venue_counterparty_default": "SIM", "cash_yield_annual_e9_DEMO_PLACEHOLDER": 40000000},
+            "benchmarks": {"SPX": {"constituents": [{"instrument_id": 1001, "weight_e9": 1000000000}]}}
+        }"#;
+        let err = parse(Path::new("test.json"), raw).unwrap_err();
+        assert!(matches!(
+            err,
+            RefdataError::BenchmarkSymbolNotQuotable { book: 1, ref symbol, .. } if symbol == "SPX"
+        ));
+    }
+
+    #[test]
+    fn benchmark_weights_not_summing_to_one_is_an_error() {
+        let raw = r#"{
+            "books": [{"book_id": 1, "benchmark_symbol": "SPX", "initial_cash_e9_DEMO_PLACEHOLDER": 100}],
+            "instruments": [
+                {"instrument_id": 1001, "symbol": "AAPL", "currency": "USD"},
+                {"instrument_id": 9998, "symbol": "SPX", "currency": "USD"}
+            ],
+            "conventions": {"cross_px_policy_default": "ARRIVAL_MID", "venue_counterparty_default": "SIM", "cash_yield_annual_e9_DEMO_PLACEHOLDER": 40000000},
+            "benchmarks": {"SPX": {"constituents": [{"instrument_id": 1001, "weight_e9": 400000000}]}}
+        }"#;
+        let err = parse(Path::new("test.json"), raw).unwrap_err();
+        assert!(matches!(
+            err,
+            RefdataError::BenchmarkWeightsDoNotSumToOne { sum: 400_000_000, ref symbol, .. } if symbol == "SPX"
+        ));
+    }
+
+    #[test]
+    fn benchmark_duplicate_constituent_is_an_error() {
+        let raw = r#"{
+            "books": [{"book_id": 1, "benchmark_symbol": "SPX", "initial_cash_e9_DEMO_PLACEHOLDER": 100}],
+            "instruments": [
+                {"instrument_id": 1001, "symbol": "AAPL", "currency": "USD"},
+                {"instrument_id": 9998, "symbol": "SPX", "currency": "USD"}
+            ],
+            "conventions": {"cross_px_policy_default": "ARRIVAL_MID", "venue_counterparty_default": "SIM", "cash_yield_annual_e9_DEMO_PLACEHOLDER": 40000000},
+            "benchmarks": {"SPX": {"constituents": [
+                {"instrument_id": 1001, "weight_e9": 500000000},
+                {"instrument_id": 1001, "weight_e9": 500000000}
+            ]}}
+        }"#;
+        let err = parse(Path::new("test.json"), raw).unwrap_err();
+        assert!(matches!(
+            err,
+            RefdataError::BenchmarkWeightInvalid { instrument_id: 1001, ref symbol, .. } if symbol == "SPX"
+        ));
+    }
+
+    #[test]
+    fn benchmark_negative_weight_is_an_error() {
+        let raw = r#"{
+            "books": [{"book_id": 1, "benchmark_symbol": "SPX", "initial_cash_e9_DEMO_PLACEHOLDER": 100}],
+            "instruments": [
+                {"instrument_id": 1001, "symbol": "AAPL", "currency": "USD"},
+                {"instrument_id": 9998, "symbol": "SPX", "currency": "USD"}
+            ],
+            "conventions": {"cross_px_policy_default": "ARRIVAL_MID", "venue_counterparty_default": "SIM", "cash_yield_annual_e9_DEMO_PLACEHOLDER": 40000000},
+            "benchmarks": {"SPX": {"constituents": [{"instrument_id": 1001, "weight_e9": -1000000000}]}}
+        }"#;
+        let err = parse(Path::new("test.json"), raw).unwrap_err();
+        assert!(matches!(
+            err,
+            RefdataError::BenchmarkWeightInvalid { instrument_id: 1001, ref symbol, .. } if symbol == "SPX"
         ));
     }
 }
