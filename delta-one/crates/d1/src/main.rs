@@ -18,6 +18,12 @@ use anyhow::{Context, Result, bail};
 use d1::{FixConfig, PostTradeConfig, StartupOrder, spawn};
 use d1_core::{BookId, InstrumentId, Side};
 
+/// Relative to `delta-one/`, this binary's cwd -- same convention as
+/// `DEFAULT_UNIVERSE` below, one level shallower since `d1.toml` lives
+/// directly in `delta-one/`. No `--config` CLI flag (YAGNI,
+/// `crates/d1/src/config.rs`'s own doc comment).
+const DEFAULT_D1_CONFIG: &str = "d1.toml";
+
 /// Must match `crates/d1-gateway-fix/initiator.cfg`'s `[SESSION]` block.
 const SENDER_COMP_ID: &str = "D1";
 const TARGET_COMP_ID: &str = "SIM";
@@ -46,6 +52,11 @@ fn main() -> Result<()> {
     let args = parse_args()?;
 
     let universe = d1_refdata::load(&args.universe).context("loading universe refdata")?;
+    // Hard startup error on a missing file or missing `[tracker]` section
+    // (`crates/d1/src/config.rs`'s own doc comment) -- same fail-loud
+    // posture as the policy gate below, never a silent sampling default.
+    let tracker_cfg =
+        d1::config::load(std::path::Path::new(DEFAULT_D1_CONFIG)).context("loading d1 config")?;
     // ADR-005 §4: the cross reference-price policy is compliance-visible and
     // must never be a silent default. Parse it at startup so a typo in refdata
     // kills the process here rather than mispricing internal risk transfers.
@@ -98,6 +109,7 @@ fn main() -> Result<()> {
         instrument_ids,
         policy,
         universe,
+        tracker_cfg,
         Some(PostTradeConfig {
             brokers: args.kafka_brokers,
             registry_url: args.schema_registry,

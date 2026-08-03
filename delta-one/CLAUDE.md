@@ -68,6 +68,8 @@ Enforcement: `cargo clippy` with `-D warnings` plus the lint set in `Cargo.toml`
 | `ureq` | blocking HTTP client for Confluent Schema Registry registration (ADR-002) | no -- four POSTs once at producer-thread startup, never in a loop. Chosen over `reqwest` because the producer thread is deliberately non-async (`ThreadedProducer` + poll loop), so a blocking client needs no runtime; built with `default-features = false` (no TLS), matching the compose registry's plaintext local-only listener, same ceiling as the plaintext broker connection |
 | `serde_json` (in `d1-posttrade`) | build the registry's `{"schema": ...}` request body and read the `{"id": N}` response (ADR-002) | no -- startup-only, alongside `ureq` above |
 | `ctrlc` | Ctrl-C signal handler (`crates/d1`'s shutdown flag) | no -- registration happens once at startup on the main thread, never in a poll loop |
+| `toml` (in `crates/d1`) | parse `d1.toml`'s `[tracker]` section (ADR-010, `crates/d1/src/config.rs`) | no -- startup-only parse, never in a poll loop |
+| `serde` (in `crates/d1`) | derive `Deserialize` for `crates/d1/src/config.rs`'s `TrackerConfig` shape | no -- startup-only parse alongside `toml` above, never on the hot path |
 
 Anything not in this table needs a row added here + a sentence of justification in the PR description.
 

@@ -48,6 +48,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use apache_avro::Schema;
+use d1::config::TrackerConfig;
 use d1::{FixConfig, PostTradeConfig, StartupOrder, spawn};
 use d1_core::{BookId, InstrumentId, Side};
 use d1_gateway_nats::pb::hedging::common::v1::{InstrumentRef, Meta};
@@ -636,6 +637,15 @@ fn posttrade_golden_file() {
         instrument_ids,
         policy,
         universe,
+        // Slice 3 (a later dispatch) owns this test's tracker-analytics
+        // golden coverage; this slice only needs it to compile and keep the
+        // existing storyline's counts/assertions passing. `sampling_interval_s: 1`
+        // per this slice's own spec.
+        TrackerConfig {
+            sampling_interval_s: 1,
+            te_window_obs: 250,
+            publish_interval_s: 1,
+        },
         Some(PostTradeConfig {
             brokers: KAFKA_BROKERS.to_string(),
             registry_url: SCHEMA_REGISTRY.to_string(),

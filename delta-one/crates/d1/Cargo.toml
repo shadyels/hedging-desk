@@ -15,9 +15,12 @@ d1-gateway-nats = { path = "../d1-gateway-nats" }
 d1-refdata = { path = "../d1-refdata" }
 d1-netting = { path = "../d1-netting" }
 d1-posttrade = { path = "../d1-posttrade" }
+d1-analytics = { path = "../d1-analytics" }
 rtrb = "0.3"
 anyhow = "1"
 ctrlc = "3"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 
 [dev-dependencies]
 # src/posttrade.rs's #[cfg(test)] mod is the only remaining user (sample
