@@ -50,23 +50,23 @@ if [[ "$ready" -ne 1 ]]; then
   exit 1
 fi
 
-# avsc filename -> Kafka topic (ADR-002 topic map + tracker_analytics per
-# delta-one/CLAUDE.md "Outbound planes" #5). Subject = <topic>-value
-# (Schema Registry default TopicNameStrategy).
-declare -A topic_for=(
-  [posttrade_trade.avsc]=posttrade.trades
-  [posttrade_cross.avsc]=posttrade.crosses
-  [posttrade_allocation.avsc]=posttrade.allocations
-  [order_audit.avsc]=posttrade.orders.audit
-  [tracker_analytics.avsc]=posttrade.tracker.analytics
-)
-
 status=0
 for avsc in protocol/avro/*.avsc; do
   file=$(basename "$avsc")
-  topic="${topic_for[$file]:-}"
+  # avsc filename -> Kafka topic (ADR-002 topic map + tracker_analytics per
+  # delta-one/CLAUDE.md "Outbound planes" #5). Subject = <topic>-value
+  # (Schema Registry default TopicNameStrategy). `case` not an associative
+  # array: macOS ships bash 3.2, which has no `declare -A`.
+  case "$file" in
+    posttrade_trade.avsc)      topic=posttrade.trades ;;
+    posttrade_cross.avsc)      topic=posttrade.crosses ;;
+    posttrade_allocation.avsc) topic=posttrade.allocations ;;
+    order_audit.avsc)          topic=posttrade.orders.audit ;;
+    tracker_analytics.avsc)    topic=posttrade.tracker.analytics ;;
+    *)                         topic="" ;;
+  esac
   if [[ -z "$topic" ]]; then
-    echo "scripts/schema-check.sh: no topic mapping for $file — add one to topic_for in this script." >&2
+    echo "scripts/schema-check.sh: no topic mapping for $file — add one to the case arms in this script." >&2
     status=1
     continue
   fi
