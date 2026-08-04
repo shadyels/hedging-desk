@@ -985,7 +985,12 @@ fn push_posttrade(tx: &mut rtrb::Producer<PostTradeEvent>, event: PostTradeEvent
 /// instrument has never ticked at all -- `d1-netting::net` itself has no
 /// opinion on price validity, so an unpriced instrument nets at 0 rather
 /// than blocking the cycle.
-fn arrival_mid_px_e9(market_data: &MarketData, instrument: InstrumentId) -> i64 {
+///
+/// `pub` (not `pub(crate)`) because it is the cross/order reference-price
+/// read shared by the live loop (`run_core`, above) and the in-repo
+/// composed tick-to-trade bench, which compiles as an external crate and so
+/// cannot see crate-private items.
+pub fn arrival_mid_px_e9(market_data: &MarketData, instrument: InstrumentId) -> i64 {
     let Some(quote) = market_data.quote(instrument) else {
         return 0;
     };
