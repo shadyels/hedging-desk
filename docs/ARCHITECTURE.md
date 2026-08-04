@@ -53,6 +53,8 @@ Design targets (our own analysis; to be replaced by measured HDR-histogram numbe
 | Order build + emit to FIX ring | ≤ 10 µs |
 | **Tick → order-emit total** | **≤ 50 µs p99, ≤ 20 µs p50 target** |
 
+The **Tick → order-emit total** row is now backed by a measurement rather than analysis: `delta-one/crates/d1/benches/tick_to_trade.rs` composes the real ADR-004 §1 sequence in a single timed closure and reports p50/p99/p99.9 (see `docs/ROADMAP.md`'s Phase 1 exit note for the current numbers and the two limitations — unpinned cores, and a composed rather than live-loop-causal trigger). The four per-stage rows above it remain **design targets**: the benches that cover them (`crates/d1-core/benches/hot_path.rs`, `crates/d1-netting/benches/netting.rs`) measure each stage in isolation, which cannot account for the queueing and cache effects between stages.
+
 Off-path (informational, not part of the T2T claim): EXO full-book revaluation cadence in seconds; NATS delivery sub-millisecond; Kafka end-to-end milliseconds.
 
 ## What is hedged vs what is monitored (Greeks policy — ADR-008)
