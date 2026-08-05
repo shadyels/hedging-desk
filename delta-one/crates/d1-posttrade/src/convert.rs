@@ -5,7 +5,8 @@
 
 use apache_avro::types::Value;
 use apache_avro::{Schema, to_avro_datum};
-use d1_core::{ClOrdId, ExecId, OrderStatus, Side};
+use d1_analytics::TrackerRecord;
+use d1_core::{BookId, ClOrdId, ExecId, OrderStatus, Side};
 use d1_refdata::Universe;
 
 use crate::{
@@ -13,7 +14,23 @@ use crate::{
     TradeKind, TradeLeg,
 };
 
-/// Parsed Avro schemas for the four `protocol/avro/` post-trade records,
+/// Raw `posttrade_trade.avsc` text, as both parsed here and registered
+/// verbatim with the Schema Registry by `registry::SchemaIds::register`.
+/// One source for both so a registered schema can never drift from the one
+/// the encoder actually writes against.
+pub const TRADE_AVSC: &str = include_str!("../../../../protocol/avro/posttrade_trade.avsc");
+/// Raw `posttrade_cross.avsc` text; see [`TRADE_AVSC`].
+pub const CROSS_AVSC: &str = include_str!("../../../../protocol/avro/posttrade_cross.avsc");
+/// Raw `posttrade_allocation.avsc` text; see [`TRADE_AVSC`].
+pub const ALLOCATION_AVSC: &str =
+    include_str!("../../../../protocol/avro/posttrade_allocation.avsc");
+/// Raw `order_audit.avsc` text; see [`TRADE_AVSC`].
+pub const ORDER_AUDIT_AVSC: &str = include_str!("../../../../protocol/avro/order_audit.avsc");
+/// Raw `tracker_analytics.avsc` text; see [`TRADE_AVSC`].
+pub const TRACKER_ANALYTICS_AVSC: &str =
+    include_str!("../../../../protocol/avro/tracker_analytics.avsc");
+
+/// Parsed Avro schemas for the five `protocol/avro/` post-trade records,
 /// parsed once at construction (`Schema::parse_str` is not free — do it
 /// once, not per encode call).
 pub struct Schemas {
@@ -21,24 +38,18 @@ pub struct Schemas {
     cross: Schema,
     allocation: Schema,
     order_audit: Schema,
+    tracker: Schema,
 }
 
 impl Schemas {
-    /// Parse all four post-trade Avro schemas from `protocol/avro/`.
+    /// Parse all five post-trade Avro schemas from `protocol/avro/`.
     pub fn new() -> Result<Self, PostTradeError> {
         Ok(Self {
-            trade: Schema::parse_str(include_str!(
-                "../../../../protocol/avro/posttrade_trade.avsc"
-            ))?,
-            cross: Schema::parse_str(include_str!(
-                "../../../../protocol/avro/posttrade_cross.avsc"
-            ))?,
-            allocation: Schema::parse_str(include_str!(
-                "../../../../protocol/avro/posttrade_allocation.avsc"
-            ))?,
-            order_audit: Schema::parse_str(include_str!(
-                "../../../../protocol/avro/order_audit.avsc"
-            ))?,
+            trade: Schema::parse_str(TRADE_AVSC)?,
+            cross: Schema::parse_str(CROSS_AVSC)?,
+            allocation: Schema::parse_str(ALLOCATION_AVSC)?,
+            order_audit: Schema::parse_str(ORDER_AUDIT_AVSC)?,
+            tracker: Schema::parse_str(TRACKER_ANALYTICS_AVSC)?,
         })
     }
 
@@ -69,6 +80,9 @@ impl Schemas {
             PostTradeEvent::Cross(c) => encode_cross(&self.cross, c, uni, stamper),
             PostTradeEvent::Allocation(a) => encode_allocation(&self.allocation, a, uni, stamper),
             PostTradeEvent::OrderAudit(o) => encode_order_audit(&self.order_audit, o, stamper),
+            PostTradeEvent::Tracker(r, sampling_interval_s) => {
+                encode_tracker(&self.tracker, r, *sampling_interval_s, uni, stamper)
+            }
         }
     }
 }
@@ -259,6 +273,98 @@ fn encode_order_audit(
     Ok(to_avro_datum(schema, value)?)
 }
 
+/// Encode one tracker book's end-of-session analytics (ADR-010 §4). `n_obs`
+/// and `sampling_interval_s` reuse [`id_to_i32`]'s checked `u32 -> i32`
+/// narrowing (both are plain counts, not "ids", but the same width-discipline
+/// conversion applies and a second helper would only duplicate it).
+/// `window_start_ns`/`window_end_ns` go through [`ns_to_avro_long`]'s checked
+/// `u64 -> i64` narrowing -- never `as`, mirroring `d1-analytics`' own width
+/// discipline at this Avro boundary. `kind` is always the `TeKind` enum
+/// symbol `"EX_POST"`: ADR-010 §1 scopes this milestone to ex-post analytics
+/// only, ex-ante is deferred (candidate ML item, ADR-011).
+fn encode_tracker(
+    schema: &Schema,
+    r: &TrackerRecord,
+    sampling_interval_s: u32,
+    uni: &Universe,
+    stamper: &mut Stamper,
+) -> Result<Vec<u8>, PostTradeError> {
+    let benchmark_symbol = resolve_tracker_benchmark_symbol(uni, r.book)?;
+    let window_end_ns = ns_to_avro_long(r.window_end_ns)?;
+    let window_start_ns = ns_to_avro_long(r.window_start_ns)?;
+
+    let value = Value::Record(vec![
+        (
+            "msg_id".to_string(),
+            Value::String(stamper.uuid().to_string()),
+        ),
+        // ADR-010 §4: this record is stamped `as_of` the window's most
+        // recent sample, i.e. `window_end_ns` -- not `stamper.now_ns()`,
+        // which under `Stamper::Fixed` is the constant `FIXED_BOOKED_NS` and
+        // would make every tracker record indistinguishable regardless of
+        // when its window actually closed.
+        ("as_of_ns".to_string(), Value::Long(window_end_ns)),
+        ("book_id".to_string(), Value::Int(id_to_i32(r.book.0)?)),
+        (
+            "benchmark_symbol".to_string(),
+            Value::String(benchmark_symbol),
+        ),
+        ("kind".to_string(), Value::Enum(0, "EX_POST".to_string())),
+        (
+            "tracking_error_ann_e9".to_string(),
+            Value::Long(r.tracking_error_ann_e9),
+        ),
+        (
+            "tracking_diff_e9".to_string(),
+            Value::Long(r.tracking_diff_e9),
+        ),
+        ("cash_weight_e9".to_string(), Value::Long(r.cash_weight_e9)),
+        ("cash_drag_e9".to_string(), Value::Long(r.cash_drag_e9)),
+        ("n_obs".to_string(), Value::Int(id_to_i32(r.n_obs)?)),
+        ("window_start_ns".to_string(), Value::Long(window_start_ns)),
+        ("window_end_ns".to_string(), Value::Long(window_end_ns)),
+        (
+            "sampling_interval_s".to_string(),
+            Value::Int(id_to_i32(sampling_interval_s)?),
+        ),
+    ]);
+
+    Ok(to_avro_datum(schema, value)?)
+}
+
+/// Resolve a tracker book's benchmark symbol by routing through the existing
+/// [`resolve_symbol`] helper rather than adding a second symbol-resolution
+/// path: `Universe::tracker_books` gives the book's `benchmark_symbol`
+/// string directly, but that string must ALSO be listed as a quotable
+/// instrument in the universe (the same lookup
+/// `crates/d1/src/lib.rs::spawn`'s `tracker_benchmarks` does for the NATS
+/// plane) for `resolve_symbol` to round-trip it back out through
+/// `id_to_symbol`. `Err(UnknownTrackerBenchmark)` on either lookup failing.
+fn resolve_tracker_benchmark_symbol(
+    uni: &Universe,
+    book: BookId,
+) -> Result<String, PostTradeError> {
+    let tb = uni
+        .tracker_books
+        .iter()
+        .find(|tb| tb.book == book)
+        .ok_or(PostTradeError::UnknownTrackerBenchmark(book))?;
+    let benchmark_instrument = uni
+        .symbol_to_id
+        .get(&tb.benchmark_symbol)
+        .copied()
+        .ok_or(PostTradeError::UnknownTrackerBenchmark(book))?;
+    resolve_symbol(uni, benchmark_instrument)
+}
+
+/// `u64 -> i64` checked narrowing for a nanosecond timestamp field (e.g.
+/// `TrackerRecord::window_end_ns`), never `as` -- width discipline is
+/// mandatory per `d1-analytics`'s own doc comment, mirrored here at the Avro
+/// boundary.
+fn ns_to_avro_long(ns: u64) -> Result<i64, PostTradeError> {
+    i64::try_from(ns).map_err(|_| PostTradeError::TimestampOverflow(ns))
+}
+
 fn resolve_symbol(
     uni: &Universe,
     instrument: d1_core::InstrumentId,
@@ -372,6 +478,8 @@ mod tests {
         Universe {
             book_ids: vec![BookId(1), BookId(2)],
             instrument_ids: vec![InstrumentId(1001)],
+            tracker_books: Vec::new(),
+            cash_yield_annual_e9: 40_000_000,
             symbol_to_id,
             id_to_symbol,
             id_to_currency,

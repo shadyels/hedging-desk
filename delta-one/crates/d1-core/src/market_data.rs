@@ -89,6 +89,7 @@ mod tests {
             ask_px_e9: 187_520_000_000,
             last_px_e9: 187_510_000_000,
             exch_ts_ns: 42,
+            div_per_share_e9: 0,
         });
         assert!(updated);
         let q = md.quote(InstrumentId(1001)).unwrap();
@@ -106,6 +107,7 @@ mod tests {
             ask_px_e9: 1,
             last_px_e9: 1,
             exch_ts_ns: 1,
+            div_per_share_e9: 0,
         });
         assert!(!updated);
         assert_eq!(md.quote(InstrumentId(9999)), None);

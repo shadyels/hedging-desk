@@ -25,6 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use d1::config::TrackerConfig;
 use d1::{FixConfig, StartupOrder, spawn};
 use d1_core::{BookId, InstrumentId, Side};
 use d1_gateway_nats::pb::hedging::common::v1::{InstrumentRef, Meta};
@@ -235,6 +236,11 @@ fn target_position_round_trips_to_execution_report() {
         instrument_ids,
         policy,
         universe,
+        TrackerConfig {
+            sampling_interval_s: 60,
+            te_window_obs: 250,
+            publish_interval_s: 60,
+        },
         None, // no Kafka broker in this test
         false,
         &shutdown,

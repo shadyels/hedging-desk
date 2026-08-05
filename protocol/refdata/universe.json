@@ -5,7 +5,9 @@
       "book_id": 1,
       "code": "D1-CORE",
       "desc": "Delta One index tracker book",
-      "benchmark_symbol": "SPX"
+      "benchmark_symbol": "SPX",
+      "initial_cash_e9_DEMO_PLACEHOLDER": 10000000000000000,
+      "_note": "initial_cash is a DEMO endowment (10,000,000.00) so the tracker book has a non-zero NAV base. Without it cash and stock move equal-and-opposite on every fill, NAV is identically 0, and every return in ADR-010's TE/TD/cash-drag math is 0/0."
     },
     {
       "book_id": 2,
@@ -184,7 +186,7 @@
   },
   "benchmarks": {
     "SPX": {
-      "_note": "DEMO composition placeholder (2 names), not the real index - enriched in P4.M6",
+      "_note": "DEMO composition placeholder (2 names), not the real index - enriched in P4.M6. weight_e9 values are PORTFOLIO weights: they normalise to 1.0e9 and d1-analytics reads the benchmark return as the fixed-weight sum r_bench = sum_c w_c * r_c, i.e. implicitly rebalanced back to these weights at every sample (ADR-010).",
       "constituents": [
         {
           "instrument_id": 1001,

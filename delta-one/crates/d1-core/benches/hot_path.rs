@@ -51,6 +51,7 @@ fn bench_market_data_ingest(c: &mut Criterion) {
         ask_px_e9: 100_010_000_000,
         last_px_e9: 100_005_000_000,
         exch_ts_ns: 1,
+        div_per_share_e9: 0,
     };
 
     hdr_report("MarketData::ingest", || {

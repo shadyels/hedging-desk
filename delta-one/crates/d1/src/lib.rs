@@ -4,6 +4,7 @@
 //! copy. `docs/ROADMAP.md` P1.M2 slice 3: the feed-ingest ring/thread
 //! (deferred from Slice 2) plus the NATS target/exec-report rings.
 
+pub mod config;
 pub mod cycle;
 pub mod feed;
 pub mod posttrade;
@@ -14,7 +15,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use config::TrackerConfig;
 use cycle::{NettingSession, allocate_fill};
+use d1_analytics::{Sample, TrackerRecord, TrackerWindow, analytics};
 use d1_core::{
     BookId, ClOrdId, CrossRecord, ExecEvent, ExecOutcome, ExecReport, FeedTick, InstrumentId,
     MarketData, Order, OrderStatus, OrderStore, PositionKeeper, Side, Target, TransferRequest,
@@ -23,7 +26,9 @@ use d1_gateway_fix::{FixCallbacks, FixError};
 use d1_gateway_nats::NatsError;
 use d1_netting::RefPxPolicy;
 use d1_posttrade::{AuditOrigin, NettingCycleId, PostTradeError, PostTradeEvent, Stamper};
-use d1_refdata::Universe;
+
+pub use d1_posttrade::PostTradeConfig;
+use d1_refdata::{TrackerBook, Universe};
 
 /// Ring capacity for every `rtrb` ring this binary owns (ADR-013). Generous
 /// for a demo-sized single session, matching `d1-gateway-fix`'s ring sizing.
@@ -74,7 +79,7 @@ pub struct RunHandles {
     /// The synthetic feed-ingest producer thread.
     pub feed: JoinHandle<()>,
     /// The Kafka post-trade producer thread, `Some` only when a broker
-    /// address was given (`kafka_brokers`) -- `None` in tests, which run
+    /// address was given (`posttrade_cfg`) -- `None` in tests, which run
     /// without a broker.
     pub posttrade: Option<JoinHandle<Result<(), PostTradeError>>>,
     /// The producer thread's OWN shutdown flag, `Some` iff `posttrade` is
@@ -93,7 +98,7 @@ pub struct RunHandles {
 /// Build the `rtrb` rings (ADR-013) and spawn the core/FIX/NATS/feed
 /// threads. Blocks on nothing itself -- the caller decides how/when to flip
 /// `shutdown` and joins the returned handles. If a Kafka producer thread is
-/// spawned (`kafka_brokers: Some`), it does NOT share `shutdown` -- see
+/// spawned (`posttrade_cfg: Some`), it does NOT share `shutdown` -- see
 /// `RunHandles::posttrade_shutdown` for the ordered-shutdown contract that
 /// protects the producer's final drain.
 ///
@@ -107,10 +112,13 @@ pub struct RunHandles {
 /// `universe` is handed whole to the Kafka producer thread (P1.M4 Slice 2):
 /// `d1_posttrade::Schemas::encode` resolves `symbol`/`currency` from it,
 /// separately from `book_ids`/`instrument_ids` above (those feed the keeper).
-/// `kafka_brokers` is `Some(addr)` to spawn the producer thread, `None` to
-/// skip it entirely -- tests pass `None` since they run without a broker; the
-/// `posttrade` ring then simply fills and the log-and-drop push helper in
-/// `run_core` drops harmlessly.
+/// `posttrade_cfg` is `Some(PostTradeConfig { brokers, registry_url })` to
+/// spawn the producer thread, `None` to skip it entirely -- tests pass `None`
+/// since they run without a broker; the `posttrade` ring then simply fills and
+/// the log-and-drop push helper in `run_core` drops harmlessly. Broker and
+/// registry travel together because a producer that cannot resolve Confluent
+/// schema ids would publish records no consumer can decode (ADR-002), so
+/// "Kafka without a registry" is deliberately unconstructable.
 ///
 /// `deterministic` selects the golden-file reproducible path: `Stamper::Fixed`
 /// (instead of `Stamper::Wall`) for ids/timestamps, and `0` feed drift
@@ -132,7 +140,8 @@ pub fn spawn(
     instrument_ids: Vec<InstrumentId>,
     policy: RefPxPolicy,
     universe: Universe,
-    kafka_brokers: Option<String>,
+    tracker_cfg: TrackerConfig,
+    posttrade_cfg: Option<PostTradeConfig>,
     deterministic: bool,
     shutdown: &Arc<AtomicBool>,
 ) -> RunHandles {
@@ -144,6 +153,9 @@ pub fn spawn(
     let (cross_tx, cross_rx) = rtrb::RingBuffer::<CrossRecord>::new(RING_CAPACITY);
     let (transfer_tx, transfer_rx) = rtrb::RingBuffer::<TransferRequest>::new(RING_CAPACITY);
     let (posttrade_tx, posttrade_rx) = rtrb::RingBuffer::<PostTradeEvent>::new(RING_CAPACITY);
+    // 9th ring (ADR-010, P1.M5 Slice 2): core -> NATS, one `TrackerRecord`
+    // per tracker book per sample.
+    let (tracker_tx, tracker_rx) = rtrb::RingBuffer::<TrackerRecord>::new(RING_CAPACITY);
 
     // `next: 1_000_000` -- disjoint from the Kafka producer's `Stamper`
     // below (`next: 1`), see this function's doc comment.
@@ -156,6 +168,30 @@ pub fn spawn(
     // must tick every instrument in the keeper universe, not just the CLI
     // startup order's, or crosses on the others price at `ref_px_e9 = 0`.
     let feed_instruments = instrument_ids.clone();
+    // `universe` moves whole into the Kafka producer thread below (P1.M4
+    // Slice 2) -- the core thread and the NATS gateway thread both need a
+    // tracker-book slice of it too, so clone just what each needs BEFORE
+    // that move, same precedent as `feed_instruments` above.
+    let tracker_books = universe.tracker_books.clone();
+    let cash_yield_annual_e9 = universe.cash_yield_annual_e9;
+    // Resolved once here (the only place with both `tracker_books` and
+    // `symbol_to_id` in scope before `universe` moves): each tracker book's
+    // `benchmark_symbol` -> the matching instrument id, if the demo universe
+    // happens to list the benchmark itself as a tradeable/quotable
+    // instrument (e.g. "SPX"). Handed to the NATS gateway thread so it can
+    // populate `TrackerAnalytics.benchmark` without depending on
+    // `d1-refdata` itself (`d1_analytics::TrackerRecord` stays id-based on
+    // `book` only -- ADR-010's pure-calculator boundary).
+    let tracker_benchmarks: Vec<(BookId, InstrumentId)> = tracker_books
+        .iter()
+        .filter_map(|tb| {
+            universe
+                .symbol_to_id
+                .get(&tb.benchmark_symbol)
+                .map(|&id| (tb.book, id))
+        })
+        .collect();
+    let tracker_sampling_interval_s = tracker_cfg.sampling_interval_s;
 
     let core_shutdown = Arc::clone(shutdown);
     let core = thread::spawn(move || {
@@ -169,10 +205,14 @@ pub fn spawn(
             cross_tx,
             transfer_rx,
             posttrade_tx,
+            tracker_tx,
             book_ids,
             instrument_ids,
             policy,
             core_stamper,
+            tracker_books,
+            cash_yield_annual_e9,
+            tracker_cfg,
             &core_shutdown,
         );
     });
@@ -198,6 +238,9 @@ pub fn spawn(
             exec_report_rx,
             cross_rx,
             transfer_tx,
+            tracker_rx,
+            tracker_benchmarks,
+            tracker_sampling_interval_s,
             &nats_shutdown,
         )
     });
@@ -208,7 +251,7 @@ pub fn spawn(
         feed::run_feed_producer(&feed_instruments, feed_tx, feed_drift_e9, &feed_shutdown);
     });
 
-    // `kafka_brokers: None` (tests, no broker available) -- don't spawn: the
+    // `posttrade_cfg: None` (tests, no broker available) -- don't spawn: the
     // ring simply fills and `run_core`'s log-and-drop push helper drops
     // harmlessly, same ceiling as every other ring in this binary.
     //
@@ -219,7 +262,7 @@ pub fn spawn(
     // until the caller has joined `core`, or the producer can drain-flush-exit
     // while `core` is still mid-iteration pushing events.
     let mut posttrade_shutdown = None;
-    let posttrade = kafka_brokers.map(|brokers| {
+    let posttrade = posttrade_cfg.map(|cfg| {
         let flag = Arc::new(AtomicBool::new(false));
         posttrade_shutdown = Some(Arc::clone(&flag));
         let producer_stamper = if deterministic {
@@ -229,7 +272,8 @@ pub fn spawn(
         };
         thread::spawn(move || {
             let result = d1_posttrade::run_producer(
-                &brokers,
+                &cfg.brokers,
+                &cfg.registry_url,
                 universe,
                 posttrade_rx,
                 producer_stamper,
@@ -288,10 +332,14 @@ fn run_core(
     mut cross_tx: rtrb::Producer<CrossRecord>,
     mut transfer_rx: rtrb::Consumer<TransferRequest>,
     mut posttrade_tx: rtrb::Producer<PostTradeEvent>,
+    mut tracker_tx: rtrb::Producer<TrackerRecord>,
     book_ids: Vec<BookId>,
     instrument_ids: Vec<InstrumentId>,
     policy: RefPxPolicy,
     stamper: Stamper,
+    tracker_books: Vec<TrackerBook>,
+    cash_yield_annual_e9: i64,
+    tracker_cfg: TrackerConfig,
     shutdown: &AtomicBool,
 ) {
     let mut store = OrderStore::new(RING_CAPACITY);
@@ -313,8 +361,35 @@ fn run_core(
             ask_px_e9: feed::STARTING_PX_E9,
             last_px_e9: feed::STARTING_PX_E9,
             exch_ts_ns: 0,
+            div_per_share_e9: 0,
         });
     }
+    // Seed each tracker book's endowed cash (ADR-010, `refdata`'s
+    // `initial_cash_e9`) right next to the price prime above -- both are
+    // "establish t=0 state before anything else runs" seams. `None` means
+    // `tb.book` is not in this process's keeper universe (refdata listed a
+    // tracker book this process wasn't configured for); logged loudly rather
+    // than silently leaving that book's cash at 0, which would make every
+    // one of its NAV returns a nonsensical 0-cash fiction.
+    for tb in &tracker_books {
+        if keeper.seed_cash(tb.book, tb.initial_cash_e9).is_none() {
+            eprintln!(
+                "d1: tracker book cash seed failed book={:?} initial_cash_e9={} -- book not in this process's position universe",
+                tb.book, tb.initial_cash_e9
+            );
+        }
+    }
+    let mut tracker_states: Vec<TrackerState> = tracker_books
+        .iter()
+        .map(|tb| TrackerState::new(tb, tracker_cfg.te_window_obs))
+        .collect();
+    // `sampling_interval_s` is a demo-time "day" (`d1.toml`'s comment) --
+    // the boundary check below rides the feed's own synthetic `exch_ts_ns`
+    // clock, never the wall clock, so this stays fully deterministic.
+    let sampling_interval_ns =
+        u64::from(tracker_cfg.sampling_interval_s).saturating_mul(1_000_000_000);
+    let mut next_sample_ns = sampling_interval_ns;
+
     let mut session = NettingSession::new(policy, 2, stamper); // seq 1 is the startup order below
 
     let cl_ord_id = ClOrdId::from_seq(1);
@@ -374,6 +449,106 @@ fn run_core(
                     "d1: quote instrument={:?} bid={} ask={} last={}",
                     tick.instrument_id, tick.bid_px_e9, tick.ask_px_e9, tick.last_px_e9
                 );
+            }
+
+            // Dividend credit (P1.M5 Slice 2): rides the same tick stream as
+            // the price update (`FeedTick::div_per_share_e9`'s doc comment).
+            // `None` means the credit was rejected outright (unknown
+            // instrument or a cost-basis overflow on some book) -- root
+            // CLAUDE.md #2, same fault class as a silently-dropped fill, so
+            // this is logged just as loudly as "FILL NOT BOOKED" above.
+            if tick.div_per_share_e9 != 0 {
+                if keeper
+                    .credit_dividend(tick.instrument_id, tick.div_per_share_e9)
+                    .is_none()
+                {
+                    eprintln!(
+                        "d1: DIVIDEND NOT CREDITED instrument={:?} div_per_share_e9={} -- firm cash is now understated",
+                        tick.instrument_id, tick.div_per_share_e9
+                    );
+                } else {
+                    println!(
+                        "d1: dividend credited instrument={:?} div_per_share_e9={}",
+                        tick.instrument_id, tick.div_per_share_e9
+                    );
+                }
+            }
+
+            // Tracker analytics sampling driver (ADR-010, P1.M5 Slice 2).
+            // Sampled off the feed's own synthetic `exch_ts_ns` clock, never
+            // the wall clock, so this stays deterministic. `sampling_interval_ns
+            // == 0` (a degenerate `d1.toml` config) disables sampling outright
+            // rather than resampling on every tick.
+            //
+            // The FIRST boundary crossing only establishes each tracker
+            // state's `prev_nav_e9`/`prev_mids_e9` baseline (see
+            // `TrackerState::sample`) -- a return needs two NAV levels, so
+            // reaching `n_obs >= 2` (the minimum `d1_analytics::analytics`
+            // needs) takes THREE crossings: #1 seeds the baseline, #2
+            // computes the first return (window len 1), #3 computes the
+            // second (window len 2, analytics finally `Some`).
+            //
+            // ponytail: the feed producer ticks every instrument in one
+            // "wave" sharing the same `exch_ts_ns` (`crates/d1/src/feed.rs`),
+            // so this can fire on the FIRST tick of a wave, before the rest
+            // of that wave's instruments have been ingested into
+            // `market_data` -- a demo-scale approximation, not a windowed
+            // barrier. Acceptable here because the ring drains faster than
+            // the 500ms feed cadence; a real feed would need an explicit
+            // "wave complete" signal instead.
+            if sampling_interval_ns > 0 && tick.exch_ts_ns >= next_sample_ns {
+                for state in &mut tracker_states {
+                    // Cash must actually earn the configured yield, or cash
+                    // sits at 0% in NAV while ADR-010's cash-drag formula
+                    // assumes it earns `cash_yield_annual_e9` -- an
+                    // internally-inconsistent report. `None` means the
+                    // book isn't in this process's keeper universe (already
+                    // logged loudly at the cash-seed step above) or the
+                    // accrual overflowed; either way this sample's NAV would
+                    // be silently wrong, so it is logged just as loudly.
+                    if keeper
+                        .accrue_cash(
+                            state.book,
+                            cash_yield_annual_e9,
+                            d1_analytics::TRADING_DAYS_PER_YEAR,
+                        )
+                        .is_none()
+                    {
+                        eprintln!(
+                            "d1: CASH ACCRUAL NOT APPLIED book={:?} -- tracker cash yield understated this sample",
+                            state.book
+                        );
+                    }
+
+                    state.sample(&keeper, &market_data, tick.exch_ts_ns);
+
+                    if let Some(record) = analytics(state.book, &state.window, cash_yield_annual_e9)
+                    {
+                        if tracker_tx.push(record).is_err() {
+                            eprintln!(
+                                "d1: tracker ring full, dropping TrackerRecord book={:?}",
+                                state.book
+                            );
+                        } else {
+                            println!(
+                                "d1: tracker sample book={:?} n_obs={} te_ann_e9={} td_e9={} cash_drag_e9={}",
+                                record.book,
+                                record.n_obs,
+                                record.tracking_error_ann_e9,
+                                record.tracking_diff_e9,
+                                record.cash_drag_e9
+                            );
+                        }
+                    }
+                }
+                // Catches up to the tick's actual clock instead of advancing
+                // by exactly one interval (L3 remediation): if tick spacing
+                // ever exceeds `sampling_interval_ns`, the old
+                // `next_sample_ns + interval` form would fire every
+                // subsequent tick against an unchanged boundary -- zero-length
+                // periods, zero returns, TE silently diluted toward zero.
+                next_sample_ns =
+                    (tick.exch_ts_ns / sampling_interval_ns + 1) * sampling_interval_ns;
             }
         }
 
@@ -749,12 +924,54 @@ fn run_core(
             thread::sleep(POLL_INTERVAL);
         }
     }
+
+    // P1.M5 Slice 3 (ADR-010 §4): emit exactly one Kafka
+    // `posttrade.tracker.analytics` record per tracker book, HERE -- after
+    // the drain loop above has exited, never inside it. Two reasons, both
+    // load-bearing:
+    //
+    // 1. Ordering/goldens. `rtrb` is FIFO, so an event pushed after the loop
+    //    is provably the LAST event the producer thread ever pops off this
+    //    ring, which is what keeps the four existing golden fixtures
+    //    byte-identical instead of shifting every `msg_id` in the
+    //    `Stamper::Fixed` sequence forward by one. Safe because the
+    //    ordered-shutdown contract (`RunHandles::posttrade_shutdown`'s doc
+    //    comment) joins `core` -- this function -- before signalling the
+    //    producer, so the producer's final `drain()` provably catches this
+    //    push.
+    // 2. Contract. ADR-010 §4 specifies a DAILY Avro record, and
+    //    end-of-session is this demo's "day" -- there is no periodic Kafka
+    //    publish at all here; `publish_interval_s` (`d1.toml [tracker]`)
+    //    governs only the NATS cadence above, never this one.
+    //
+    // ponytail: a real deployment triggers this on an end-of-day boundary
+    // this process never observes -- the synthetic feed clock has no
+    // calendar/wall-clock concept to detect one. Upgrade to a real EOD
+    // scheduler when this ever runs against a live feed instead of one demo
+    // session.
+    for state in &tracker_states {
+        match analytics(state.book, &state.window, cash_yield_annual_e9) {
+            Some(record) => push_posttrade(
+                &mut posttrade_tx,
+                PostTradeEvent::Tracker(record, tracker_cfg.sampling_interval_s),
+            ),
+            // Silent otherwise: a short session (fewer than 2 samples ever
+            // pushed into the window) produces no compliance record and, up
+            // to this point, no log line explaining why -- every other
+            // failure in this driver logs loudly (L1 remediation).
+            None => eprintln!(
+                "d1: no end-of-session tracker record for book={:?} -- window has {} observation(s), need >= 2",
+                state.book,
+                state.window.len()
+            ),
+        }
+    }
 }
 
 /// Push one post-trade event onto the Kafka producer ring, log-and-drop on
 /// full -- same ceiling as every other ring in this binary (a single demo
 /// session, not a backpressure protocol yet). With no producer thread
-/// running (`spawn`'s `kafka_brokers: None`, tests), this ring simply fills
+/// running (`spawn`'s `posttrade_cfg: None`, tests), this ring simply fills
 /// and every subsequent push drops harmlessly.
 fn push_posttrade(tx: &mut rtrb::Producer<PostTradeEvent>, event: PostTradeEvent) {
     if tx.push(event).is_err() {
@@ -768,7 +985,12 @@ fn push_posttrade(tx: &mut rtrb::Producer<PostTradeEvent>, event: PostTradeEvent
 /// instrument has never ticked at all -- `d1-netting::net` itself has no
 /// opinion on price validity, so an unpriced instrument nets at 0 rather
 /// than blocking the cycle.
-fn arrival_mid_px_e9(market_data: &MarketData, instrument: InstrumentId) -> i64 {
+///
+/// `pub` (not `pub(crate)`) because it is the cross/order reference-price
+/// read shared by the live loop (`run_core`, above) and the in-repo
+/// composed tick-to-trade bench, which compiles as an external crate and so
+/// cannot see crate-private items.
+pub fn arrival_mid_px_e9(market_data: &MarketData, instrument: InstrumentId) -> i64 {
     let Some(quote) = market_data.quote(instrument) else {
         return 0;
     };
@@ -778,4 +1000,189 @@ fn arrival_mid_px_e9(market_data: &MarketData, instrument: InstrumentId) -> i64 
         }
     }
     quote.last_px_e9
+}
+
+/// Per-tracker-book sampling state (ADR-010, P1.M5 Slice 2): its rolling
+/// analytics window, the previous sample's NAV and per-constituent mids
+/// (`None`/all-zero until the first boundary crossing establishes a
+/// baseline -- see `sample`'s doc comment), and its resolved constituent
+/// list. One allocated per `Universe::tracker_books` entry at `run_core`
+/// startup, never after.
+struct TrackerState {
+    /// The tracker book this state samples.
+    book: BookId,
+    /// `(instrument, weight_e9)` pairs, cloned from `d1_refdata::TrackerBook`
+    /// once at startup.
+    constituents: Vec<(InstrumentId, i64)>,
+    /// Rolling window of returns feeding `d1_analytics::analytics`.
+    window: TrackerWindow,
+    /// Previous sample's book NAV, `_e9`. `None` until the first boundary
+    /// crossing (that crossing only establishes this baseline; see `sample`).
+    prev_nav_e9: Option<i64>,
+    /// Previous sample's mid price per constituent, parallel to
+    /// `constituents`, preallocated once at startup and updated in place
+    /// each sample (`0` is a valid "never sampled yet" sentinel: mids are
+    /// always positive once the feed has ticked, and `period_return_e9`
+    /// itself rejects a `0` previous value rather than mistaking it for a
+    /// real quote).
+    prev_mids_e9: Vec<i64>,
+}
+
+impl TrackerState {
+    /// Preallocate one tracker book's sampling state: the window (capacity
+    /// `te_window_obs`) and the per-constituent mid scratch buffer, sized
+    /// once to `tb.constituents.len()` and never reallocated afterward.
+    fn new(tb: &TrackerBook, te_window_obs: usize) -> Self {
+        Self {
+            book: tb.book,
+            constituents: tb.constituents.clone(),
+            window: TrackerWindow::new(te_window_obs),
+            prev_nav_e9: None,
+            prev_mids_e9: vec![0; tb.constituents.len()],
+        }
+    }
+
+    /// Take one sample at `ts_ns`: compute this book's current NAV and cash
+    /// weight, and -- if a previous NAV baseline already exists -- the
+    /// period's book/benchmark returns, pushing a `Sample` into `window`.
+    ///
+    /// The FIRST call for a given book only establishes `prev_nav_e9`/
+    /// `prev_mids_e9`: there is no earlier level to return FROM yet, so
+    /// nothing is pushed. Every call after that computes a return against
+    /// the previous call's snapshot and always refreshes the snapshot to
+    /// the current one, whether or not a `Sample` was pushed (a failed
+    /// return computation -- overflow, a book that fell out of the keeper's
+    /// universe -- must not permanently wedge the baseline on stale data).
+    fn sample(&mut self, keeper: &PositionKeeper, market_data: &MarketData, ts_ns: u64) {
+        let Some(nav_e9) = book_nav_e9(keeper, market_data, self.book) else {
+            eprintln!(
+                "d1: tracker NAV computation failed (overflow or unconfigured) book={:?}, skipping sample",
+                self.book
+            );
+            return;
+        };
+        let Some(cash_e9) = keeper.cash(self.book) else {
+            eprintln!(
+                "d1: tracker cash lookup failed book={:?}, skipping sample",
+                self.book
+            );
+            return;
+        };
+        let Some(cash_weight_e9) = cash_weight_e9(cash_e9, nav_e9) else {
+            eprintln!(
+                "d1: tracker cash-weight computation failed (nav=0 or overflow) book={:?}, skipping sample",
+                self.book
+            );
+            return;
+        };
+
+        if let Some(prev_nav_e9) = self.prev_nav_e9 {
+            match (
+                d1_analytics::period_return_e9(prev_nav_e9, nav_e9),
+                bench_return_e9(market_data, &self.constituents, &self.prev_mids_e9),
+            ) {
+                (Some(book_return_e9), Some(bench_return_e9)) => {
+                    self.window.push(Sample {
+                        window_end_ns: ts_ns,
+                        book_return_e9,
+                        bench_return_e9,
+                        cash_weight_e9,
+                    });
+                }
+                _ => eprintln!(
+                    "d1: tracker sample return computation failed (overflow) book={:?}, skipping sample",
+                    self.book
+                ),
+            }
+        }
+
+        refresh_constituent_mids(market_data, &self.constituents, &mut self.prev_mids_e9);
+        self.prev_nav_e9 = Some(nav_e9);
+    }
+}
+
+/// One tracker book's current NAV: `Σ_i (net_qty_e2[b,i] · mid_e9[i]) / 100 +
+/// cash_e9[b]` (ADR-010 §3), over EVERY instrument in the book's position
+/// row (`PositionKeeper::positions_for_book`), not just its benchmark
+/// constituents. `i128` accumulator, checked throughout -- `None` on
+/// overflow or an unconfigured book, mirroring `d1-core::keeper`'s posture.
+fn book_nav_e9(keeper: &PositionKeeper, market_data: &MarketData, book: BookId) -> Option<i64> {
+    let mut nav_e9 = i128::from(keeper.cash(book)?);
+    for (instrument, position) in keeper.positions_for_book(book)? {
+        let mid_e9 = arrival_mid_px_e9(market_data, instrument);
+        let notional = i128::from(position.net_qty_e2)
+            .checked_mul(i128::from(mid_e9))?
+            .checked_div(100)?;
+        nav_e9 = nav_e9.checked_add(notional)?;
+    }
+    i64::try_from(nav_e9).ok()
+}
+
+/// `cash_e9 · 1e9 / nav_e9` (ADR-010 §3's `cash_wt_e9`). `None` when
+/// `nav_e9 == 0` (no baseline to weight against) or the ratio overflows.
+fn cash_weight_e9(cash_e9: i64, nav_e9: i64) -> Option<i64> {
+    if nav_e9 == 0 {
+        return None;
+    }
+    let ratio = i128::from(cash_e9)
+        .checked_mul(1_000_000_000i128)?
+        .checked_div(i128::from(nav_e9))?;
+    i64::try_from(ratio).ok()
+}
+
+/// The tracker book's fixed-weight benchmark return over one period,
+/// `Σ w_c · r_c` (ADR-010 §3), using `prev_mids_e9` as each constituent's
+/// starting mid -- read-only here; `refresh_constituent_mids` is the
+/// separate commit step (`TrackerState::sample`), called UNCONDITIONALLY
+/// after this (and the book return) are attempted, whether or not either one
+/// succeeded -- see `sample`'s own doc comment for why a failed return must
+/// not permanently wedge the baseline on stale data. Mids come from the
+/// existing `arrival_mid_px_e9` helper, per this slice's spec -- no new
+/// pricing path. `None` on the first constituent whose return can't be
+/// computed (no prior mid yet, or overflow) or on `i128`/`i64` overflow in
+/// the weighted sum.
+///
+/// ponytail: this is a PRICE return (`arrival_mid_px_e9`), while the book's
+/// own NAV return (`book_nav_e9`) is a TOTAL return -- it includes cash,
+/// which receives dividend credits (`PositionKeeper::credit_dividend`).
+/// Constituent dividends therefore still land entirely in tracking
+/// difference even after the ex-div price drop (M6 remediation,
+/// `crates/d1/src/feed.rs::run_feed_producer`) keeps the book itself from
+/// creating value out of nothing. Closing this gap needs a total-return
+/// benchmark index (per-constituent dividend data), which the demo universe
+/// does not carry -- future work, not this slice's scope.
+fn bench_return_e9(
+    market_data: &MarketData,
+    constituents: &[(InstrumentId, i64)],
+    prev_mids_e9: &[i64],
+) -> Option<i64> {
+    let mut sum_e9: i128 = 0;
+    for (idx, (instrument, weight_e9)) in constituents.iter().enumerate() {
+        let mid_now_e9 = arrival_mid_px_e9(market_data, *instrument);
+        let mid_prev_e9 = *prev_mids_e9.get(idx)?;
+        let r_c_e9 = d1_analytics::period_return_e9(mid_prev_e9, mid_now_e9)?;
+        let contrib = i128::from(*weight_e9)
+            .checked_mul(i128::from(r_c_e9))?
+            .checked_div(1_000_000_000i128)?;
+        sum_e9 = sum_e9.checked_add(contrib)?;
+    }
+    i64::try_from(sum_e9).ok()
+}
+
+/// Overwrite `prev_mids_e9` in place with each constituent's CURRENT mid --
+/// the commit step for `bench_return_e9`'s read, and how the very first
+/// sampling boundary crossing establishes its baseline (`TrackerState::sample`'s
+/// doc comment). Preallocated buffer, indexed via `.get_mut()` (never `[]`,
+/// `indexing_slicing` is deny-level) rather than reallocated.
+fn refresh_constituent_mids(
+    market_data: &MarketData,
+    constituents: &[(InstrumentId, i64)],
+    prev_mids_e9: &mut [i64],
+) {
+    for (idx, (instrument, _weight_e9)) in constituents.iter().enumerate() {
+        let mid_now_e9 = arrival_mid_px_e9(market_data, *instrument);
+        if let Some(slot) = prev_mids_e9.get_mut(idx) {
+            *slot = mid_now_e9;
+        }
+    }
 }

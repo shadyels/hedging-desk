@@ -15,6 +15,7 @@
     {"name": "cash_drag_e9", "type": "long"},
     {"name": "n_obs", "type": "int"},
     {"name": "window_start_ns", "type": "long"},
-    {"name": "window_end_ns", "type": "long"}
+    {"name": "window_end_ns", "type": "long"},
+    {"name": "sampling_interval_s", "type": "int", "default": 60}
   ]
 }

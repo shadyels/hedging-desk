@@ -29,11 +29,12 @@ pub mod pb {
     }
 }
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use d1_core::{CrossRecord, ExecReport, Target, TransferRequest};
+use d1_analytics::TrackerRecord;
+use d1_core::{BookId, CrossRecord, ExecReport, InstrumentId, Target, TransferRequest};
 use futures_util::StreamExt;
 use prost::Message as _;
 
@@ -69,6 +70,9 @@ pub fn run_gateway(
     exec_rx: rtrb::Consumer<ExecReport>,
     cross_rx: rtrb::Consumer<CrossRecord>,
     transfer_tx: rtrb::Producer<TransferRequest>,
+    tracker_rx: rtrb::Consumer<TrackerRecord>,
+    tracker_benchmarks: Vec<(BookId, InstrumentId)>,
+    sampling_interval_s: u32,
     shutdown: &AtomicBool,
 ) -> Result<(), NatsError> {
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -87,6 +91,9 @@ pub fn run_gateway(
         exec_rx,
         cross_rx,
         transfer_tx,
+        tracker_rx,
+        tracker_benchmarks,
+        sampling_interval_s,
         shutdown,
     ))
 }
@@ -98,6 +105,9 @@ async fn run_gateway_async(
     mut exec_rx: rtrb::Consumer<ExecReport>,
     mut cross_rx: rtrb::Consumer<CrossRecord>,
     mut transfer_tx: rtrb::Producer<TransferRequest>,
+    mut tracker_rx: rtrb::Consumer<TrackerRecord>,
+    tracker_benchmarks: Vec<(BookId, InstrumentId)>,
+    sampling_interval_s: u32,
     shutdown: &AtomicBool,
 ) -> Result<(), NatsError> {
     let client = match async_nats::connect(url).await {
@@ -110,6 +120,12 @@ async fn run_gateway_async(
     let mut target_subscriber = client.subscribe(TARGET_SUBJECT_WILDCARD).await?;
     let mut transfer_subscriber = client.subscribe(TRANSFER_SUBJECT_WILDCARD).await?;
     let mut seen_msg_ids = HashSet::new();
+    // Resolved once at startup (core thread, `crates/d1/src/lib.rs::spawn`)
+    // from each tracker book's `benchmark_symbol` -- a `HashMap` here is
+    // just this gateway thread's own O(1) lookup by book, not a second
+    // source of truth.
+    let tracker_benchmarks: HashMap<BookId, InstrumentId> =
+        tracker_benchmarks.into_iter().collect();
 
     while !shutdown.load(Ordering::Relaxed) {
         tokio::select! {
@@ -159,6 +175,25 @@ async fn run_gateway_async(
                 .await
             {
                 eprintln!("nats: publish InternalCrossNotice failed, dropping: {err}");
+            }
+        }
+
+        while let Ok(record) = tracker_rx.pop() {
+            let msg_id = uuid::Uuid::now_v7().to_string();
+            let benchmark = tracker_benchmarks.get(&record.book).copied();
+            let subject = convert::tracker_subject(record.book);
+            let pb_record = convert::tracker_record_to_pb(
+                &record,
+                benchmark,
+                sampling_interval_s,
+                msg_id,
+                now_ns(),
+            );
+            if let Err(err) = client
+                .publish(subject, pb_record.encode_to_vec().into())
+                .await
+            {
+                eprintln!("nats: publish TrackerAnalytics failed, dropping: {err}");
             }
         }
     }

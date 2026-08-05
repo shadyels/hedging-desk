@@ -1,8 +1,8 @@
 //! Kafka producer thread (P1.M4 Slice 2): drains the `posttrade` `rtrb` ring,
-//! encodes each event via `Schemas::encode` (raw Avro datum, no Confluent
-//! magic-byte framing), and publishes it to its `posttrade.*` topic keyed per
-//! `topic_and_key` (ADR-002). Non-async, off the hot path -- mirrors
-//! `d1-gateway-nats::run_gateway`'s poll/drain-loop shape, `rdkafka`'s
+//! encodes each event via `Schemas::encode`, wraps the datum in the Confluent
+//! wire format via `registry::frame`, and publishes it to its `posttrade.*`
+//! topic keyed per `topic_and_key` (ADR-002). Non-async, off the hot path --
+//! mirrors `d1-gateway-nats::run_gateway`'s poll/drain-loop shape, `rdkafka`'s
 //! `ThreadedProducer` instead of `async-nats`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,9 +13,10 @@ use d1_refdata::Universe;
 use rdkafka::ClientConfig;
 use rdkafka::producer::{BaseRecord, DefaultProducerContext, Producer, ThreadedProducer};
 
+use crate::registry::{SchemaIds, frame};
 use crate::{
     PostTradeError, PostTradeEvent, Schemas, Stamper, TOPIC_ALLOCATIONS, TOPIC_CROSSES,
-    TOPIC_ORDER_AUDIT, TOPIC_TRADES, topic_and_key,
+    TOPIC_ORDER_AUDIT, TOPIC_TRACKER_ANALYTICS, TOPIC_TRADES, topic_and_key,
 };
 
 /// Poll/backoff interval for the drain loop, matching
@@ -26,7 +27,7 @@ const FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the startup topic-existence metadata fetch waits for the broker.
 const METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Run the Kafka producer until `shutdown` is set: verify the four
+/// Run the Kafka producer until `shutdown` is set: verify the five
 /// `posttrade.*` topics already exist, then drain `rx` to empty each poll,
 /// encoding (via `stamper`) and publishing each event. Blocks the calling
 /// thread -- spawn it from `crates/d1/src/lib.rs::spawn`, same shape as
@@ -40,6 +41,7 @@ const METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 /// again, so draining it to empty here really does pick up every event.
 pub fn run_producer(
     brokers: &str,
+    registry_url: &str,
     universe: Universe,
     mut rx: rtrb::Consumer<PostTradeEvent>,
     mut stamper: Stamper,
@@ -63,9 +65,21 @@ pub fn run_producer(
     check_topics(&producer)?;
 
     let schemas = Schemas::new()?;
+    // Register BEFORE the drain loop: once an event is popped off the ring it
+    // is gone, so an id lookup that could fail mid-loop would mean silently
+    // dropping booked records. Resolving all four up front makes every
+    // subsequent `for_topic` infallible in practice.
+    let schema_ids = SchemaIds::register(registry_url)?;
 
     while !shutdown.load(Ordering::Relaxed) {
-        if !drain(&mut rx, &schemas, &universe, &mut stamper, &producer) {
+        if !drain(
+            &mut rx,
+            &schemas,
+            &schema_ids,
+            &universe,
+            &mut stamper,
+            &producer,
+        ) {
             thread::sleep(POLL_INTERVAL);
         }
     }
@@ -80,17 +94,25 @@ pub fn run_producer(
     // caller's ordered-shutdown contract (this function's doc comment),
     // this pass is provably complete, not just a best-effort mop-up: `rx`
     // cannot receive anything new once `shutdown` is observably `true`.
-    drain(&mut rx, &schemas, &universe, &mut stamper, &producer);
+    drain(
+        &mut rx,
+        &schemas,
+        &schema_ids,
+        &universe,
+        &mut stamper,
+        &producer,
+    );
 
     producer.flush(FLUSH_TIMEOUT)?;
     Ok(())
 }
 
-/// Drain `rx` to empty, encoding and publishing each event. Returns whether
-/// any event was processed, so the caller knows whether to back off.
+/// Drain `rx` to empty, encoding, framing and publishing each event. Returns
+/// whether any event was processed, so the caller knows whether to back off.
 fn drain(
     rx: &mut rtrb::Consumer<PostTradeEvent>,
     schemas: &Schemas,
+    schema_ids: &SchemaIds,
     universe: &Universe,
     stamper: &mut Stamper,
     producer: &ThreadedProducer<DefaultProducerContext>,
@@ -99,14 +121,28 @@ fn drain(
 
     while let Ok(event) = rx.pop() {
         did_work = true;
-        let bytes = match schemas.encode(&event, universe, stamper) {
-            Ok(bytes) => bytes,
+        let (topic, key) = topic_and_key(&event);
+        // Resolved before encoding so a missing id costs no `Stamper` state:
+        // `encode` mints ids/timestamps as a side effect, and burning them on
+        // an event that is then dropped would put the golden-file sequence
+        // out of step with the records actually published.
+        let Some(schema_id) = schema_ids.for_topic(topic) else {
+            eprintln!(
+                "d1-posttrade: {}, dropping event",
+                PostTradeError::UnknownTopic(topic.to_owned())
+            );
+            continue;
+        };
+        let datum = match schemas.encode(&event, universe, stamper) {
+            Ok(datum) => datum,
             Err(err) => {
                 eprintln!("d1-posttrade: encode failed, dropping event: {err}");
                 continue;
             }
         };
-        let (topic, key) = topic_and_key(&event);
+        // Confluent wire format (ADR-002): consumers resolve the writer
+        // schema from this id rather than needing out-of-band knowledge.
+        let bytes = frame(schema_id, &datum);
         // ponytail: log-and-drop on a local-queue-full send, same demo
         // ceiling as every `rtrb` ring in `crates/d1` -- a single demo
         // session, not a retry/backpressure protocol yet.
@@ -119,7 +155,7 @@ fn drain(
     did_work
 }
 
-/// Verify the four `posttrade.*` topics already exist on the broker before
+/// Verify the five `posttrade.*` topics already exist on the broker before
 /// this producer starts sending -- a hard startup error, not a warning, if
 /// any are missing.
 ///
@@ -137,6 +173,7 @@ fn check_topics(producer: &ThreadedProducer<DefaultProducerContext>) -> Result<(
         TOPIC_CROSSES,
         TOPIC_ALLOCATIONS,
         TOPIC_ORDER_AUDIT,
+        TOPIC_TRACKER_ANALYTICS,
     ]
     .into_iter()
     .filter(|&topic| !metadata.topics().iter().any(|t| t.name() == topic))

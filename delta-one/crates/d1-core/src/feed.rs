@@ -22,4 +22,15 @@ pub struct FeedTick {
     pub last_px_e9: i64,
     /// Exchange timestamp, nanoseconds since Unix epoch.
     pub exch_ts_ns: u64,
+    /// Per-share cash dividend, fixed-point ×10⁹; `0` on ordinary ticks.
+    /// Riding the same tick stream as the price update (rather than a
+    /// dedicated corporate-action ring) keeps the cash credit and the
+    /// ex-div price move deterministically ordered relative to each other
+    /// -- one field is cheaper than a 9th ring plus a producer/drain branch
+    /// for a single demo dividend (P1.M5 Slice 1).
+    ///
+    /// ponytail: this covers exactly ONE corporate-action type (cash
+    /// dividend). A second kind (e.g. a stock split) gets its own
+    /// transport rather than growing this struct further.
+    pub div_per_share_e9: i64,
 }

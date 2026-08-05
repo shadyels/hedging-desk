@@ -13,14 +13,33 @@
 
 pub mod convert;
 pub mod producer;
+pub mod registry;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use d1_analytics::TrackerRecord;
 use d1_core::{BookId, ClOrdId, ExecId, InstrumentId, OrderStatus, Side};
 use uuid::Uuid;
 
 pub use convert::Schemas;
 pub use producer::run_producer;
+pub use registry::{FRAME_LEN, MAGIC_BYTE, SchemaIds, frame};
+
+/// Everything the post-trade plane needs to run: a Kafka broker list and the
+/// Schema Registry backing it (ADR-002).
+///
+/// One struct rather than two independent options because the registry is
+/// not optional *given* Kafka — a producer that cannot resolve schema ids
+/// would publish records no consumer can decode. Bundling them makes
+/// "Kafka enabled, registry absent" unconstructable, per `delta-one/CLAUDE.md`'s
+/// rule that unrepresentable states should be unconstructable via types.
+#[derive(Debug, Clone)]
+pub struct PostTradeConfig {
+    /// `bootstrap.servers` for the Kafka producer.
+    pub brokers: String,
+    /// Base URL of the Confluent Schema Registry (e.g. `http://localhost:8081`).
+    pub registry_url: String,
+}
 
 /// Fixed `booked_ns`/`ts_ns` value `Stamper::Fixed` stamps onto every
 /// record, so a golden-file encoder run is reproducible byte-for-byte
@@ -89,6 +108,11 @@ pub const TOPIC_CROSSES: &str = "posttrade.crosses";
 pub const TOPIC_ALLOCATIONS: &str = "posttrade.allocations";
 /// Kafka topic for the order audit trail (ADR-002), keyed by `cl_ord_id`.
 pub const TOPIC_ORDER_AUDIT: &str = "posttrade.orders.audit";
+/// Kafka topic for the daily index-tracker analytics record (ADR-010 §4),
+/// keyed by `book_id`. Unlike the four topics above, exactly one record is
+/// published per tracker book per session (`crates/d1/src/lib.rs::run_core`
+/// pushes it after the drain loop exits, never on a periodic cadence).
+pub const TOPIC_TRACKER_ANALYTICS: &str = "posttrade.tracker.analytics";
 
 /// Destination topic and partition key for one post-trade event. The key is
 /// rendered with the exact same id-string logic `convert.rs` uses for the
@@ -108,12 +132,15 @@ pub fn topic_and_key(event: &PostTradeEvent) -> (&'static str, String) {
         PostTradeEvent::OrderAudit(o) => {
             (TOPIC_ORDER_AUDIT, convert::clordid_to_string(&o.cl_ord_id))
         }
+        PostTradeEvent::Tracker(r, _sampling_interval_s) => {
+            (TOPIC_TRACKER_ANALYTICS, r.book.0.to_string())
+        }
     }
 }
 
-/// One post-trade event to encode. Mirrors the four Avro record types in
+/// One post-trade event to encode. Mirrors the five Avro record types in
 /// `protocol/avro/` (`posttrade_trade`, `posttrade_cross`,
-/// `posttrade_allocation`, `order_audit`).
+/// `posttrade_allocation`, `order_audit`, `tracker_analytics`).
 #[derive(Debug, Clone, Copy)]
 pub enum PostTradeEvent {
     /// A booked trade leg (external fill or internal cross leg).
@@ -124,6 +151,16 @@ pub enum PostTradeEvent {
     Allocation(Allocation),
     /// An order state transition, for compliance replay.
     OrderAudit(OrderAudit),
+    /// One tracker book's end-of-session analytics (ADR-010 §4), plus the
+    /// `sampling_interval_s` the record was sampled at
+    /// (`d1.toml [tracker]`, `TrackerConfig::sampling_interval_s`).
+    /// `TrackerRecord` itself (`d1-analytics`, the pure calculator's output
+    /// type) carries no notion of its own sampling cadence -- a consumer
+    /// cannot interpret `tracking_error_ann_e9` without knowing how long a
+    /// period is, so this is carried alongside the record rather than
+    /// threading it as a separate parameter through `Schemas::encode` and
+    /// `run_producer`.
+    Tracker(TrackerRecord, u32),
 }
 
 /// Which side of a trade produced a `TradeLeg`: an external venue fill, or
@@ -282,4 +319,47 @@ pub enum PostTradeError {
         "missing Kafka topic(s): {0} -- provision them first (see scripts/demo.sh) before starting d1's post-trade producer"
     )]
     MissingTopics(String),
+    /// Registering a schema with the Confluent Schema Registry failed —
+    /// unreachable registry, or a non-2xx response (e.g. a schema rejected
+    /// as BACKWARD-incompatible). Hard failure: without an id there is no
+    /// valid Confluent frame, and publishing unframed records would leave
+    /// the compliance topics undecodable (ADR-002).
+    #[error("schema registry: registering subject {subject} at {url} failed: {source}")]
+    SchemaRegistry {
+        /// Subject being registered (`<topic>-value`).
+        subject: String,
+        /// Full URL of the registration request.
+        url: String,
+        /// Underlying transport or status error.
+        source: Box<ureq::Error>,
+    },
+    /// The registry answered, but not with a usable schema id.
+    #[error("schema registry: subject {subject} returned no usable schema id: {body}")]
+    SchemaRegistryResponse {
+        /// Subject being registered (`<topic>-value`).
+        subject: String,
+        /// The response body (or a description of why the id was unusable).
+        body: String,
+    },
+    /// A post-trade event mapped to a topic with no registered schema id.
+    /// Unreachable for the five `posttrade.*` topics `topic_and_key` emits;
+    /// guarded rather than defaulted because a wrong id decodes to garbage.
+    #[error("no registered schema id for topic {0}")]
+    UnknownTopic(String),
+    /// A `u64` timestamp (e.g. `TrackerRecord::window_end_ns`) did not fit in
+    /// the Avro `long` (`i64`) field it maps to.
+    #[error("timestamp {0} does not fit in an Avro `long` (i64)")]
+    TimestampOverflow(u64),
+    /// A `TrackerRecord.book` has no resolvable benchmark in the refdata
+    /// universe: either the book itself has no entry in
+    /// `Universe::tracker_books` (unreachable in practice -- every
+    /// `TrackerRecord` this crate ever sees was produced for a book drawn
+    /// from that same list, `crates/d1/src/lib.rs::run_core`'s
+    /// `tracker_states`), or its `benchmark_symbol` (already validated
+    /// against the benchmarks map by `d1-refdata::parse`) is not itself
+    /// listed as a quotable instrument in the universe. Guarded rather than
+    /// defaulted -- same posture as `UnknownTopic`: a made-up symbol would
+    /// silently mislabel a compliance record.
+    #[error("book {0:?} has no resolvable tracker benchmark in the refdata universe")]
+    UnknownTrackerBenchmark(BookId),
 }

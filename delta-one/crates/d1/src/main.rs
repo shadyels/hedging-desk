@@ -15,8 +15,14 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use d1::{FixConfig, StartupOrder, spawn};
+use d1::{FixConfig, PostTradeConfig, StartupOrder, spawn};
 use d1_core::{BookId, InstrumentId, Side};
+
+/// Relative to `delta-one/`, this binary's cwd -- same convention as
+/// `DEFAULT_UNIVERSE` below, one level shallower since `d1.toml` lives
+/// directly in `delta-one/`. No `--config` CLI flag (YAGNI,
+/// `crates/d1/src/config.rs`'s own doc comment).
+const DEFAULT_D1_CONFIG: &str = "d1.toml";
 
 /// Must match `crates/d1-gateway-fix/initiator.cfg`'s `[SESSION]` block.
 const SENDER_COMP_ID: &str = "D1";
@@ -26,6 +32,9 @@ const DEFAULT_INITIATOR_CFG: &str = "crates/d1-gateway-fix/initiator.cfg";
 const DEFAULT_NATS_URL: &str = "127.0.0.1:4222";
 /// Kafka broker port (`deploy/docker-compose.yml`'s `PLAINTEXT_HOST` listener).
 const DEFAULT_KAFKA_BROKERS: &str = "localhost:9092";
+/// Confluent Schema Registry (`deploy/docker-compose.yml`); same endpoint
+/// `scripts/schema-check.sh` uses for the CI compatibility gate.
+const DEFAULT_SCHEMA_REGISTRY: &str = "http://localhost:8081";
 /// Relative to `delta-one/`, this binary's cwd (`justfile`'s `cd delta-one && cargo run -p d1`).
 const DEFAULT_UNIVERSE: &str = "../protocol/refdata/universe.json";
 const MAIN_POLL_INTERVAL: Duration = Duration::from_millis(5);
@@ -36,12 +45,18 @@ struct Args {
     nats_url: String,
     universe: PathBuf,
     kafka_brokers: String,
+    schema_registry: String,
 }
 
 fn main() -> Result<()> {
     let args = parse_args()?;
 
     let universe = d1_refdata::load(&args.universe).context("loading universe refdata")?;
+    // Hard startup error on a missing file or missing `[tracker]` section
+    // (`crates/d1/src/config.rs`'s own doc comment) -- same fail-loud
+    // posture as the policy gate below, never a silent sampling default.
+    let tracker_cfg =
+        d1::config::load(std::path::Path::new(DEFAULT_D1_CONFIG)).context("loading d1 config")?;
     // ADR-005 §4: the cross reference-price policy is compliance-visible and
     // must never be a silent default. Parse it at startup so a typo in refdata
     // kills the process here rather than mispricing internal risk transfers.
@@ -94,7 +109,11 @@ fn main() -> Result<()> {
         instrument_ids,
         policy,
         universe,
-        Some(args.kafka_brokers),
+        tracker_cfg,
+        Some(PostTradeConfig {
+            brokers: args.kafka_brokers,
+            registry_url: args.schema_registry,
+        }),
         // Deterministic/`Stamper::Fixed` mode is a test-only seam
         // (`d1::spawn`'s `deterministic` param, driven directly by
         // `tests/golden_posttrade.rs`) -- deliberately not exposed as a CLI
@@ -162,6 +181,7 @@ fn parse_args() -> Result<Args> {
     let mut nats_url = DEFAULT_NATS_URL.to_string();
     let mut universe = PathBuf::from(DEFAULT_UNIVERSE);
     let mut kafka_brokers = DEFAULT_KAFKA_BROKERS.to_string();
+    let mut schema_registry = DEFAULT_SCHEMA_REGISTRY.to_string();
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -203,6 +223,7 @@ fn parse_args() -> Result<Args> {
             "--nats-url" => nats_url = next_arg(&mut args, "--nats-url")?,
             "--universe" => universe = PathBuf::from(next_arg(&mut args, "--universe")?),
             "--kafka-brokers" => kafka_brokers = next_arg(&mut args, "--kafka-brokers")?,
+            "--schema-registry" => schema_registry = next_arg(&mut args, "--schema-registry")?,
             other => bail!("unknown argument '{other}'"),
         }
     }
@@ -221,6 +242,7 @@ fn parse_args() -> Result<Args> {
         nats_url,
         universe,
         kafka_brokers,
+        schema_registry,
     })
 }
 

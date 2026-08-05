@@ -1,8 +1,9 @@
-//! Scenario YAML parsing (sim/CLAUDE.md #3). M1 only drives `quote`/`gap`
-//! actions — `exo_book_event`/`dividend`/`expect` entries parse fine (so the
-//! flagship `tracker-flow.yaml` loads without error) but are ignored: no EXO
-//! book, order path, or tracker analytics exist yet (docs/ROADMAP.md
-//! P1.M2/P1.M3/P1.M5).
+//! Scenario YAML parsing (sim/CLAUDE.md #3). M1 only drove `quote`/`gap`
+//! actions; P1.M5 Slice 1 adds `dividend` (credits per-book cash via
+//! `PositionKeeper::credit_dividend`, see `replay.rs`). `exo_book_event`/
+//! `expect` entries still parse fine (so the flagship `tracker-flow.yaml`
+//! loads without error) but are ignored: no EXO book or order path exist yet
+//! (docs/ROADMAP.md P1.M2/P1.M3).
 
 use std::path::Path;
 
@@ -40,6 +41,9 @@ pub struct TimelineEntry {
     pub ask: Option<f64>,
     /// `gap` target mid price (decimal, converted to fixed-point at this boundary).
     pub to_mid: Option<f64>,
+    /// `dividend` per-share cash amount (decimal, converted to fixed-point
+    /// at this boundary, same as `bid`/`ask`/`to_mid`).
+    pub amount_per_share: Option<f64>,
 }
 
 /// Load and parse a scenario YAML file at `path`.

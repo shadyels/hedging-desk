@@ -34,7 +34,10 @@ d1-release:
     cd delta-one && cargo build --release
 
 bench:
-    cd delta-one && cargo bench   # release profile enforced by criterion config; HDR histograms to target/bench
+    # Redirect stdout: cycle.rs's per-parent-order println! emits ~245 MB per
+    # run and buries the HDR report lines (docs/PONYTAIL-DEBT.md). Read the
+    # p50/p99/p99.9 back out of bench.log.
+    cd delta-one && cargo bench > target/bench.log 2>&1; grep -E 'p50=|NOTE:' target/bench.log   # release profile enforced by criterion config; HDR histograms to target/bench
 
 # --- exo (Python) --------------------------------------------------------
 exo:

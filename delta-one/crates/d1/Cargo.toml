@@ -15,9 +15,12 @@ d1-gateway-nats = { path = "../d1-gateway-nats" }
 d1-refdata = { path = "../d1-refdata" }
 d1-netting = { path = "../d1-netting" }
 d1-posttrade = { path = "../d1-posttrade" }
+d1-analytics = { path = "../d1-analytics" }
 rtrb = "0.3"
 anyhow = "1"
 ctrlc = "3"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 
 [dev-dependencies]
 # src/posttrade.rs's #[cfg(test)] mod is the only remaining user (sample
@@ -38,3 +41,12 @@ proptest = "1"
 apache-avro = "0.21"
 serde_json = "1"
 rdkafka = { version = "0.39", default-features = false, features = ["cmake-build"] }
+# tick_to_trade.rs: composed T2T bench (ADR-004 §5) -- HDR histograms +
+# criterion regression tracking for the four live-path stages benched end to
+# end, not summed from four independently-benched stages.
+criterion = "0.5"
+hdrhistogram = "7"
+
+[[bench]]
+name = "tick_to_trade"
+harness = false

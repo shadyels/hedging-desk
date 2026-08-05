@@ -3,6 +3,7 @@
 //! state (that lives in `crate::lib`). ADR-004: proto never enters
 //! `d1-core`; mirrors `d1-gateway-fix::convert`'s role for the FIX side.
 
+use d1_analytics::TrackerRecord;
 use d1_core::{
     BookId, ClOrdId, CrossRecord, ExecId, ExecReport, InstrumentId, OrderStatus, Side, Target,
     TransferRequest,
@@ -12,6 +13,7 @@ use crate::error::NatsError;
 use crate::pb::hedging::common::v1::{InstrumentRef, Meta, Side as PbSide};
 use crate::pb::hedging::live::v1::{
     ExecutionReport, InternalCrossNotice, InternalTransferRequest, OrdStatus, TargetPosition,
+    TrackerAnalytics, tracker_analytics,
 };
 
 /// Subject `InternalCrossNotice` publishes to (`protocol/nats-subjects.md`:
@@ -115,6 +117,64 @@ pub fn cross_record_to_pb(
         qty_e2: record.qty_e2,
         ref_px_e9: record.ref_px_e9,
         px_policy_id: record.policy_id.to_string(),
+    }
+}
+
+/// Subject a `TrackerAnalytics` for `book` publishes to
+/// (`protocol/nats-subjects.md`: `d1.tracker.<book>`), numeric token
+/// matching `exec_subject`'s shape.
+#[must_use]
+pub fn tracker_subject(book: BookId) -> String {
+    format!("d1.tracker.{}", book.0)
+}
+
+/// Build the outbound `TrackerAnalytics` for a core `d1_analytics::TrackerRecord`,
+/// stamping a fresh `Meta` block (`protocol/CLAUDE.md`: every NATS payload
+/// carries one). Mirrors `exec_report_to_pb`/`cross_record_to_pb`.
+///
+/// `benchmark` is the tracker book's benchmark instrument, resolved from its
+/// `benchmark_symbol` (`d1_refdata::TrackerBook`) once at startup in the core
+/// thread -- `TrackerRecord` itself stays id-based on `book` only (ADR-010's
+/// pure-calculator boundary, `d1-analytics`'s own doc comment), so this
+/// takes the resolved id as a separate parameter rather than growing that
+/// struct. `None` when the benchmark symbol has no matching entry in the
+/// instrument universe (populates only `instrument_id`, matching
+/// `exec_report_to_pb`'s existing `InstrumentRef` population style).
+///
+/// P1.M5 is ex-post only (ADR-010 decision 1): `kind` is always
+/// `KIND_EX_POST`. `sampling_interval_s` comes from `d1.toml [tracker]`
+/// (`crates/d1/src/config.rs`) -- a TE sampled at 60s is not comparable to
+/// one sampled daily, so a consumer cannot interpret `tracking_error_ann_e9`
+/// without it.
+#[must_use]
+pub fn tracker_record_to_pb(
+    record: &TrackerRecord,
+    benchmark: Option<InstrumentId>,
+    sampling_interval_s: u32,
+    msg_id: String,
+    sent_ns: u64,
+) -> TrackerAnalytics {
+    TrackerAnalytics {
+        meta: Some(Meta {
+            msg_id,
+            producer: "delta-one".to_string(),
+            sent_ns,
+            schema_version: 1,
+        }),
+        book_id: record.book.0,
+        benchmark: benchmark.map(|id| InstrumentRef {
+            instrument_id: id.0,
+            ..Default::default()
+        }),
+        kind: tracker_analytics::Kind::ExPost as i32,
+        tracking_error_ann_e9: record.tracking_error_ann_e9,
+        tracking_diff_e9: record.tracking_diff_e9,
+        cash_weight_e9: record.cash_weight_e9,
+        cash_drag_e9: record.cash_drag_e9,
+        n_obs: record.n_obs,
+        window_start_ns: record.window_start_ns,
+        window_end_ns: record.window_end_ns,
+        sampling_interval_s,
     }
 }
 
@@ -240,6 +300,63 @@ mod tests {
         assert_eq!(pb.qty_e2, 800_000);
         assert_eq!(pb.ref_px_e9, 150_000_000_000);
         assert_eq!(pb.px_policy_id, "ARRIVAL_MID");
+    }
+
+    #[test]
+    fn tracker_subject_matches_taxonomy() {
+        assert_eq!(tracker_subject(BookId(1)), "d1.tracker.1");
+    }
+
+    #[test]
+    fn tracker_record_to_pb_maps_all_fields() {
+        let record = TrackerRecord {
+            book: BookId(1),
+            tracking_error_ann_e9: 67_349_822,
+            tracking_diff_e9: 18_000_000,
+            cash_weight_e9: 100_000_000,
+            cash_drag_e9: 1_168_254,
+            n_obs: 2,
+            window_start_ns: 1_000_000_000,
+            window_end_ns: 2_000_000_000,
+        };
+        let pb = tracker_record_to_pb(
+            &record,
+            Some(InstrumentId(2001)),
+            60,
+            "msg-1".to_string(),
+            42,
+        );
+
+        assert_eq!(pb.meta.as_ref().unwrap().msg_id, "msg-1");
+        assert_eq!(pb.meta.as_ref().unwrap().producer, "delta-one");
+        assert_eq!(pb.meta.as_ref().unwrap().sent_ns, 42);
+        assert_eq!(pb.book_id, 1);
+        assert_eq!(pb.benchmark.as_ref().unwrap().instrument_id, 2001);
+        assert_eq!(pb.kind, tracker_analytics::Kind::ExPost as i32);
+        assert_eq!(pb.tracking_error_ann_e9, 67_349_822);
+        assert_eq!(pb.tracking_diff_e9, 18_000_000);
+        assert_eq!(pb.cash_weight_e9, 100_000_000);
+        assert_eq!(pb.cash_drag_e9, 1_168_254);
+        assert_eq!(pb.n_obs, 2);
+        assert_eq!(pb.window_start_ns, 1_000_000_000);
+        assert_eq!(pb.window_end_ns, 2_000_000_000);
+        assert_eq!(pb.sampling_interval_s, 60);
+    }
+
+    #[test]
+    fn tracker_record_to_pb_none_benchmark_leaves_field_unset() {
+        let record = TrackerRecord {
+            book: BookId(1),
+            tracking_error_ann_e9: 0,
+            tracking_diff_e9: 0,
+            cash_weight_e9: 0,
+            cash_drag_e9: 0,
+            n_obs: 2,
+            window_start_ns: 0,
+            window_end_ns: 0,
+        };
+        let pb = tracker_record_to_pb(&record, None, 60, "msg-1".to_string(), 42);
+        assert!(pb.benchmark.is_none());
     }
 
     #[test]
