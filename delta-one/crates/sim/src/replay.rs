@@ -19,7 +19,7 @@ use d1_refdata::Universe;
 
 use crate::scenario;
 
-fn to_fixed_e9(px: f64) -> i64 {
+pub(crate) fn to_fixed_e9(px: f64) -> i64 {
     (px * 1_000_000_000.0).round() as i64
 }
 
@@ -124,7 +124,7 @@ pub fn run(scenario_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn resolve(universe: &Universe, symbol: &str, at_ms: u64) -> Result<InstrumentId> {
+pub(crate) fn resolve(universe: &Universe, symbol: &str, at_ms: u64) -> Result<InstrumentId> {
     universe
         .symbol_to_id
         .get(symbol)

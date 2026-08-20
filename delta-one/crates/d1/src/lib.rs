@@ -8,6 +8,7 @@ pub mod config;
 pub mod cycle;
 pub mod feed;
 pub mod posttrade;
+pub mod tickfile; // beside `feed`: the tick-file feed producer's counterpart
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -76,7 +77,10 @@ pub struct RunHandles {
     pub fix: JoinHandle<Result<(), FixError>>,
     /// The NATS gateway thread.
     pub nats: JoinHandle<Result<(), NatsError>>,
-    /// The synthetic feed-ingest producer thread.
+    /// The feed-ingest producer thread -- `feed::run_feed_producer` (the
+    /// synthetic random walk) when `spawn`'s `feed_ticks` is `None`,
+    /// `feed::run_tick_file_producer` (a parsed scenario tick file) when it
+    /// is `Some`.
     pub feed: JoinHandle<()>,
     /// The Kafka post-trade producer thread, `Some` only when a broker
     /// address was given (`posttrade_cfg`) -- `None` in tests, which run
@@ -93,6 +97,25 @@ pub struct RunHandles {
     /// `core`, and ONLY THEN store `true` here before joining `posttrade`.
     /// `main.rs` and `tests/golden_posttrade.rs` follow this.
     pub posttrade_shutdown: Option<Arc<AtomicBool>>,
+}
+
+/// Which feed producer `spawn` starts for a session, resolved once from
+/// `spawn`'s `feed_ticks` parameter (its `feed_source` binding) before
+/// `instrument_ids`/`feed_ticks` move into their respective threads/arms.
+enum FeedSource {
+    /// `feed::run_feed_producer`'s synthetic random walk.
+    Synthetic {
+        /// Every instrument in the keeper universe -- root CLAUDE.md
+        /// invariant 2: an instrument that never ticks prices its internal
+        /// crosses at `ref_px_e9 = 0`.
+        instruments: Vec<InstrumentId>,
+        /// `0` in deterministic mode (the golden-file path), `feed::DRIFT_E9`
+        /// otherwise.
+        drift_e9: i64,
+    },
+    /// `feed::run_tick_file_producer`, replaying a pre-parsed scenario tick
+    /// file (`crates/d1/src/tickfile.rs`).
+    TickFile(Vec<FeedTick>),
 }
 
 /// Build the `rtrb` rings (ADR-013) and spawn the core/FIX/NATS/feed
@@ -130,6 +153,19 @@ pub struct RunHandles {
 /// producer at `1`) so a `cross_id` can never collide with an unrelated
 /// `msg_id` in the golden fixtures -- a `grep` for one id space should never
 /// spuriously hit the other.
+///
+/// `feed_ticks` selects the feed source: `None` runs `feed::run_feed_producer`
+/// (today's synthetic random walk, unchanged), `Some(ticks)` runs
+/// `feed::run_tick_file_producer` over an already-parsed scenario tick file
+/// instead (`crates/d1/src/tickfile.rs`). A pre-parsed `Vec<FeedTick>` rather
+/// than a `PathBuf`: file/parse errors then become a hard startup error in
+/// `main.rs` alongside the `universe`/`tracker_cfg`/`policy` gates, instead
+/// of dying silently inside a `JoinHandle<()>`, and it keeps `spawn` itself
+/// I/O-free. `Some(_)` overrides `deterministic`'s feed drift entirely --
+/// drift is meaningless when prices come from a file, not a running walk --
+/// and `run_core`'s t=0 prime still runs for EVERY instrument regardless of
+/// feed source, so an instrument the tick file never mentions still has a
+/// priced quote for crosses to reference.
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn spawn(
@@ -143,6 +179,7 @@ pub fn spawn(
     tracker_cfg: TrackerConfig,
     posttrade_cfg: Option<PostTradeConfig>,
     deterministic: bool,
+    feed_ticks: Option<Vec<FeedTick>>,
     shutdown: &Arc<AtomicBool>,
 ) -> RunHandles {
     let (fix_outbound_tx, fix_outbound_rx) = rtrb::RingBuffer::<Order>::new(RING_CAPACITY);
@@ -164,14 +201,29 @@ pub fn spawn(
     } else {
         Stamper::Wall
     };
-    // Cloned before `instrument_ids` moves into the core thread: the feed
-    // must tick every instrument in the keeper universe, not just the CLI
-    // startup order's, or crosses on the others price at `ref_px_e9 = 0`.
-    let feed_instruments = instrument_ids.clone();
+    // Resolved once here, before `instrument_ids` moves into the core
+    // thread below and `feed_ticks` moves into `feed_source`: which feed
+    // producer this session runs, and everything its arm needs, so the feed
+    // thread's spawn site (further down) is a single match with no
+    // `Option`/`unwrap_or_default` left over. Computed here rather than
+    // lexically inside the `Synthetic` arm at that spawn site only because
+    // `instrument_ids` has already moved into the core thread's closure by
+    // the time that site runs.
+    let feed_source = match feed_ticks {
+        Some(ticks) => FeedSource::TickFile(ticks),
+        None => FeedSource::Synthetic {
+            // Every instrument in the keeper universe, not just the CLI
+            // startup order's, or crosses on the others price at
+            // `ref_px_e9 = 0`.
+            instruments: instrument_ids.clone(),
+            drift_e9: if deterministic { 0 } else { feed::DRIFT_E9 },
+        },
+    };
     // `universe` moves whole into the Kafka producer thread below (P1.M4
     // Slice 2) -- the core thread and the NATS gateway thread both need a
     // tracker-book slice of it too, so clone just what each needs BEFORE
-    // that move, same precedent as `feed_instruments` above.
+    // that move, same precedent as `instrument_ids.clone()` inside
+    // `feed_source` above.
     let tracker_books = universe.tracker_books.clone();
     let cash_yield_annual_e9 = universe.cash_yield_annual_e9;
     // Resolved once here (the only place with both `tracker_books` and
@@ -245,10 +297,15 @@ pub fn spawn(
         )
     });
 
-    let feed_drift_e9 = if deterministic { 0 } else { feed::DRIFT_E9 };
     let feed_shutdown = Arc::clone(shutdown);
-    let feed = thread::spawn(move || {
-        feed::run_feed_producer(&feed_instruments, feed_tx, feed_drift_e9, &feed_shutdown);
+    let feed = thread::spawn(move || match feed_source {
+        FeedSource::Synthetic {
+            instruments,
+            drift_e9,
+        } => feed::run_feed_producer(&instruments, feed_tx, drift_e9, &feed_shutdown),
+        FeedSource::TickFile(ticks) => {
+            feed::run_tick_file_producer(&ticks, feed_tx, &feed_shutdown)
+        }
     });
 
     // `posttrade_cfg: None` (tests, no broker available) -- don't spawn: the

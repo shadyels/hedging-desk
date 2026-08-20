@@ -33,6 +33,14 @@ d1 book="1" instrument="1001" side="buy" qty="10000" px="0":
 d1-release:
     cd delta-one && cargo build --release
 
+# Feed d1 from a scenario timeline instead of feed.rs's synthetic walk.
+# NOTE: d1.toml's [tracker].sampling_interval_s = 60 vs a 9s scenario means
+# ZERO tracker samples on this path -- see docs/PONYTAIL-DEBT.md.
+# Run `just sim-acceptor` in another terminal first.
+d1-scenario scenario="tracker-flow" book="1" instrument="1001" side="buy" qty="10000" px="0":
+    cd delta-one && cargo run -p sim -- --mode emit-ticks --scenario ../sim/scenarios/{{scenario}}.yaml --out target/ticks/{{scenario}}.ticks
+    cd delta-one && cargo run -p d1 -- --book {{book}} --instrument {{instrument}} --side {{side}} --qty {{qty}} --px {{px}} --feed-ticks target/ticks/{{scenario}}.ticks
+
 bench:
     # Redirect stdout: cycle.rs's per-parent-order println! emits ~245 MB per
     # run and buries the HDR report lines (docs/PONYTAIL-DEBT.md). Read the

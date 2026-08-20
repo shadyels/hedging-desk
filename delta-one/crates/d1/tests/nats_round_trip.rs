@@ -243,6 +243,7 @@ fn target_position_round_trips_to_execution_report() {
         },
         None, // no Kafka broker in this test
         false,
+        None, // synthetic feed (see d1::spawn's feed_ticks)
         &shutdown,
     );
 

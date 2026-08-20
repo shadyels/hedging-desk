@@ -298,6 +298,7 @@ fn crosses_and_transfers_round_trip() {
         },
         None, // no Kafka broker in this test
         false,
+        None, // synthetic feed (see d1::spawn's feed_ticks)
         &shutdown,
     );
 

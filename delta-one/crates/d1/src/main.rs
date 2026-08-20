@@ -46,6 +46,9 @@ struct Args {
     universe: PathBuf,
     kafka_brokers: String,
     schema_registry: String,
+    /// Feed a scenario tick file (`sim --mode emit-ticks`) instead of
+    /// `d1::feed`'s synthetic random walk. `None` keeps today's default.
+    feed_ticks: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -81,6 +84,18 @@ fn main() -> Result<()> {
             args.startup.book,
             args.startup.instrument
         );
+    }
+
+    // Hard startup error on a missing/malformed tick file, same fail-loud
+    // posture as the gates above -- `d1::spawn` stays I/O-free, so this is
+    // the only place a bad `--feed-ticks` path can be reported.
+    let feed_ticks = args
+        .feed_ticks
+        .as_deref()
+        .map(|p| d1::tickfile::load(p).context("loading feed tick file"))
+        .transpose()?;
+    if let Some(ticks) = &feed_ticks {
+        d1::tickfile::report_coverage(ticks, &universe.instrument_ids);
     }
 
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -123,6 +138,7 @@ fn main() -> Result<()> {
         // invariant #4), and `FIXED_BOOKED_NS` would stamp every record with
         // the same fabricated timestamp on the compliance ledger.
         false,
+        feed_ticks,
         &shutdown,
     );
 
@@ -182,6 +198,7 @@ fn parse_args() -> Result<Args> {
     let mut universe = PathBuf::from(DEFAULT_UNIVERSE);
     let mut kafka_brokers = DEFAULT_KAFKA_BROKERS.to_string();
     let mut schema_registry = DEFAULT_SCHEMA_REGISTRY.to_string();
+    let mut feed_ticks: Option<PathBuf> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -224,6 +241,9 @@ fn parse_args() -> Result<Args> {
             "--universe" => universe = PathBuf::from(next_arg(&mut args, "--universe")?),
             "--kafka-brokers" => kafka_brokers = next_arg(&mut args, "--kafka-brokers")?,
             "--schema-registry" => schema_registry = next_arg(&mut args, "--schema-registry")?,
+            "--feed-ticks" => {
+                feed_ticks = Some(PathBuf::from(next_arg(&mut args, "--feed-ticks")?));
+            }
             other => bail!("unknown argument '{other}'"),
         }
     }
@@ -243,6 +263,7 @@ fn parse_args() -> Result<Args> {
         universe,
         kafka_brokers,
         schema_registry,
+        feed_ticks,
     })
 }
 
