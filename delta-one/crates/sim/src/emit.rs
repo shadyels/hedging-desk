@@ -120,11 +120,28 @@ fn expand(
                 let id = resolve(universe, symbol, entry.at_ms)?;
                 let bid_px_e9 = to_fixed_e9(bid);
                 let ask_px_e9 = to_fixed_e9(ask);
+                // `checked_add`, not `+`: `serde_yaml` accepts YAML-1.1
+                // `.inf`, and `to_fixed_e9`'s `f64 as i64` cast saturates
+                // rather than panicking, so a quote with `bid`/`ask: .inf`
+                // turns `bid_px_e9`/`ask_px_e9` into `i64::MAX` --
+                // `bid_px_e9 + ask_px_e9` then overflows `i64`.
+                // `[profile.release]` has `overflow-checks` off, so an
+                // unchecked add would silently wrap into a bogus price that
+                // `d1` then books as real (root CLAUDE.md invariant 1).
+                let Some(mid_sum_e9) = bid_px_e9.checked_add(ask_px_e9) else {
+                    bail!(
+                        "quote at {}ms instrument={:?}: bid_px_e9={} plus ask_px_e9={} overflows i64",
+                        entry.at_ms,
+                        id,
+                        bid_px_e9,
+                        ask_px_e9
+                    );
+                };
                 let tick = FeedTick {
                     instrument_id: id,
                     bid_px_e9,
                     ask_px_e9,
-                    last_px_e9: (bid_px_e9 + ask_px_e9) / 2,
+                    last_px_e9: mid_sum_e9 / 2,
                     exch_ts_ns: ns_from_at_ms(entry.at_ms)?,
                     div_per_share_e9: 0,
                 };
@@ -358,6 +375,23 @@ mod tests {
                 quote_entry(0, "AAPL", 187.50, 187.52),
                 dividend_entry(9_000, "AAPL", f64::NEG_INFINITY),
             ],
+        };
+
+        let err = expand(&scenario, &test_universe()).unwrap_err();
+        assert!(format!("{err:#}").contains("overflows"));
+    }
+
+    #[test]
+    fn quote_mid_overflow_is_a_checked_error_not_a_wrapped_price() {
+        // `.inf` parses through `serde_yaml`/`f64`, and `to_fixed_e9`'s
+        // `as i64` cast saturates it to `i64::MAX` -- `bid_px_e9 +
+        // ask_px_e9` must be rejected via `checked_add`, not silently
+        // wrapped.
+        let scenario = Scenario {
+            scenario: "overflow-quote".to_string(),
+            seed: 1,
+            universe: "universe.json".to_string(),
+            timeline: vec![quote_entry(0, "AAPL", f64::INFINITY, f64::INFINITY)],
         };
 
         let err = expand(&scenario, &test_universe()).unwrap_err();
