@@ -777,6 +777,7 @@ fn posttrade_golden_file() {
             registry_url: SCHEMA_REGISTRY.to_string(),
         }),
         true, // deterministic: pinned ids/timestamps/mid, the golden-file path
+        None, // synthetic feed (see d1::spawn's feed_ticks)
         &shutdown,
     );
 

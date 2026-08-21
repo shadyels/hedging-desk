@@ -3,6 +3,7 @@
 //! Implemented in P1.M1–P1.M2 (docs/ROADMAP.md). M1: `replay` mode only.
 
 mod acceptor;
+mod emit;
 mod replay;
 mod scenario;
 
@@ -31,6 +32,21 @@ enum Mode {
         sender_comp_id: String,
         target_comp_id: String,
     },
+    EmitTicks {
+        scenario: PathBuf,
+        out: PathBuf,
+    },
+}
+
+/// Which of the three run modes `--mode` selects. Distinct from `Mode`
+/// (this file's dispatch payload, built only once every flag has been
+/// parsed and each mode's required flags are known to be present) --
+/// hand-rolled like the rest of this file's arg parsing, no CLI crate.
+#[derive(Clone, Copy)]
+enum RunMode {
+    Replay,
+    Acceptor,
+    EmitTicks,
 }
 
 fn main() -> Result<()> {
@@ -42,17 +58,19 @@ fn main() -> Result<()> {
             sender_comp_id,
             target_comp_id,
         } => acceptor::run(&cfg, fill_model, &sender_comp_id, &target_comp_id),
+        Mode::EmitTicks { scenario, out } => emit::run(&scenario, &out),
     }
 }
 
 fn parse_args() -> Result<Mode> {
     let mut args = std::env::args().skip(1);
     let mut scenario: Option<PathBuf> = None;
-    let mut acceptor_mode = false;
+    let mut run_mode = RunMode::Replay;
     let mut cfg: Option<PathBuf> = None;
     let mut fill_model = FillModel::ImmediateFull;
     let mut sender_comp_id = DEFAULT_SENDER_COMP_ID.to_string();
     let mut target_comp_id = DEFAULT_TARGET_COMP_ID.to_string();
+    let mut out: Option<PathBuf> = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -67,11 +85,19 @@ fn parse_args() -> Result<Mode> {
                 let value = args
                     .next()
                     .ok_or_else(|| anyhow::anyhow!("--mode requires a value"))?;
-                acceptor_mode = match value.as_str() {
-                    "replay" => false,
-                    "acceptor" => true,
-                    other => bail!("unknown --mode '{other}' (want replay|acceptor)"),
+                run_mode = match value.as_str() {
+                    "replay" => RunMode::Replay,
+                    "acceptor" => RunMode::Acceptor,
+                    "emit-ticks" => RunMode::EmitTicks,
+                    other => bail!("unknown --mode '{other}' (want replay|acceptor|emit-ticks)"),
                 };
+            }
+            "--out" => {
+                out = Some(
+                    args.next()
+                        .map(PathBuf::from)
+                        .ok_or_else(|| anyhow::anyhow!("--out requires a path"))?,
+                );
             }
             "--cfg" => {
                 cfg = Some(
@@ -100,20 +126,30 @@ fn parse_args() -> Result<Mode> {
         }
     }
 
-    if acceptor_mode {
-        let cfg = cfg.unwrap_or_else(|| PathBuf::from(DEFAULT_ACCEPTOR_CFG));
-        Ok(Mode::Acceptor {
-            cfg,
-            fill_model,
-            sender_comp_id,
-            target_comp_id,
-        })
-    } else {
-        let scenario = scenario.ok_or_else(|| {
-            anyhow::anyhow!(
-                "usage: sim --scenario <path/to/scenario.yaml>  (or sim --mode acceptor)"
-            )
-        })?;
-        Ok(Mode::Replay(scenario))
+    match run_mode {
+        RunMode::Acceptor => {
+            let cfg = cfg.unwrap_or_else(|| PathBuf::from(DEFAULT_ACCEPTOR_CFG));
+            Ok(Mode::Acceptor {
+                cfg,
+                fill_model,
+                sender_comp_id,
+                target_comp_id,
+            })
+        }
+        RunMode::EmitTicks => {
+            let scenario = scenario
+                .ok_or_else(|| anyhow::anyhow!("--mode emit-ticks requires --scenario <path>"))?;
+            let out =
+                out.ok_or_else(|| anyhow::anyhow!("--mode emit-ticks requires --out <path>"))?;
+            Ok(Mode::EmitTicks { scenario, out })
+        }
+        RunMode::Replay => {
+            let scenario = scenario.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "usage: sim --scenario <path/to/scenario.yaml>  (or sim --mode acceptor|emit-ticks)"
+                )
+            })?;
+            Ok(Mode::Replay(scenario))
+        }
     }
 }
