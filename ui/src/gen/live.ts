@@ -331,7 +331,7 @@ export interface ValuationSnapshot {
 export interface ValuationSnapshot_ProductLine {
   /** desk trade id of the structured product */
   productId: string;
-  /** "autocallable" | "rc" | "brc" | "bonus" | "tarf" | "ptarf" | "barrier" */
+  /** "autocallable" | "rc" | "brc" | "bonus" | "tarf" | "ptarf" | "barrier" | "warrant_call" | "warrant_put" | "mini_long" | "mini_short" */
   productType: string;
   underlying:
     | InstrumentRef

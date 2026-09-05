@@ -314,7 +314,7 @@ pub mod valuation_snapshot {
         /// desk trade id of the structured product
         #[prost(string, tag = "1")]
         pub product_id: ::prost::alloc::string::String,
-        /// "autocallable" | "rc" | "brc" | "bonus" | "tarf" | "ptarf" | "barrier"
+        /// "autocallable" | "rc" | "brc" | "bonus" | "tarf" | "ptarf" | "barrier" | "warrant_call" | "warrant_put" | "mini_long" | "mini_short"
         #[prost(string, tag = "2")]
         pub product_type: ::prost::alloc::string::String,
         #[prost(message, optional, tag = "3")]
