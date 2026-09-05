@@ -6,8 +6,8 @@ Exotics pricing and rehedging service. Computes theoretical values and Greeks fo
 
 | Package | Role |
 |---------|------|
-| `models/`   | dynamics + numerics: GBM, Heston, Heston-local-vol (LSV, P4), MC engine, QMC (Sobol + Brownian bridge), variance reduction, (PDE solver in a later milestone) |
-| `products/` | payoff definitions: autocallable, barrier option, reverse convertible, barrier reverse convertible, bonus certificate, TARF, PTARF |
+| `models/`   | dynamics + numerics: GBM, Heston, Heston-local-vol (LSV, P4), MC engine, QMC (Sobol + Brownian bridge), variance reduction, Longstaff–Schwartz early-exercise engine (American warrants, P2.M2), (PDE solver in a later milestone) |
+| `products/` | payoff definitions: autocallable, barrier option, reverse convertible, barrier reverse convertible, bonus certificate, warrant (call/put, European and American), mini future (long/short), TARF, PTARF |
 | `greeks/`   | bump-and-revalue with common random numbers; pathwise where implemented |
 | `bus/`      | NATS client (official `nats-py`), Protobuf encode/decode, target publisher, fill/risk consumer |
 | `hedger/`   | Tier-2 optimizer (ADR-009): vega/liquidity QP over the option chain → `HedgeProposal`; rates mapping (rho per ccy bucket → futures qty) → `InternalTransferRequest` + RATES-IR targets |
@@ -16,7 +16,7 @@ Exotics pricing and rehedging service. Computes theoretical values and Greeks fo
 ## Product/model roadmap (do not skip ahead)
 
 1. **M1:** Barrier option + Autocallable under Heston, equity underlyings.
-2. **M2:** Reverse convertible, barrier reverse convertible, bonus certificate — same MC engine, new payoffs only. If M2 requires touching `models/`, the payoff abstraction is wrong; fix the abstraction.
+2. **M2:** Reverse convertible, barrier reverse convertible, bonus certificate, warrants (call and put, European **and American** exercise), mini futures (long and short: open-ended, daily financing accrual, stop-loss reset, continuous knock-out, residual-value settlement) — same MC engine, new payoffs only. **The M2 abstraction rule governs payoff additions:** if a new *payoff* requires touching `models/`, the payoff abstraction is wrong; fix the abstraction. **Exercise style is the sanctioned exception** — American warrants need a Longstaff–Schwartz early-exercise engine, which is a numerics property and legitimately lives in `models/` (ADR-006 Amendment 3). Adding LSM does **not** license any other `models/` change in M2. LSM is low-biased (a lower bound on the American value) and must regress the continuation value on `(S, v)`, not on `S` alone.
 3. **M3:** TARF and PTARF. These are FX products: same Heston-style dynamics on FX spot with domestic/foreign rate drift (Garman–Kohlhagen-style), monthly fixings, target-redemption knockout, path-dependent accumulated gain state. Calibration realism (FX smile) is explicitly out of demo scope — document the parameter set used, don't pretend it's calibrated.
 4. **P4.M3–M4 (mandatory, ADR-009):** hedge proposal optimizer with its property test (recomputed post-exposure from legs matches the claim within MC error); Heston-local-vol leverage surface; PDE cross-check pricer; calibration framework against sim-generated synthetic vanilla surfaces.
 
