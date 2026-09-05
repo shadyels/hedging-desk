@@ -15,12 +15,47 @@ Exotics pricing and rehedging service. Computes theoretical values and Greeks fo
 
 ## Product/model roadmap (do not skip ahead)
 
-1. **M1:** Barrier option + Autocallable under Heston, equity underlyings.
+1. **M1 (scope settled 2026-09-05, ADR-006 Amendment 4):** Barrier option + autocallable under Heston, equity underlyings. **Pricing and MC standard error only — no Greeks**; ADR-008's monitored set is consumed by target publication and lands with M4. Illustrative model parameters (`S0, r, q, v0, κ, θ, ξ, ρ` per underlying) live in an `exo.toml [models.*]` section, **never** in `protocol/refdata/universe.json` — EXO is their only consumer and they are explicitly uncalibrated, so the shared contract surface would lend them an authority they do not have. Product term sheets are `pytest` fixtures; there is no persisted product book until M4's portfolio loop needs one. The QE-vs-full-truncation-Euler choice is recorded in ADR-006 Amendment 4 §4, currently marked PENDING — M1 fills it.
 2. **M2:** Reverse convertible, barrier reverse convertible, bonus certificate, warrants (call and put, European **and American** exercise), mini futures (long and short: open-ended, daily financing accrual, stop-loss reset, continuous knock-out, residual-value settlement) — same MC engine, new payoffs only. **The M2 abstraction rule governs payoff additions:** if a new *payoff* requires touching `models/`, the payoff abstraction is wrong; fix the abstraction. **Exercise style is the sanctioned exception** — American warrants need a Longstaff–Schwartz early-exercise engine, which is a numerics property and legitimately lives in `models/` (ADR-006 Amendment 3). Adding LSM does **not** license any other `models/` change in M2. LSM is low-biased (a lower bound on the American value) and must regress the continuation value on `(S, v)`, not on `S` alone.
 3. **M3:** TARF and PTARF. These are FX products: same Heston-style dynamics on FX spot with domestic/foreign rate drift (Garman–Kohlhagen-style), monthly fixings, target-redemption knockout, path-dependent accumulated gain state. Calibration realism (FX smile) is explicitly out of demo scope — document the parameter set used, don't pretend it's calibrated.
 4. **P4.M3–M4 (mandatory, ADR-009):** hedge proposal optimizer with its property test (recomputed post-exposure from legs matches the claim within MC error); Heston-local-vol leverage surface; PDE cross-check pricer; calibration framework against sim-generated synthetic vanilla surfaces.
 
 Every priced product must have an analytic or semi-analytic cross-check test where one exists (e.g., Heston vanilla via characteristic function; barrier under Black–Scholes closed form with the model degenerated to BS). MC vs closed-form agreement within 3 standard errors is the acceptance test.
+
+## Engine design constraints — decide these in M1 or re-cut the engine in M2/M4
+
+These are not style preferences. Each one is invisible in M1's own deliverables and breaks a later
+milestone if M1 chooses the locally simpler option. Full reasoning in `docs/ROADMAP.md` (P2.M1
+risks) and ADR-006 Amendment 4.
+
+1. **Retain the path matrix; do not build a forward-streaming engine.** Longstaff–Schwartz regresses
+   the continuation value *backwards* over stored state at every exercise date, and per ADR-006
+   Amendment 3 that state is `(S, v)`, not `S` alone. A memory-efficient engine that accumulates
+   discounted payoffs and discards paths is the natural design under barrier + autocallable, and it
+   makes M2's American warrants unimplementable without rewriting `models/` — which the M2 rule
+   above forbids. Amendment 3 licenses *adding* LSM to `models/`; it does not license rebuilding the
+   engine underneath it.
+2. **RNG construction is an explicit input to pricing, not a private detail of path generation.**
+   Rule 6 below mandates bump-and-revalue with common random numbers (same seed per bump pair). M1
+   computes no Greeks, but if it hides the generator, M4 cannot hand a bumped revaluation the
+   identical normals. Deferring Greeks defers the estimator, not its plumbing.
+3. **A price and its standard error are one return value.** `ValuationSnapshot.ProductLine.pv_std_err_e9`
+   (`protocol/proto/live.proto`) is a **required** field — the protocol structurally enforces the
+   3-standard-error acceptance test above, and a pricer that cannot report its own error bar cannot
+   fill the message. Do not add error bars later.
+4. **QMC and antithetics do not compose naïvely.** Antithetic pairing of a Sobol sequence destroys
+   the low-discrepancy property Sobol was chosen for; the Brownian bridge is what makes Sobol
+   effective, by concentrating variance in the leading dimensions. "QMC + variance reduction" is two
+   designs to reconcile, not two flags to enable — state which combination is used and why.
+5. **Build the characteristic-function vanilla as a reusable pricer, not a test helper.** There is no
+   closed form for a barrier under Heston, so the natural control variate *is* the Heston vanilla —
+   the same analytics as M1's blocking validation gate. Burying it in a test module means writing it
+   twice.
+6. **The reproducibility triple is M1's to define, and nothing exists yet.** `run-manifests/` holds
+   only a `.gitkeep`; `ValuationMeta.params_hash` is specified as "sha256 of canonical param
+   serialization" with the canonicalization undefined; `git_sha` capture has no mechanism. Root
+   `CLAUDE.md` invariant #7 makes a number without this metadata **invalid**, and M1 is the first
+   milestone that produces a number.
 
 ## Non-negotiable rules
 

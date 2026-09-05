@@ -7,6 +7,23 @@ revaluation_interval_s = 5
 default_n_paths = 200_000
 seed_manifest = "run-manifests/"   # seeds come from manifests, never from time
 
+# [models.<underlying>] -- RESERVED, populated by P2.M1 slice 1. Not yet defined;
+# no key is written here until the engine that reads it exists.
+#
+# Decision (ADR-006 Amendment 4 s1): the illustrative parameter set --
+# S0, r, q and Heston (v0, kappa, theta, xi, rho) per underlying -- lives HERE
+# and NOT in protocol/refdata/universe.json. EXO is its only consumer, and the
+# numbers are explicitly UNCALIBRATED: seating them in the shared contract
+# surface that Delta One and the UI read would lend them the same apparent
+# authority as the real instrument conventions beside them. Precedent is
+# P1.M5's d1.toml [tracker] (a component's own input), not P1.M3's
+# cross_px_policy (a market convention consumed firm-wide -> refdata).
+#
+# Standing non-goal (ADR-006, unchanged since 2026-07-05): market-quality
+# calibration is out of scope. P4.M4 builds the calibration framework against
+# sim-generated synthetic vanilla surfaces; live market quotes are a Phase 5
+# data change. Whatever lands here stays labelled illustrative until then.
+
 [rehedge]
 # no-trade band half-widths, per instrument class, in delta units (qty_e2)
 band_equity_qty_e2 = 50_000
