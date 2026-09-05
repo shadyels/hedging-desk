@@ -7,6 +7,10 @@ revaluation_interval_s = 5
 default_n_paths = 200_000
 seed_manifest = "run-manifests/"   # seeds come from manifests, never from time
 
+# [models.<underlying>] -- RESERVED, populated by P2.M1 slice 1. Illustrative,
+# uncalibrated Heston/market parameters live here and NOT in refdata; rationale
+# in ADR-006 Amendment 4 s1.
+
 [rehedge]
 # no-trade band half-widths, per instrument class, in delta units (qty_e2)
 band_equity_qty_e2 = 50_000

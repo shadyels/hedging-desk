@@ -93,3 +93,97 @@ license any other `models/` change in M2.
   universe (ids 3001–3005) remain hedge `instrument_id`s. They are not the same object.
 - **The explicit non-goal stands:** market-quality calibration remains out of scope, exactly as the
   Consequences section above states. Adding two families does not soften it.
+
+## Amendment 4 (2026-09-05) — P2.M1 scoping, and the reserved home for the discretization decision
+
+P2.M1 readiness was assessed on 2026-09-05 (see `docs/ROADMAP.md` P2.M1). The milestone is
+unblocked, but four questions its own text does not settle were answered by desk lead. Three are
+decided here; the fourth (§4) is **reserved and pending**, because it is an empirical question and
+the experiment has not been run.
+
+### 1. The illustrative model parameter set lives in `exo.toml`, not in `protocol/` refdata
+
+`S0, r, q` and the Heston parameters `(v0, κ, θ, ξ, ρ)` per underlying go in a new
+`exo.toml [models.*]` section. They are **not** added to `protocol/refdata/universe.json`.
+
+Rationale, and the reason it needs an ADR at all: root `CLAUDE.md` forbids inventing market
+conventions and requires them "defined once in `protocol/` reference data", so a reader could
+reasonably conclude a parameter set belongs there. It does not, for two reasons. EXO is its only
+consumer — Delta One and the UI never read it, whereas `cross_px_policy_default`, `tick_e9` and
+`dv01` are all read by components other than the one that writes them. And this ADR's standing
+non-goal ("market-quality calibration remains out of scope; do not let the demo imply it") is
+actively undermined by seating uncalibrated numbers in the shared contract surface, where they
+acquire the same apparent authority as the real instrument conventions beside them. The precedent
+is P1.M5's `d1.toml [tracker]` (a component's own input → component config), not P1.M3's
+`cross_px_policy` (a market convention consumed firm-wide → refdata).
+
+Consequence: `protocol/refdata/universe.json` gains no field, and the parameter set carries its own
+"illustrative, not calibrated" note at the point of definition.
+
+### 2. P2.M1 is pricing plus standard error; Greeks land in P2.M4
+
+M1 delivers prices with mandatory MC standard errors and no Greeks. ADR-008's monitored set
+(delta, gamma, vega, rho, theta, dividend sensitivity) is consumed by target publication and
+`ValuationSnapshot`, both of which are P2.M4 deliverables; computing them in M1 would front-load
+work with no consumer.
+
+**This defers the estimator, not its plumbing.** `exo/CLAUDE.md` rule 6 requires bump-and-revalue
+with **common random numbers** — the same seed per bump pair. An M1 engine that constructs its RNG
+privately inside path generation cannot later hand a bumped revaluation the identical normals, and
+M4 would have to re-cut that seam under a milestone that is not about numerics. M1 must therefore
+expose seed/stream construction as an explicit input even though nothing in M1 bumps anything.
+
+### 3. Product term sheets are test fixtures in M1; no persisted product book until P2.M4
+
+Barrier-option and autocallable instances (strike, barrier, coupon, observation schedule, notional)
+are constructed in `pytest` fixtures. No `products.json`, no `[products]` config section, no store.
+The persisted EXO book arrives with P2.M4's portfolio loop, which is the first thing that needs one
+— and with `sim/scenarios/tracker-flow.yaml`'s `action: exo_book_event`, which P2.M4 already owns.
+
+Secondary benefit worth recording, because it is the reason to prefer fixtures beyond scope
+control: a term-sheet file permits loader-side defaults and fixups, which hide an inadequate payoff
+definition. A fixture forces every field explicit at the construction site, which is the pressure
+that exposes a bad abstraction *before* M2 stacks six more families on it.
+
+### 4. Discretization scheme: QE (Andersen) vs full-truncation Euler — **PENDING**
+
+**Status: reserved, not decided.** The Decision section above defers this to "M1 with a convergence
+test, document"; this subsection is that document's home, and P2.M1 slice 1 fills it. Recording it
+as pending rather than guessing is deliberate — the choice is empirical and no convergence study has
+been run.
+
+What must appear here when slice 1 completes: the scheme chosen; the convergence evidence (bias and
+variance vs step count, against the characteristic-function vanilla reference); and the handling of
+the Feller condition, since the two schemes differ precisely in how they behave when it is violated,
+which is the regime the illustrative parameter set may well sit in.
+
+## Consequences (Amendment 4)
+
+- **P2.M1 requires no new dependency.** `exo/pyproject.toml` already pins `numpy`, `scipy` (for the
+  characteristic-function gate), `hypothesis` and the lint/type toolchain. `numba` remains deferred
+  on this ADR's existing terms ("when profiling demands"), and adding it in M1 would need its own
+  justification.
+- **Amendment 3's LSM sanction constrains the M1 engine, not just M2's payoffs.** Longstaff–Schwartz
+  regresses backwards over the simulated state at every exercise date, so it needs the retained path
+  matrix — and, per Amendment 3 §1, retained in `(S, v)` rather than `S` alone. A forward-streaming
+  engine that discards paths as it accumulates the discounted payoff would be the natural M1 design
+  under barrier + autocallable alone, and would make American warrants unimplementable without
+  re-cutting `models/`. Amendment 3 licenses *adding* LSM to `models/`; it does not license
+  rebuilding the engine underneath it. M1's choice of what a "path" is decides this.
+- **The M1 validation gate and the M2/M3 control variate are the same analytics.** No closed form
+  exists for a barrier under Heston, so the natural control variate is the Heston vanilla — priced
+  by the characteristic function M1 must implement anyway as its blocking gate. The gate machinery
+  should be built as a reusable pricer, not buried in a test module.
+- **`ValuationSnapshot.ProductLine.pv_std_err_e9` is a required field** (`protocol/proto/live.proto`),
+  which makes this ADR's "MC within 3 standard errors" culture structurally enforced rather than
+  merely encouraged: a pricer that cannot report its own standard error cannot fill the message.
+  Pricers return an estimate and its standard error together.
+- **QMC and antithetics are not independently composable, and the milestone text reads as if they
+  are.** Antithetic pairing of a Sobol sequence destroys the low-discrepancy property that motivated
+  Sobol, while the Brownian bridge is what makes Sobol effective at all by concentrating variance in
+  the leading dimensions. Amendment 2 promoted "QMC + variance reduction" into P2.M1 as one clause;
+  it is two designs requiring reconciliation, and the reconciliation must be stated with the scheme
+  decision in §4 rather than left to whichever code lands last.
+- **No change to the instrument universe, the wire format, or any other component.** This amendment
+  moves nothing onto the bus and adds no `protocol/` field; it records where EXO-private inputs live
+  and what M1 does not build.
