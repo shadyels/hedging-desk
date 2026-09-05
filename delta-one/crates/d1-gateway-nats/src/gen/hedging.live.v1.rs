@@ -351,9 +351,13 @@ pub struct InternalTransferRequest {
     /// configured reference-price policy, publishes InternalCrossNotice + Kafka.
     #[prost(message, optional, tag = "1")]
     pub meta: ::core::option::Option<super::super::common::v1::Meta>,
-    /// UUIDv7; idempotency key
+    /// UUIDv7; compliance-lineage key for the eventual
     #[prost(string, tag = "2")]
     pub transfer_id: ::prost::alloc::string::String,
+    /// Kafka posttrade.crosses record (M4). Slice 3
+    /// dedupes transport redelivery on Meta.msg_id only --
+    /// business-level transfer idempotency (keyed on this
+    /// field) lands with M4 lineage.
     #[prost(message, optional, tag = "3")]
     pub instrument: ::core::option::Option<super::super::common::v1::InstrumentRef>,
     /// book shedding the risk (sells)
