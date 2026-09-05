@@ -68,30 +68,12 @@ This repo currently contains contracts, schemas, configs and docs — almost no 
 6. **UI is read-mostly.** Any UI-initiated action goes through NATS request/reply to Delta One's command handler, which applies the same risk checks as any other flow. The UI never talks to Kafka or FIX directly.
 7. **Determinism in EXO:** every pricing run records `(model_id, model_params, seed, n_paths, git_sha)` so a number can be reproduced. Published Greeks without this metadata are invalid.
 
-## Build / run / test
-
-Task runner is `just` (see `justfile`). Top-level targets:
-
-```
-just up            # docker compose: NATS, Kafka (KRaft), Schema Registry
-just proto         # regenerate Rust/Python/TS code from protocol/
-just d1            # build + run delta-one (debug)
-just d1-release    # build with release profile (the only profile for latency tests)
-just exo           # run EXO service
-just ui            # run UI dev server
-just sim           # run market-data generator + FIX acceptor
-just test          # all unit tests (Rust + Python + TS)
-just bench         # criterion benches for the hot path (release only)
-just demo          # full stack end-to-end demo scenario
-```
-
-Never benchmark or make latency claims from a debug build.
+Task runner is `just` (see `justfile` for all targets). Never benchmark or make latency claims from a debug build.
 
 ## Repo conventions
 
 - **Branch names:** `type/scope-description` (e.g. `feat/d1-netting`, `fix/exo-calibration`, `docs/adr-008`, `chore/hooks-n-conventions`). Use component names (d1, exo, ui, protocol, sim) or workflow types (feat, fix, chore, docs, refactor). Keep under 50 chars. Delete after merge.
 - Conventional Commits (`feat(d1-netting): ...`). One logical change per commit.
-- CI gates (all must pass before merge): `cargo clippy -- -D warnings`,`cargo test`, `cargo fmt --check`, `ruff check`, `ruff format --check`, `mypy --strict`, `pytest`, `tsc --noEmit`, `eslint`, schema-compat checks(`just schema-check`).
 - ADRs live in `docs/adr/`. Any decision that constrains another component (wire format, subject name, latency budget, model choice) requires an ADR before code. Existing ADRs are binding unless superseded.
 - Do not add dependencies casually. Rust: any new crate on the hot path needs a note in `delta-one/CLAUDE.md`'s dependency table. Python: add to `pyproject.toml` with a version pin.
 - Scope principle: the **instrument universe** starts minimal during development and is enriched at scale in P4.M5 — but **project scope is extensive**; Phases 1–4 are mandatory at equal depth. Never confuse data minimalism with feature minimalism (`docs/ROADMAP.md` is authoritative).

@@ -331,7 +331,7 @@ export interface ValuationSnapshot {
 export interface ValuationSnapshot_ProductLine {
   /** desk trade id of the structured product */
   productId: string;
-  /** "autocallable" | "rc" | "brc" | "bonus" | "tarf" | "ptarf" | "barrier" */
+  /** "autocallable" | "rc" | "brc" | "bonus" | "tarf" | "ptarf" | "barrier" | "warrant_call" | "warrant_put" | "mini_long" | "mini_short" */
   productType: string;
   underlying:
     | InstrumentRef
@@ -362,8 +362,14 @@ export interface InternalTransferRequest {
   meta:
     | Meta
     | undefined;
-  /** UUIDv7; idempotency key */
+  /** UUIDv7; compliance-lineage key for the eventual */
   transferId: string;
+  /**
+   * Kafka posttrade.crosses record (M4). Slice 3
+   * dedupes transport redelivery on Meta.msg_id only --
+   * business-level transfer idempotency (keyed on this
+   * field) lands with M4 lineage.
+   */
   instrument:
     | InstrumentRef
     | undefined;

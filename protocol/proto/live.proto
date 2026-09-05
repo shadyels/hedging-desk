@@ -153,7 +153,7 @@ message ValuationSnapshot {
   hedging.common.v1.ValuationMeta valuation = 4;
   message ProductLine {
     string product_id = 1;          // desk trade id of the structured product
-    string product_type = 2;        // "autocallable" | "rc" | "brc" | "bonus" | "tarf" | "ptarf" | "barrier"
+    string product_type = 2;        // "autocallable" | "rc" | "brc" | "bonus" | "tarf" | "ptarf" | "barrier" | "warrant_call" | "warrant_put" | "mini_long" | "mini_short"
     hedging.common.v1.InstrumentRef underlying = 3;
     sint64 pv_e9 = 4;               // in product ccy
     sint64 pv_std_err_e9 = 5;       // MC standard error; mandatory (exo/CLAUDE.md rule 6)
