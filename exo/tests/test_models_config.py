@@ -87,3 +87,33 @@ def test_heston_params_rejects_non_positive_kappa() -> None:
 def test_engine_config_rejects_unknown_scheme() -> None:
     with pytest.raises(ValidationError):
         EngineConfig(scheme="tree", n_steps=10, n_paths=100, expiry=1.0, antithetic=True)  # type: ignore[arg-type]
+
+
+def test_heston_params_rejects_unknown_extra_key() -> None:
+    """P2 (code review 2026-09-06): without `extra="forbid"`, a typo'd key (e.g. `rh0=-0.7`
+    instead of `rho=-0.7`) is silently DROPPED and the field takes its default/raises for a
+    missing required field with a confusing message -- not a loud, specific rejection."""
+    with pytest.raises(ValidationError):
+        HestonParams(
+            s0=100.0,
+            r=0.0,
+            q=0.0,
+            v0=0.04,
+            kappa=1.0,
+            theta=0.04,
+            xi=0.5,
+            rho=-0.5,
+            typo_field=1.0,
+        )
+
+
+def test_engine_config_rejects_unknown_extra_key() -> None:
+    with pytest.raises(ValidationError):
+        EngineConfig(
+            scheme="qe", n_steps=10, n_paths=100, expiry=1.0, antithetic=True, typo_field=1
+        )
+
+
+def test_model_defaults_rejects_unknown_extra_key() -> None:
+    with pytest.raises(ValidationError):
+        ModelDefaults(scheme="qe", n_steps_per_year=252, antithetic=True, typo_field=1)

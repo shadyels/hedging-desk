@@ -71,3 +71,25 @@ def test_non_antithetic_source_does_not_mirror() -> None:
     z_odd = source.normals((5,), stream="spot")
     assert z.shape == (6,)
     assert z_odd.shape == (5,)
+
+
+def test_uniforms_are_strictly_inside_the_open_unit_interval() -> None:
+    """P2 (code review 2026-09-06): `Generator.uniform` can return exactly 0.0 (probability
+    ~2**-53, but reachable over enough draws). `ndtri(0.0) == -inf`, and QE's exponential branch
+    computes `(1-p)/(1-u)`, which divides by zero at `u == 1.0` -- reachable via the antithetic
+    mirror `1 - 0.0 == 1.0`. Draw enough samples that hitting either float64 boundary by chance
+    is not what this test is relying on: it instead pins the CLAMP directly."""
+    from exo.models.rng import _clamp_open_unit_interval
+
+    u = np.array([0.0, 0.25, 0.5, 0.75, 1.0])
+    clamped = _clamp_open_unit_interval(u)
+    assert clamped[0] > 0.0
+    assert clamped[-1] < 1.0
+    assert np.array_equal(clamped[1:-1], u[1:-1])  # interior values untouched
+
+
+def test_uniforms_from_a_real_draw_never_hit_the_endpoints() -> None:
+    source = PseudoRandomSource(seed=1, antithetic=True)
+    u = source.uniforms((1000, 2), stream="variance")
+    assert np.all(u > 0.0)
+    assert np.all(u < 1.0)

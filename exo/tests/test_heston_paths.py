@@ -97,7 +97,20 @@ def test_martingale_property_coarse_dt(scheme: str) -> None:
     (n_steps=1, T=1) and stress parameters chosen specifically to make a wrong QE
     martingale correction fail loudly rather than being hidden either by small-dt
     convergence or by a parameter set/branch mix too mild to expose the
-    correction's effect."""
+    correction's effect.
+
+    MARTINGALE_STRESS's psi (~0.48, see the comment above it) lands QE entirely in the
+    QUADRATIC branch at n_steps=1 -- test_martingale_property_coarse_dt_exponential_branch
+    below is the exponential-branch counterpart (P1-2, code review 2026-09-06).
+
+    For scheme="euler-ft" specifically, this is a SMOKE CHECK, not a discretization-bias test:
+    at n_steps=1, `v_plus = max(v0, 0) = v0` is a deterministic constant (there is no prior state
+    to truncate), so the Euler step is exactly `x' = x + (r-q-0.5*v0)*dt + sqrt(v0*dt)*Z` --
+    an exactly lognormal terminal distribution whose martingale property holds by construction,
+    independent of whether full-truncation Euler is implemented correctly at a REAL (non-trivial)
+    step count. The bias-sensitive euler-ft check lives in
+    `test_validation_gates.py`'s G1 gate (n_steps=50, vs the Heston characteristic function).
+    """
     engine = _engine(scheme, n_steps=1, n_paths=200_000, expiry=1.0)
     rng = PseudoRandomSource(seed=2024)
     bundle = simulate(MARTINGALE_STRESS, engine, rng)
@@ -114,6 +127,53 @@ def test_martingale_property_coarse_dt(scheme: str) -> None:
         f"{scheme}: E[S_T]/S0 discounted ratio={ratio}, expected 1.0, "
         f"off by {(ratio - 1.0) / se_ratio:.2f} SE"
     )
+
+
+# Chosen (P1-2, code review 2026-09-06) to land QE's step ENTIRELY in the EXPONENTIAL branch
+# (psi > psi_c) at a single coarse step (n_steps=1, T=1): hand-computed (and verified via a
+# throwaway script) m=0.041478, s2=0.018707, psi=10.874 >> psi_c=1.5. Without this,
+# test_martingale_property_coarse_dt above only exercises the QUADRATIC branch's K0* term
+# (MARTINGALE_STRESS's psi ~0.48 there) -- a sign error in the EXPONENTIAL branch's K0* would
+# survive untested.
+MARTINGALE_STRESS_EXPONENTIAL_BRANCH = HestonParams(
+    s0=100.0, r=0.02, q=0.01, v0=0.01, kappa=0.5, theta=0.09, xi=1.0, rho=-0.9
+)
+
+
+def test_martingale_property_coarse_dt_exponential_branch() -> None:
+    """Same property and reasoning as test_martingale_property_coarse_dt, but for QE only, with
+    MARTINGALE_STRESS_EXPONENTIAL_BRANCH forcing the EXPONENTIAL branch (psi > psi_c) instead of
+    the quadratic one."""
+    engine = _engine("qe", n_steps=1, n_paths=200_000, expiry=1.0)
+    rng = PseudoRandomSource(seed=2025)
+    bundle = simulate(MARTINGALE_STRESS_EXPONENTIAL_BRANCH, engine, rng)
+
+    r, q = MARTINGALE_STRESS_EXPONENTIAL_BRANCH.r, MARTINGALE_STRESS_EXPONENTIAL_BRANCH.q
+    discount = math.exp(-(r - q) * engine.expiry)
+    discounted_terminal = discount * bundle.S[:, -1]
+    result = mc_estimate(bundle, discounted_terminal)
+
+    ratio = result.pv / MARTINGALE_STRESS_EXPONENTIAL_BRANCH.s0
+    se_ratio = result.std_err / MARTINGALE_STRESS_EXPONENTIAL_BRANCH.s0
+
+    assert se_ratio < 0.01, f"SE too loose to be a meaningful gate: se_ratio={se_ratio}"
+    assert abs(ratio - 1.0) < 3 * se_ratio, (
+        f"E[S_T]/S0 discounted ratio={ratio}, expected 1.0, "
+        f"off by {(ratio - 1.0) / se_ratio:.2f} SE"
+    )
+
+
+def test_simulate_raises_on_antithetic_mismatch() -> None:
+    """P1-5 (code review 2026-09-06): EngineConfig.antithetic and RandomSource.antithetic are
+    two unreconciled booleans if simulate() doesn't check them. The dangerous direction is
+    EngineConfig(antithetic=False) + a mirroring RandomSource(antithetic=True): draws ARE
+    mirrored but bundle.antithetic=False, so mc_estimate silently takes the naive (looser) 2N
+    branch instead of the correct pair-mean one -- every gate gets GREENER with nothing failing
+    loudly. simulate() must refuse this combination instead."""
+    engine = _engine("qe", n_steps=4, n_paths=1000, expiry=1.0)  # antithetic=True
+    mismatched_rng = PseudoRandomSource(seed=1, antithetic=False)
+    with pytest.raises(ValueError, match="antithetic"):
+        simulate(FELLER_VIOLATING, engine, mismatched_rng)
 
 
 def test_qe_exposes_fallback_diagnostic_and_euler_does_not() -> None:

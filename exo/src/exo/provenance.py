@@ -46,7 +46,13 @@ class ProvenanceError(RuntimeError):
     """
 
 
-def git_sha() -> str:
+# Anchor for git_sha()'s default `repo`: exo/src/exo/ -- inside the real hedging-desk checkout
+# regardless of the CALLER's current working directory (P1-4, code review 2026-09-06). `git`
+# discovers the repo root by walking UP from here, so this works from any commit depth.
+_PACKAGE_DIR = Path(__file__).resolve().parent
+
+
+def git_sha(*, repo: Path | None = None) -> str:
     """Return the current commit sha, suffixed "-dirty" when the working tree has changes.
 
     Overridable via the `EXO_GIT_SHA` environment variable for container builds that ship without
@@ -59,6 +65,14 @@ def git_sha() -> str:
     actually describe the code that produced it. The suffix is the honest middle: pricing still
     works, but the tag says the tree did not match a commit.
 
+    `repo` (P1-4, code review 2026-09-06): the directory `git` runs in, defaulting to
+    `_PACKAGE_DIR` (this file's own directory) rather than the PROCESS CWD. Running `git` with no
+    `cwd=` reads whatever repository the caller's CWD happens to be in -- run the pricer from
+    elsewhere and it silently stamps a DIFFERENT repo's sha onto a number, or raises
+    `ProvenanceError` from a perfectly good checkout. A confidently wrong sha is worse than the
+    `-dirty` case above already worries about. The parameter also makes this testable without
+    `monkeypatch.chdir`.
+
     ponytail: the ceiling here is the "-dirty" suffix itself, not a refusal to price on a dirty
     tree. Trigger: P2.M4, the first milestone that PUBLISHES a number to the bus -- at that point a
     dirty-tree number reaching Delta One needs an explicit policy decision, not just an honest
@@ -67,18 +81,21 @@ def git_sha() -> str:
     override = os.environ.get("EXO_GIT_SHA")
     if override:
         return override
+    repo_dir = repo if repo is not None else _PACKAGE_DIR
     try:
         sha = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             capture_output=True,
             check=True,
             text=True,
+            cwd=repo_dir,
         ).stdout.strip()
         status = subprocess.run(
             ["git", "status", "--porcelain"],
             capture_output=True,
             check=True,
             text=True,
+            cwd=repo_dir,
         ).stdout
     except (OSError, subprocess.CalledProcessError) as exc:
         raise ProvenanceError(
@@ -95,9 +112,26 @@ def _to_plain(value: object) -> object:
     `MappingProxyType`, or a pydantic model's nested config export) would otherwise raise
     `TypeError: Object of type X is not JSON serializable`. Nested mappings -- the per-underlying
     `[params.<SYMBOL>]` subtables -- go through this recursively.
+
+    Mapping keys must be `str` (P1-1, security review MEDIUM, 2026-09-06): `params_hash`'s
+    signature already declares `Mapping[str, object]`. An earlier version coerced every key with
+    `str(k)` instead of enforcing that contract, which silently COLLIDES `{1: "x"}` and
+    `{"1": "x"}`, and silently DROPS an entry when both `1` and `"1"` appear as keys in the same
+    mapping (survivor by insertion order) -- `{1: "first", "1": "second"}` hashed the same as
+    `{"1": "second"}`, with `"first"` gone. Not reachable from today's call sites (pydantic
+    `model_dump()` and `tomllib` both yield `str` keys), but this function is documented as
+    generic infrastructure for P2.M4's `bus/convert.py`, which could pass something else.
     """
     if isinstance(value, Mapping):
-        return {str(k): _to_plain(v) for k, v in value.items()}
+        result: dict[str, object] = {}
+        for k, v in value.items():
+            if not isinstance(k, str):
+                raise TypeError(
+                    f"params_hash requires all mapping keys to be str, got {k!r} of type "
+                    f"{type(k).__name__}"
+                )
+            result[k] = _to_plain(v)
+        return result
     if isinstance(value, list | tuple):
         return [_to_plain(v) for v in value]
     return value
@@ -176,6 +210,14 @@ class RunManifest:
     params: Mapping[str, Mapping[str, float]]
 
     def __post_init__(self) -> None:
+        # P2 (code review 2026-09-06): reject an unknown schema_version at construction time --
+        # applies to RunManifest.read() too, since it constructs through this same dataclass --
+        # rather than silently reading a future v2 manifest's fields as if they were v1's.
+        if self.schema_version != 1:
+            raise ValueError(
+                f"unsupported schema_version={self.schema_version}: this reader only "
+                "understands schema_version=1"
+            )
         # Amendment A4: `seed`/`n_paths` are `uint64`/`uint32` in the proto (common.proto). Reject
         # values that would not fit at manifest construction time, not silently at P2.M4's bus
         # boundary.

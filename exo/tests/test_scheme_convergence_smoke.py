@@ -2,10 +2,12 @@
 
 Runs the study's pure functions at TINY size (few paths, few steps, one batch) so this test stays
 fast (CI runs it); asserts the ranking function returns one of the two schemes. Also regression-
-tests the two defects the orchestrator found in a prior revision: (1) `simulate()` must be called
-once per batch, shared across every strike, not once per (batch, strike); (2) batch sizing must
-respect a peak-memory ceiling that varies with `n_steps`, not a fixed path count. The expensive
-real sweep that produces `docs/studies/p2m1-scheme-convergence.md` is a manual
+tests the defects found across two review rounds (orchestrator's manual review, then
+code-reviewer + security-engineer): (1) `simulate()` must be called once per batch, shared across
+every strike, not once per (batch, strike); (2) batch sizing must respect a peak-memory ceiling
+that varies with `n_steps`, accounting for ALL FOUR allocated arrays, not two; (3) `rank_schemes`
+must reject an imprecise "pass"; (4) the QE inadmissibility fallback fraction must be observable.
+The expensive real sweep that produces `docs/studies/p2m1-scheme-convergence.md` is a manual
 `python -m exo.studies.scheme_convergence` command, run by the orchestrator -- not exercised here.
 """
 
@@ -30,6 +32,7 @@ from exo.studies.scheme_convergence import (
     resolve_batch_plan,
     run_study,
     run_sweep,
+    se_tol_for_paths_per_cell,
 )
 
 
@@ -62,25 +65,95 @@ def test_rank_schemes_returns_one_of_the_two_schemes() -> None:
         expiries=(1.0,),
         verbose=False,
     )
-    chosen = rank_schemes(rows)
+    chosen = rank_schemes(rows, se_tol=se_tol_for_paths_per_cell(200))
     assert chosen in ("qe", "euler-ft")
 
 
 def test_rank_schemes_picks_coarser_passing_step_count() -> None:
-    """Hand-built rows: 'qe' passes (|bias| < 3*se, both param sets) already at n_steps=4;
-    'euler-ft' only passes at n_steps=12. rank_schemes must prefer the coarser-passing scheme,
-    even though euler-ft's failing n_steps=4 rows are individually faster (wall_time_s)."""
+    """Hand-built rows: 'qe' passes (|bias| < 3*se AND se < se_tol=2.0, both param sets) already
+    at n_steps=4; 'euler-ft' only passes at n_steps=12. rank_schemes must prefer the
+    coarser-passing scheme, even though euler-ft's failing n_steps=4 rows are individually
+    faster (wall_time_s)."""
     rows = [
-        SweepCell("qe", 4, "feller_satisfying", 100.0, 1.0, 10.0, 1.0, 0.1, 0.1, 1.0, 200, 1),
-        SweepCell("qe", 4, "feller_violating", 100.0, 1.0, 10.0, 1.0, -0.2, -0.2, 1.0, 200, 1),
-        SweepCell("euler-ft", 4, "feller_satisfying", 100.0, 1.0, 10.0, 1.0, 5.0, 5.0, 0.1, 200, 1),
-        SweepCell("euler-ft", 4, "feller_violating", 100.0, 1.0, 10.0, 1.0, 5.0, 5.0, 0.1, 200, 1),
+        SweepCell("qe", 4, "feller_satisfying", 100.0, 1.0, 10.0, 1.0, 0.1, 0.1, 1.0, 200, 1, None),
         SweepCell(
-            "euler-ft", 12, "feller_satisfying", 100.0, 1.0, 10.0, 1.0, 0.1, 0.1, 0.2, 200, 1
+            "qe", 4, "feller_violating", 100.0, 1.0, 10.0, 1.0, -0.2, -0.2, 1.0, 200, 1, None
         ),
-        SweepCell("euler-ft", 12, "feller_violating", 100.0, 1.0, 10.0, 1.0, 0.1, 0.1, 0.2, 200, 1),
+        SweepCell(
+            "euler-ft", 4, "feller_satisfying", 100.0, 1.0, 10.0, 1.0, 5.0, 5.0, 0.1, 200, 1, None
+        ),
+        SweepCell(
+            "euler-ft", 4, "feller_violating", 100.0, 1.0, 10.0, 1.0, 5.0, 5.0, 0.1, 200, 1, None
+        ),
+        SweepCell(
+            "euler-ft",
+            12,
+            "feller_satisfying",
+            100.0,
+            1.0,
+            10.0,
+            1.0,
+            0.1,
+            0.1,
+            0.2,
+            200,
+            1,
+            None,
+        ),
+        SweepCell(
+            "euler-ft",
+            12,
+            "feller_violating",
+            100.0,
+            1.0,
+            10.0,
+            1.0,
+            0.1,
+            0.1,
+            0.2,
+            200,
+            1,
+            None,
+        ),
     ]
-    assert rank_schemes(rows) == "qe"
+    assert rank_schemes(rows, se_tol=2.0) == "qe"
+
+
+def test_rank_schemes_se_tol_conjunct_disqualifies_an_imprecise_pass() -> None:
+    """P0-2 (BLOCKER-adjacent, code review 2026-09-06): `rank_schemes` previously had no
+    minimum-precision conjunct -- a scheme with high payoff variance could pass `|bias| < 3*se`
+    at a coarser step count BECAUSE it is imprecise, and win the ranking for it.
+
+    Scheme "A" passes the bias check at n_steps=4 (bias=2.0 < 3*se=3.0) but ONLY because se=1.0
+    is huge; se_tol=0.5 correctly disqualifies it there, and it never becomes precise enough to
+    pass at any step count in these rows. Scheme "B" passes BOTH conjuncts at n_steps=4
+    (bias=0.05 < 3*0.2=0.6, se=0.2 < 0.5).
+
+    WITHOUT the se_tol conjunct, the OLD rule would have called both "A" and "B" passing at
+    n_steps=4 and tie-broken on wall time -- A's n_steps=4 rows are deliberately FASTER
+    (wall_time=0.05) than B's (wall_time=1.0), so the old rule would pick "A". WITH se_tol, A is
+    disqualified everywhere in these rows (key stays +inf) and B wins outright.
+    """
+    rows = [
+        SweepCell("A", 4, "feller_satisfying", 100.0, 1.0, 10.0, 1.0, 2.0, 2.0, 0.05, 200, 1, None),
+        SweepCell("A", 4, "feller_violating", 100.0, 1.0, 10.0, 1.0, 2.0, 2.0, 0.05, 200, 1, None),
+        SweepCell("A", 12, "feller_satisfying", 100.0, 1.0, 10.0, 1.0, 2.0, 2.0, 2.0, 200, 1, None),
+        SweepCell("A", 12, "feller_violating", 100.0, 1.0, 10.0, 1.0, 2.0, 2.0, 2.0, 200, 1, None),
+        SweepCell(
+            "B", 4, "feller_satisfying", 100.0, 1.0, 10.0, 0.2, 0.05, 0.25, 1.0, 200, 1, None
+        ),
+        SweepCell("B", 4, "feller_violating", 100.0, 1.0, 10.0, 0.2, 0.05, 0.25, 1.0, 200, 1, None),
+    ]
+    assert rank_schemes(rows, se_tol=0.5) == "B"
+
+
+def test_se_tol_for_paths_per_cell_shrinks_as_paths_grow() -> None:
+    """se_tol must tighten (shrink) as paths_per_cell grows -- more paths should demand more
+    precision to pass, not less."""
+    loose = se_tol_for_paths_per_cell(200)
+    tight = se_tol_for_paths_per_cell(3_200_000)
+    assert tight < loose
+    assert tight > 0.0
 
 
 def test_measure_antithetic_reduction_returns_a_finite_positive_ratio() -> None:
@@ -114,7 +187,9 @@ def test_render_report_states_illustrative_uncalibrated_up_front() -> None:
         expiries=(1.0,),
         verbose=False,
     )
-    report = render_report(rows, "qe", {"qe": 1.1, "euler-ft": 0.9}, manifest)
+    report = render_report(
+        rows, "qe", {"qe": 1.1, "euler-ft": 0.9}, manifest, se_tol=se_tol_for_paths_per_cell(200)
+    )
     head = report[:400].lower()
     assert "illustrative" in head
     assert "uncalibrated" in head
@@ -136,22 +211,35 @@ def test_run_study_end_to_end_at_tiny_size() -> None:
     assert result.manifest.seed == 1
 
 
-# --- DEFECT regression tests (orchestrator-reported, fixed in this revision) ---------------------
+# --- DEFECT regression tests (found across two review rounds, fixed in this revision) -----------
 
 
 def test_resolve_batch_plan_respects_memory_ceiling_at_fine_step_count() -> None:
-    """DEFECT 2 regression: at n_steps=1008 a FIXED 200k-path batch needs
-    200_000 * 1009 * 2 * 8 bytes ~= 3.23 GB, 4x models/heston.py's ~810 MB ceiling.
-    resolve_batch_plan must derive a batch small enough to respect max_batch_bytes."""
+    """DEFECT 2 / P0-1 regression: at n_steps=1008 a FIXED 200k-path batch needs
+    200_000 * 1009 * `_BYTES_PER_PATH_STEP` bytes, ~4x models/heston.py's ~1.62 GB ceiling once
+    ALL FOUR allocated arrays are counted (S, v, and the two draw matrices -- P0-1, code review
+    2026-09-06 corrected an earlier version of this constant that counted only S and v).
+    resolve_batch_plan must derive a batch small enough to respect max_batch_bytes. This asserts
+    against `scheme_convergence._BYTES_PER_PATH_STEP`, the module's OWN constant, rather than a
+    re-typed literal -- a re-typed literal would re-encode the same wrong model and could never
+    catch a regression in the constant itself."""
     n_paths_per_batch, n_batches = resolve_batch_plan(
         n_steps=1008, paths_per_cell=3_200_000, max_batch_bytes=800_000_000
     )
-    footprint = n_paths_per_batch * (1008 + 1) * 2 * 8
+    footprint = n_paths_per_batch * (1008 + 1) * scheme_convergence._BYTES_PER_PATH_STEP
     assert footprint <= 800_000_000
     assert n_paths_per_batch % 2 == 0
     assert n_paths_per_batch >= 2
     # equal-size batches, total rounded UP from paths_per_cell (no ragged final batch)
     assert n_paths_per_batch * n_batches >= 3_200_000
+
+
+def test_bytes_per_path_step_accounts_for_all_four_allocated_arrays() -> None:
+    """P0-1 (code review 2026-09-06): heston.py's simulate() allocates FOUR (n_paths, n_steps[+1])
+    float64 arrays up front -- S, v, and two draw matrices (QE: u, z; euler-ft: z_variance,
+    z_spot) -- not two. This pins the constant directly so the memory model cannot silently
+    regress back to counting only S and v."""
+    assert scheme_convergence._BYTES_PER_PATH_STEP == 4 * 8
 
 
 def test_resolve_batch_plan_uses_one_batch_when_paths_per_cell_fits_in_memory() -> None:
@@ -188,6 +276,18 @@ def test_resolve_batch_plan_override_is_floored_even_and_warns_if_over_ceiling(
     assert "WARNING" in capsys.readouterr().out
 
 
+def test_resolve_batch_plan_memory_derived_branch_warns_if_floor_of_2_still_exceeds_budget(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """P2 (code review 2026-09-06): symmetry with the explicit-override branch's warning above --
+    the memory-derived branch floors to a minimum of 2 paths, which can itself exceed a
+    sufficiently tiny max_batch_bytes. Unreachable at production values, but should warn rather
+    than silently proceed, same as the override branch does."""
+    n_paths_per_batch, _ = resolve_batch_plan(n_steps=1008, paths_per_cell=1000, max_batch_bytes=1)
+    assert n_paths_per_batch == 2
+    assert "WARNING" in capsys.readouterr().out
+
+
 def test_price_batched_multi_strike_simulates_once_per_batch_not_once_per_strike(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -207,7 +307,7 @@ def test_price_batched_multi_strike_simulates_once_per_batch_not_once_per_strike
     monkeypatch.setattr(scheme_convergence, "simulate", counting_simulate)
 
     n_batches = 3
-    results, wall_times = price_batched_multi_strike(
+    results, wall_times, _qe_fraction = price_batched_multi_strike(
         FELLER_VIOLATING,
         "qe",
         n_steps=4,
@@ -221,3 +321,53 @@ def test_price_batched_multi_strike_simulates_once_per_batch_not_once_per_strike
     assert set(results) == {90.0, 100.0, 110.0}
     assert set(wall_times) == {90.0, 100.0, 110.0}
     assert all(result.pv > 0.0 for result in results.values())
+
+
+def test_price_batched_multi_strike_reports_qe_fallback_fraction() -> None:
+    """P0-3 (BLOCKER, code review 2026-09-06): Amendment A1 required a ponytail marker for the
+    QE inadmissibility fallback, but `qe_fallback_count` was consumed by NOTHING -- not a
+    `SweepCell` field, not in `render_report`. A shortcut whose upgrade trigger cannot be
+    measured is untracked debt. price_batched_multi_strike must aggregate the fallback fraction
+    across all batches (shared across every strike, since it is a property of the shared bundle,
+    not of the payoff) and report None for euler-ft, which has no such diagnostic."""
+    _, _, qe_fraction = price_batched_multi_strike(
+        FELLER_VIOLATING,
+        "qe",
+        n_steps=4,
+        expiry=1.0,
+        strikes=(90.0, 100.0, 110.0),
+        n_paths_per_batch=200,
+        n_batches=2,
+        base_seed=1,
+    )
+    assert qe_fraction is not None
+    assert 0.0 <= qe_fraction <= 1.0
+
+    _, _, euler_fraction = price_batched_multi_strike(
+        FELLER_VIOLATING,
+        "euler-ft",
+        n_steps=4,
+        expiry=1.0,
+        strikes=(90.0, 100.0, 110.0),
+        n_paths_per_batch=200,
+        n_batches=2,
+        base_seed=1,
+    )
+    assert euler_fraction is None
+
+
+def test_run_sweep_populates_qe_fallback_fraction_on_rows() -> None:
+    rows = run_sweep(
+        paths_per_cell=200,
+        n_paths_per_batch_override=200,
+        base_seed=1,
+        schemes=("qe", "euler-ft"),
+        n_steps_grid=(4,),
+        strikes=(100.0,),
+        expiries=(1.0,),
+        verbose=False,
+    )
+    qe_rows = [row for row in rows if row.scheme == "qe"]
+    euler_rows = [row for row in rows if row.scheme == "euler-ft"]
+    assert qe_rows and all(row.qe_fallback_fraction is not None for row in qe_rows)
+    assert euler_rows and all(row.qe_fallback_fraction is None for row in euler_rows)

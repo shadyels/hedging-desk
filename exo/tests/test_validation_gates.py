@@ -100,29 +100,46 @@ def test_g2_mc_matches_black_scholes_in_degenerate_limit_within_3se(scheme: Sche
     )
 
 
-def test_x_qe_and_euler_agree_within_combined_se_on_fine_grid() -> None:
-    """X. Measured at n_steps=500, n_paths=20_000, shared seed=77: combined SE ~= 0.0689,
-    diff/combined_se ~= -1.13. tol_abs=0.09 sits just above the measured combined SE. Two
-    independently-derived schemes agreeing on one price catches a formulation bug (e.g. a wrong
-    martingale correction, a sign error in a drift term) that a single-scheme suite, cross-checked
-    only against its own reference derivation, cannot see."""
-    results = {}
+def test_x_qe_and_euler_agree_within_paired_difference_se_on_fine_grid() -> None:
+    """X. Both schemes run at the SAME seed=77 and both draw `normals(stream="spot")`
+    (rng.py), so they share that whole matrix and their payoffs are POSITIVELY CORRELATED
+    (P1-3, code review 2026-09-06): `sqrt(se_qe**2 + se_euler**2)` is the SE of an INDEPENDENT
+    sum, not of this correlated difference -- `Var(D) = V1 + V2 - 2*Cov < V1 + V2` -- so bounding
+    by the independent-sum SE is STRICTLY LOOSER than the gate presents itself as being. Fix:
+    form the per-path difference `d = payoff_qe - payoff_euler` directly and collapse IT to pair
+    means (same reasoning as estimator.py's antithetic pair-mean SE -- the correlation is
+    absorbed into the difference's own sample variance, whatever its source or size).
+
+    Measured at n_steps=500, n_paths=20_000, seed=77: paired se_diff ~= 0.0593 (vs the old,
+    wrong combined-independent-SE of ~0.0689 -- smaller, as `Var(D) < V1+V2` predicts), and
+    pv_diff/se_diff ~= -1.31 (vs the old, UNDERSTATED ~-1.13). tol_abs=0.08 sits just above the
+    measured se_diff. Two independently-derived schemes agreeing on one price catches a
+    formulation bug (e.g. a wrong martingale correction, a sign error in a drift term) that a
+    single-scheme suite, cross-checked only against its own reference derivation, cannot see.
+    """
+    payoffs = {}
+    n_pairs: int | None = None
     for scheme in ("qe", "euler-ft"):
         engine = EngineConfig(
             scheme=scheme, n_steps=500, n_paths=20_000, expiry=_EXPIRY, antithetic=True
         )
         bundle = simulate(_FELLER_VIOLATING, engine, PseudoRandomSource(seed=77))
-        payoff = _discounted_call_payoff(_FELLER_VIOLATING.r, _EXPIRY, _STRIKE, bundle.S[:, -1])
-        results[scheme] = mc_estimate(bundle, payoff)
+        payoffs[scheme] = _discounted_call_payoff(
+            _FELLER_VIOLATING.r, _EXPIRY, _STRIKE, bundle.S[:, -1]
+        )
+        assert n_pairs is None or n_pairs == bundle.n_pairs
+        n_pairs = bundle.n_pairs
+    assert n_pairs is not None
 
-    qe, euler = results["qe"], results["euler-ft"]
-    combined_se = math.sqrt(qe.std_err**2 + euler.std_err**2)
+    diff = payoffs["qe"] - payoffs["euler-ft"]
+    pair_means = 0.5 * (diff[:n_pairs] + diff[n_pairs:])
+    pv_diff = float(pair_means.mean())
+    se_diff = float(pair_means.std(ddof=1) / math.sqrt(n_pairs))
 
-    tol_abs = 0.09
-    assert 0.0 < combined_se < tol_abs, (
-        f"combined_se={combined_se} is not tight enough to be a meaningful gate (tol_abs={tol_abs})"
+    tol_abs = 0.08
+    assert 0.0 < se_diff < tol_abs, (
+        f"se_diff={se_diff} is not tight enough to be a meaningful gate (tol_abs={tol_abs})"
     )
-    assert abs(qe.pv - euler.pv) < 3.0 * combined_se, (
-        f"qe.pv={qe.pv}, euler.pv={euler.pv}, "
-        f"off by {(qe.pv - euler.pv) / combined_se:.2f} combined SE"
+    assert abs(pv_diff) < 3.0 * se_diff, (
+        f"pv_diff={pv_diff}, off by {pv_diff / se_diff:.2f} paired SE"
     )

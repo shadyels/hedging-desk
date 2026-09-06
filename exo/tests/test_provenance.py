@@ -74,6 +74,33 @@ def test_params_hash_is_sha256_hexdigest_shape() -> None:
     assert all(c in "0123456789abcdef" for c in digest)
 
 
+def test_params_hash_rejects_non_str_top_level_key() -> None:
+    """P1-1 (security review, MEDIUM, 2026-09-06): the signature already declares
+    `Mapping[str, object]`; a prior version silently coerced every key with `str(k)` instead of
+    enforcing that contract, so `params_hash({1: "x"})` and `params_hash({"1": "x"})` collided,
+    and `params_hash({1: "first", "1": "second"})` silently DROPPED the `1` entry (survivor by
+    insertion order). Not reachable from today's call sites (pydantic `model_dump()` and
+    `tomllib` both yield str keys), but `params_hash` is documented as generic infrastructure for
+    P2.M4's `bus/convert.py`, which could hit it."""
+    with pytest.raises(TypeError):
+        params_hash({1: "x"})  # type: ignore[dict-item]
+
+
+def test_params_hash_rejects_non_str_nested_key() -> None:
+    with pytest.raises(TypeError):
+        params_hash({"AAPL": {1: "x"}})  # type: ignore[dict-item]
+
+
+def test_params_hash_does_not_silently_collide_int_and_str_keys() -> None:
+    """The exact collision the security review demonstrated: without the fix, both of these
+    calls raise (a non-str key anywhere is now a loud TypeError), so they cannot silently
+    collide or silently drop an entry."""
+    with pytest.raises(TypeError):
+        params_hash({1: "x"})  # type: ignore[dict-item]
+    with pytest.raises(TypeError):
+        params_hash({1: "first", "1": "second"})  # type: ignore[dict-item]
+
+
 # --- RunManifest / TOML round-trip --------------------------------------------------------------
 
 
@@ -172,6 +199,18 @@ def test_manifest_accepts_max_valid_widths() -> None:
     assert manifest.n_paths == 2**32 - 1
 
 
+def test_manifest_read_rejects_unknown_schema_version(tmp_path: Path) -> None:
+    """P2 (code review 2026-09-06): `RunManifest.read` previously never checked
+    `schema_version`, so a future v2 manifest would be silently read as v1 and mis-fielded."""
+    manifest = _sample_manifest()
+    path = tmp_path / "run.toml"
+    manifest.write(path)
+    raw = path.read_text().replace("schema_version = 1", "schema_version = 2")
+    path.write_text(raw)
+    with pytest.raises(ValueError, match="schema_version"):
+        RunManifest.read(path)
+
+
 # --- to_valuation_meta / A3 proto structural parity ---------------------------------------------
 
 
@@ -213,8 +252,7 @@ def test_git_sha_env_override_is_returned_verbatim(monkeypatch: pytest.MonkeyPat
 def test_git_sha_shape_on_clean_repo(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("EXO_GIT_SHA", raising=False)
     _init_git_repo(tmp_path)
-    monkeypatch.chdir(tmp_path)
-    sha = git_sha()
+    sha = git_sha(repo=tmp_path)
     expected = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True
     ).stdout.strip()
@@ -229,8 +267,7 @@ def test_git_sha_dirty_suffix_on_modified_tree(
     monkeypatch.delenv("EXO_GIT_SHA", raising=False)
     _init_git_repo(tmp_path)
     (tmp_path / "README.md").write_text("changed\n")
-    monkeypatch.chdir(tmp_path)
-    sha = git_sha()
+    sha = git_sha(repo=tmp_path)
     assert sha.endswith("-dirty")
     assert len(sha) == 40 + len("-dirty")
 
@@ -239,6 +276,36 @@ def test_git_sha_raises_provenance_error_outside_a_git_repo(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.delenv("EXO_GIT_SHA", raising=False)
-    monkeypatch.chdir(tmp_path)  # tmp_path is not inside a git repository
     with pytest.raises(ProvenanceError):
-        git_sha()
+        git_sha(repo=tmp_path)  # tmp_path is not inside a git repository
+
+
+def test_git_sha_ignores_cwd_and_uses_repo_param(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """P1-4 (code review 2026-09-06): git_sha() previously ran `git` with no `cwd=`, so it
+    silently read whatever repository the CALLER's CWD happened to be in -- run the pricer from
+    elsewhere and you stamp a DIFFERENT repo's sha onto a number, or get a spurious
+    ProvenanceError from a perfectly good checkout. Prove the CWD is now irrelevant: chdir into
+    a directory that is NOT a git repo, and pass a real repo via `repo=` -- the default (no
+    `repo=`) anchors to the exo package's own directory, not the caller's CWD."""
+    monkeypatch.delenv("EXO_GIT_SHA", raising=False)
+    _init_git_repo(tmp_path)
+    not_a_repo = tmp_path.parent / "not-a-repo"
+    not_a_repo.mkdir()
+    monkeypatch.chdir(not_a_repo)
+    sha = git_sha(repo=tmp_path)
+    assert len(sha) == 40
+    assert not sha.endswith("-dirty")
+
+
+def test_git_sha_default_repo_is_this_package_not_cwd(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The no-argument default must resolve against the exo package's own directory (which is
+    inside the real hedging-desk repo), not the process CWD -- chdir somewhere that is not a git
+    repo at all and confirm git_sha() with NO repo= still succeeds."""
+    monkeypatch.delenv("EXO_GIT_SHA", raising=False)
+    monkeypatch.chdir(tmp_path)  # tmp_path is not inside a git repository
+    sha = git_sha()
+    assert len(sha) == 40 or len(sha) == 40 + len("-dirty")

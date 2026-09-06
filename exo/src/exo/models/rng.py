@@ -26,6 +26,14 @@ It also keeps schemes independent of each other: QE draws `uniforms("variance")`
 Slice 3 will add a Sobol-sequence `RandomSource` implementing this same Protocol;
 nothing here is QMC-specific and nothing should be added in anticipation of it.
 
+STATELESS BY DESIGN, undocumented until now (P1-5, code review 2026-09-06): `_draw` builds a
+fresh `Generator` from `(seed, stream)` on every call and does not mutate `self`. A SECOND CALL
+TO THE SAME STREAM THEREFORE RETURNS THE IDENTICAL ARRAY -- this is not a cache, it is the CRN
+property itself, but it means callers must draw each stream exactly once per `simulate()` call
+(as `heston.py` does) rather than assuming repeated calls advance the stream. M2/M4 authors
+reaching for `rng.normals(shape, stream="x")` a second time expecting NEW numbers will silently
+get the same ones back.
+
 ponytail: stream reproducibility (the golden numbers this module lets us commit to
 tests, and any pinned regression value derived from it) relies on NumPy's own
 promise that a given `Generator` + `BitGenerator` + seed produces the same stream —
@@ -77,6 +85,17 @@ class RandomSource(Protocol):
         """The base seed this source was constructed with."""
         ...
 
+    @property
+    def antithetic(self) -> bool:
+        """Whether this source mirrors draws for antithetic variance reduction.
+
+        `simulate()` (heston.py) requires this to equal the `EngineConfig.antithetic` it was
+        given (P1-5, code review 2026-09-06): a mismatch would draw mirrored samples into a
+        bundle tagged `antithetic=False` (or vice versa), silently routing `mc_estimate` to the
+        wrong -- and in the dangerous direction, WRONGLY LOOSER -- standard-error formula.
+        """
+        ...
+
 
 @dataclass(frozen=True)
 class PseudoRandomSource:
@@ -125,7 +144,22 @@ def _sample(
 ) -> NDArray[np.float64]:
     if sampler == "normal":
         return generator.standard_normal(size=shape)
-    return generator.uniform(low=0.0, high=1.0, size=shape)
+    return _clamp_open_unit_interval(generator.uniform(low=0.0, high=1.0, size=shape))
+
+
+def _clamp_open_unit_interval(u: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Clamp uniform draws strictly inside the OPEN interval (0, 1) (P2, code review
+    2026-09-06). `Generator.uniform`'s half-open `[0, 1)` can return exactly `0.0` (probability
+    ~2**-53, rare but not zero); `heston.py`'s QE scheme computes `ndtri(u)` (`-inf` at `u=0.0`)
+    in the quadratic branch and `(1-p)/(1-u)` (division by zero at `u=1.0`) in the exponential
+    branch -- the latter reachable via the antithetic mirror `1 - 0.0 == 1.0` even though the raw
+    draw itself never returns `1.0`. `np.nextafter` moves either endpoint the smallest
+    representable float64 step inward: noise relative to any real MC estimate, and closes both
+    failure modes for free.
+    """
+    lo = np.nextafter(np.float64(0.0), np.float64(1.0))
+    hi = np.nextafter(np.float64(1.0), np.float64(0.0))
+    return np.clip(u, lo, hi)
 
 
 def _mirror(sampler: str, base: NDArray[np.float64]) -> NDArray[np.float64]:

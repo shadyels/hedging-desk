@@ -3,8 +3,11 @@
 
 Pydantic (not a frozen dataclass) per exo/CLAUDE.md and root CLAUDE.md's ground
 rules: these are LOADED, VALIDATED config, not internal value objects computed by
-the engine. Both models are immutable (`model_config = ConfigDict(frozen=True)`)
-once constructed.
+the engine. Every model here is immutable (`frozen=True`) once constructed and
+rejects unknown keys (`extra="forbid"`, P2 code review 2026-09-06): without it, a
+typo'd `exo.toml` key (e.g. `rh0 = -0.7` instead of `rho = -0.7`) is silently
+DROPPED rather than raising -- the ponytail in `load_models_section` below covers
+only unrecognized SYMBOL sections, not typo'd keys within a recognized one.
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ class HestonParams(BaseModel):
     rho: spot/variance correlation.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     s0: float = Field(gt=0)
     r: float
@@ -48,7 +51,7 @@ class HestonParams(BaseModel):
 class EngineConfig(BaseModel):
     """Monte Carlo engine settings for one `simulate()` call."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     scheme: Scheme
     n_steps: int = Field(gt=0)
@@ -69,7 +72,7 @@ class ModelDefaults(BaseModel):
     """The flat keys of `exo.toml`'s `[models]` table: engine defaults shared
     across underlyings, before any per-underlying `[models.<SYMBOL>]` override."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     scheme: Scheme
     n_steps_per_year: int = Field(gt=0)

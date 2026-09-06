@@ -9,12 +9,16 @@ BACKWARDS over retained `(S, v)` state at every exercise date. A streaming engin
 built now would make that unimplementable in M2 without rewriting this module,
 which the M2 payoff-abstraction rule forbids.
 
-ponytail: retaining the full (n_paths, n_steps+1) `S` and `v` matrices as float64
-costs ~810 MB at 200k paths x 252 steps (two such matrices). Ceiling: that memory
-footprint at that path/step count. Trigger: P2.M2's LSM work, or any run that needs
-more paths/steps than fit in memory at once — retain only a declared observation
-grid, or batch paths (see `PriceResult.combine()` in estimator.py, which exists
-for exactly this).
+ponytail: retaining the full (n_paths, n_steps+1) `S` and `v` matrices as float64 costs ~810 MB
+at 200k paths x 252 steps (two such matrices) -- BUT peak memory is actually ~1.62 GB, not 810
+MB (corrected 2026-09-06, code review P0-1): `simulate()` also allocates the full (n_paths,
+n_steps) DRAW matrices up front (QE: `u`, `z`; euler-ft: `z_variance`, `z_spot`), two more
+float64 arrays of essentially the same size (~806 MB at the same path/step count), alongside
+`S`/`v`. Ceiling: ~1.62 GB at 200k paths x 252 steps (four arrays total). Trigger: P2.M2's LSM
+work, or any run that needs more paths/steps than fit in memory at once — retain only a
+declared observation grid, or batch paths (see `PriceResult.combine()` in estimator.py, which
+exists for exactly this; `studies/scheme_convergence.py`'s `resolve_batch_plan` is the first
+consumer and accounts for all four arrays).
 
 Two schemes are implemented:
 
@@ -73,7 +77,22 @@ class PathBundle:
 
 
 def simulate(params: HestonParams, engine: EngineConfig, rng: RandomSource) -> PathBundle:
-    """Simulate Heston (S, v) paths under `engine.scheme`."""
+    """Simulate Heston (S, v) paths under `engine.scheme`.
+
+    Requires `engine.antithetic == rng.antithetic` (P1-5, code review 2026-09-06): if `rng`
+    mirrors draws but the returned bundle is tagged `antithetic=False` (or vice versa),
+    `mc_estimate` silently picks the wrong standard-error formula -- in the dangerous direction,
+    the naive (too-loose) one -- with no exception anywhere. Raising here instead makes every
+    3-SE gate strictly HARDER to pass by mistake, never easier.
+    """
+    if engine.antithetic != rng.antithetic:
+        raise ValueError(
+            f"EngineConfig.antithetic={engine.antithetic} but RandomSource.antithetic="
+            f"{rng.antithetic} -- these must match. A mismatch silently changes which "
+            "standard-error formula mc_estimate uses (pair-mean vs naive) without changing "
+            "what was actually drawn, which can only make a 3-SE gate falsely pass."
+        )
+
     n_paths = engine.n_paths
     n_steps = engine.n_steps
     dt = engine.expiry / n_steps
@@ -173,6 +192,16 @@ def _qe_step(
     psi = s2 / m**2
     low_branch = psi <= _PSI_C
 
+    # ponytail (P0-3, code review 2026-09-06 -- Amendment A1's required marker, previously
+    # missing): a cell where `quad_denom <= 0` (quadratic branch, A >= 1/(2a)) or `exp_denom <= 0`
+    # (exponential branch, A >= beta) is INADMISSIBLE for the martingale correction and falls
+    # back to the UNCORRECTED `uncorrected_k0` below, per Amendment A1 -- counted via
+    # `fallback_count`/`PathBundle.qe_fallback_count`, not repaired. Ceiling: `E[S]` is only
+    # APPROXIMATELY a martingale on fallback cells; the fallback fraction is reported per sweep
+    # cell as `SweepCell.qe_fallback_fraction` (studies/scheme_convergence.py) precisely so this
+    # is a measured, not assumed, quantity. Trigger: fallback fraction exceeding ~1% on a real
+    # (non-illustrative) parameter set, at which point sub-step those cells (finer local dt)
+    # instead of accepting the uncorrected K0.
     # --- quadratic branch (used where psi <= psi_c) ---
     inv_psi = 2.0 / psi
     b2 = np.maximum(

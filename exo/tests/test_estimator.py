@@ -117,7 +117,7 @@ def test_combine_pooled_mean_close_to_single_batch_reference() -> None:
 
 def test_combine_is_exact_for_equal_variance_batches() -> None:
     """When two batches have IDENTICAL std_err (the common case: equal-size batches
-    of the same engine config), inverse-variance-weighted combine() must reduce to
+    of the same engine config), n_paths-weighted combine() must reduce to
     a plain average of the means and se/sqrt(2) — an exactly checkable case."""
     a = PriceResult(pv=10.0, std_err=0.5, n_paths=1000)
     b = PriceResult(pv=12.0, std_err=0.5, n_paths=1000)
@@ -125,3 +125,62 @@ def test_combine_is_exact_for_equal_variance_batches() -> None:
     assert combined.pv == pytest.approx(11.0)
     assert combined.std_err == pytest.approx(0.5 / math.sqrt(2))
     assert combined.n_paths == 2000
+
+
+def test_combine_uses_n_paths_weighting_not_inverse_variance_weighting() -> None:
+    """P0-4 (code review, 2026-09-06): combine() pools by RAW PATH COUNT (as if pooling the
+    underlying draws), not by inverse-variance. Inverse-variance weighting uses variances
+    ESTIMATED FROM THE SAME DATA it weights, which the reviewer showed introduces a bias of
+    `-(1 - 1/B)*Cov(X_bar, S^2)/sigma^2` -- zero at few batches, growing with batch count B --
+    exactly the axis docs/studies/p2m1-scheme-convergence.md's convergence table sweeps.
+
+    Unequal std_err operands are REQUIRED to tell the two formulas apart: they coincide when
+    std_err is equal (test_combine_is_exact_for_equal_variance_batches, unaffected by this
+    change), so a regression back to inverse-variance weighting would still pass that test.
+    """
+    a = PriceResult(pv=10.0, std_err=1.0, n_paths=100)
+    b = PriceResult(pv=20.0, std_err=2.0, n_paths=300)
+    combined = a.combine(b)
+
+    # n_paths-weighted: w_a = 100/400 = 0.25, w_b = 300/400 = 0.75
+    assert combined.pv == pytest.approx(0.25 * 10.0 + 0.75 * 20.0)  # == 17.5
+    assert combined.std_err == pytest.approx(math.sqrt((0.25 * 1.0) ** 2 + (0.75 * 2.0) ** 2))
+    assert combined.n_paths == 400
+
+    # Inverse-variance weighting (the OLD, now-removed behavior) would give pv=12.0 -- pin that
+    # we are NOT that, so this regresses loudly if combine() reverts.
+    assert combined.pv != pytest.approx(12.0)
+
+
+def test_combine_does_not_divide_by_zero_when_one_operand_has_zero_std_err() -> None:
+    """P0-4: inverse-variance weighting divides by std_err**2 and raises ZeroDivisionError on a
+    zero-SE operand (P1-6 makes a degenerate single-sample SE a loud ValueError instead of a
+    silent NaN, but a LEGITIMATELY zero SE -- e.g. a hand-built PriceResult in a test, or a
+    perfectly-canceling antithetic payoff -- must still combine cleanly)."""
+    a = PriceResult(pv=10.0, std_err=0.0, n_paths=100)
+    b = PriceResult(pv=12.0, std_err=0.5, n_paths=100)
+    combined = a.combine(b)  # must not raise ZeroDivisionError
+    assert combined.pv == pytest.approx(11.0)
+    assert combined.std_err == pytest.approx(0.25)
+
+
+def test_mc_estimate_raises_on_single_antithetic_pair() -> None:
+    """P1-6: n_pairs=1 makes pair_means.std(ddof=1) a silent NaN (need >=2 samples for ddof=1).
+    resolve_batch_plan floors a batch to a minimum of 2 paths (1 antithetic pair), so this is
+    reachable, not merely theoretical -- mc_estimate must fail loudly instead."""
+    bundle = _antithetic_bundle(n_paths=2, n_steps=3, seed=1)
+    payoff = np.array([1.0, 2.0])
+    with pytest.raises(ValueError, match="at least 2"):
+        mc_estimate(bundle, payoff)
+
+
+def test_mc_estimate_raises_on_single_path_non_antithetic() -> None:
+    """P1-6: the non-antithetic branch has the same ddof=1 degenerate case at n_paths=1."""
+    params = HestonParams(
+        s0=100.0, r=0.02, q=0.01, v0=0.04, kappa=1.5, theta=0.04, xi=0.6, rho=-0.7
+    )
+    engine = EngineConfig(scheme="qe", n_steps=3, n_paths=1, expiry=1.0, antithetic=False)
+    bundle = simulate(params, engine, PseudoRandomSource(seed=5, antithetic=False))
+    payoff = np.array([1.0])
+    with pytest.raises(ValueError, match="at least 2"):
+        mc_estimate(bundle, payoff)

@@ -31,22 +31,39 @@ study-only streaming variant.
    correlation between rows.
 
 2. **Peak memory per batch depends on `n_steps`, so the batch SIZE must too.** Peak memory for
-   one batch is `n_paths_per_batch * (n_steps + 1) * 2 arrays * 8 bytes` (`S` and `v`, float64 --
-   `models/heston.py`'s `PathBundle`, whose own ponytail marker documents a ~810 MB ceiling at
-   200k paths x 252 steps). A FIXED `n_paths_per_batch` sized for that 252-step figure blows the
-   same ceiling 4x over at `n_steps=1008` (200k x 1009 x 2 x 8 = 3.23 GB) -- batching exists
-   precisely to keep peak memory at one batch, and holding batch SIZE constant instead of peak
-   memory constant defeats that at exactly the step counts where the path matrix is largest.
-   `resolve_batch_plan` instead holds `paths_per_cell` (the quantity that actually determines the
-   cell's SE) constant and derives `n_paths_per_batch` per `n_steps` to respect
-   `max_batch_bytes` (default 800_000_000, just under the 810 MB figure above).
+   one batch is `n_paths_per_batch * (n_steps + 1) * _BYTES_PER_PATH_STEP` bytes. `heston.py`'s
+   `simulate()` allocates FOUR (n_paths, n_steps[+1]) float64 arrays up front -- `S`, `v`, and
+   TWO draw matrices (QE: `u`, `z`; euler-ft: `z_variance`, `z_spot`) -- not two (corrected
+   2026-09-06, P0-1: an earlier revision of this module counted only `S`/`v`, understating peak
+   memory by 2x and letting a 200k-path batch actually peak at ~1.62 GB against an 800 MB
+   declared ceiling at `n_steps=1008`). A FIXED `n_paths_per_batch` sized for a coarse step count
+   blows the SAME ceiling at a fine one -- batching exists precisely to keep peak memory at one
+   batch, and holding batch SIZE constant instead of peak memory constant defeats that at exactly
+   the step counts where the path matrix is largest. `resolve_batch_plan` instead holds
+   `paths_per_cell` (the quantity that actually determines the cell's SE) constant and derives
+   `n_paths_per_batch` per `n_steps` to respect `max_batch_bytes` (default 800_000_000).
 
-Batches are EQUAL-SIZE within a cell, deliberately: `PriceResult.combine()`'s inverse-variance
-weighting reduces exactly to a plain average when both operands' `std_err` are equal. Where
-`paths_per_cell` does not divide evenly by the memory-derived `n_paths_per_batch`,
-`n_batches = ceil(paths_per_cell / n_paths_per_batch)` and the ACTUAL total paths simulated
-(`n_batches * n_paths_per_batch`) is rounded UP from `paths_per_cell` rather than left as one
-ragged, smaller final batch.
+Batches are EQUAL-SIZE within a cell, deliberately: `PriceResult.combine()` pools by raw path
+count (P0-4, code review 2026-09-06 -- see estimator.py's `combine()` docstring for why this
+replaced an earlier inverse-variance-weighted version), which for equal-`n_paths` operands
+reduces to a plain average -- equal-size batches keep that property exact rather than
+approximate. Where `paths_per_cell` does not divide evenly by the memory-derived
+`n_paths_per_batch`, `n_batches = ceil(paths_per_cell / n_paths_per_batch)` and the ACTUAL total
+paths simulated (`n_batches * n_paths_per_batch`) is rounded UP from `paths_per_cell` rather than
+left as one ragged, smaller final batch.
+
+**`rank_schemes` needs its OWN minimum-precision conjunct** (P0-2, code review 2026-09-06): every
+other gate in this slice asserts `|bias| < 3*se` AND `se < tol_abs` (a test that can pass by
+being imprecise is not a gate) -- `rank_schemes` originally checked only the first, so a scheme
+with higher payoff variance could pass at a COARSER step count and win the ranking BECAUSE it is
+less precise. `se_tol_for_paths_per_cell` derives a bound from `paths_per_cell`; see its own
+docstring and `rank_schemes`' for the exact rule, which the rendered report also states.
+
+**The QE inadmissibility fallback fraction is reported, not merely counted** (P0-3, BLOCKER, code
+review 2026-09-06): `PathBundle.qe_fallback_count` (heston.py) existed but was consumed by
+nothing, making Amendment A1's stated upgrade trigger ("fallback fraction exceeding a threshold")
+unobservable. `price_batched_multi_strike` aggregates it into `SweepCell.qe_fallback_fraction`,
+and `render_report` gives it its own column.
 
 Payoffs are computed INLINE (`np.exp(-r*T) * np.maximum(S[:, -1] - strike, 0.0)`) at every call
 site in this module. Slice 1 ships NO payoff abstraction -- slice 2 designs `Payoff` against two
@@ -102,8 +119,11 @@ DEFAULT_SEED = 20260906
 # determines a cell's SE. ~16x a single 200k-path batch, per the planning spike in this module's
 # docstring.
 DEFAULT_PATHS_PER_CELL = 3_200_000
-# Peak-memory ceiling per batch, in bytes. Just under `models/heston.py`'s own ~810 MB ponytail
-# figure for its (S, v) path matrices at 200k paths x 252 steps.
+# Peak-memory ceiling per batch, in bytes. A round ~800 MB budget this study chooses for itself
+# -- resolve_batch_plan sizes n_paths_per_batch per n_steps so no batch exceeds it. Below (not
+# "just under": corrected 2026-09-06, P0-1) `models/heston.py`'s own ~1.62 GB ponytail figure for
+# ALL FOUR of its (n_paths, n_steps[+1]) arrays at 200k paths x 252 steps -- a FIXED batch size at
+# that figure is exactly what this module's docstring, fix 2, replaced.
 DEFAULT_MAX_BATCH_BYTES = 800_000_000
 
 _THIS_FILE = Path(__file__).resolve()
@@ -112,7 +132,11 @@ _EXO_ROOT = _THIS_FILE.parents[3]  # .../hedging-desk/exo
 DEFAULT_REPORT_PATH = _REPO_ROOT / "docs" / "studies" / "p2m1-scheme-convergence.md"
 DEFAULT_MANIFEST_DIR = _EXO_ROOT / "run-manifests"
 
-_BYTES_PER_PATH_STEP = 2 * 8  # S and v, float64
+# All FOUR arrays heston.py's simulate() allocates at (n_paths, n_steps[+1]) size, float64: S,
+# v, and the two draw matrices (QE: u, z; euler-ft: z_variance, z_spot). Corrected 2026-09-06
+# (P0-1, code review): an earlier revision counted only S and v (2 * 8), understating peak memory
+# by 2x -- see module docstring, fix 2.
+_BYTES_PER_PATH_STEP = 4 * 8
 
 
 @dataclass(frozen=True)
@@ -122,6 +146,11 @@ class SweepCell:
     `n_paths_per_batch`/`n_batches` are recorded per cell because `resolve_batch_plan` derives
     them from `n_steps` (see module docstring, fix 2): they vary across the step-count grid even
     though every cell targets the same `paths_per_cell`.
+
+    `qe_fallback_fraction` (P0-3, code review 2026-09-06) is the fraction of (path, step) cells
+    across this cell's batches where QE's martingale correction was inadmissible and fell back to
+    the uncorrected K0 (see `heston.py`'s `_qe_step` ponytail marker); `None` for "euler-ft",
+    which has no such correction to fall back from.
     """
 
     scheme: Scheme
@@ -136,6 +165,7 @@ class SweepCell:
     wall_time_s: float
     n_paths_per_batch: int
     n_batches: int
+    qe_fallback_fraction: float | None
 
 
 def _sub_seed(base_seed: int, batch: int) -> int:
@@ -191,6 +221,19 @@ def resolve_batch_plan(
         n_paths_per_batch = min(paths_per_cell, max_paths_by_memory)
         n_paths_per_batch -= n_paths_per_batch % 2
         n_paths_per_batch = max(n_paths_per_batch, 2)
+        # P2 (code review 2026-09-06): symmetry with the override branch's warning above. The
+        # floor-of-2 minimum can itself exceed a sufficiently tiny max_batch_bytes -- unreachable
+        # at production values, but should warn rather than silently proceed, same as the
+        # explicit-override branch does.
+        footprint = n_paths_per_batch * bytes_per_path
+        if footprint > max_batch_bytes:
+            print(
+                f"WARNING: memory-derived n_paths_per_batch={n_paths_per_batch} at "
+                f"n_steps={n_steps} still needs {footprint / 1e9:.2f} GB, over "
+                f"--max-batch-bytes ({max_batch_bytes / 1e9:.2f} GB) -- the floor-of-2 minimum "
+                "exceeds the budget at this n_steps.",
+                flush=True,
+            )
 
     n_batches = math.ceil(paths_per_cell / n_paths_per_batch)
     return n_paths_per_batch, n_batches
@@ -205,17 +248,21 @@ def price_batched_multi_strike(
     n_paths_per_batch: int,
     n_batches: int,
     base_seed: int,
-) -> tuple[dict[float, PriceResult], dict[float, float]]:
+) -> tuple[dict[float, PriceResult], dict[float, float], float | None]:
     """Run `n_batches` EQUAL-SIZE batches of the PRODUCTION `simulate()`, ONE PER BATCH, sharing
     each batch's `PathBundle` across ALL `strikes` (module docstring, fix 1): `mc_estimate()` is
     called once per strike against that same bundle, and each strike's `PriceResult` is folded
     into its OWN `combine()` accumulator across batches. Peak memory stays at one batch; batch
     `b` draws from `_sub_seed(base_seed, b)`.
 
-    Returns `(per-strike combined PriceResult, per-strike wall_time_s)`. A strike's `wall_time_s`
-    is its own `mc_estimate` time plus an EVEN SHARE of the batches' `simulate()` time -- that
-    time serves every strike equally (one bundle, many payoffs), so it is amortized across them
-    rather than attributed to one strike or double-counted across all of them.
+    Returns `(per-strike combined PriceResult, per-strike wall_time_s, qe_fallback_fraction)`.
+    A strike's `wall_time_s` is its own `mc_estimate` time plus an EVEN SHARE of the batches'
+    `simulate()` time -- that time serves every strike equally (one bundle, many payoffs), so it
+    is amortized across them rather than attributed to one strike or double-counted across all of
+    them. `qe_fallback_fraction` (P0-3, code review 2026-09-06) is the fraction of (path, step)
+    cells across all batches where QE's martingale correction fell back to the uncorrected K0 --
+    shared across every strike (it is a property of the bundle, not the payoff) -- or `None` for
+    "euler-ft", which has no such diagnostic (`PathBundle.qe_fallback_count is None` there).
     """
     if n_batches < 1:
         raise ValueError(f"n_batches must be >= 1, got {n_batches}")
@@ -225,6 +272,8 @@ def price_batched_multi_strike(
     combined: dict[float, PriceResult | None] = dict.fromkeys(strikes)
     strike_time: dict[float, float] = dict.fromkeys(strikes, 0.0)
     sim_time_total = 0.0
+    fallback_count_total = 0
+    fallback_cells_total = 0
     for batch in range(n_batches):
         engine = EngineConfig(
             scheme=scheme,
@@ -237,6 +286,9 @@ def price_batched_multi_strike(
         t0 = time.perf_counter()
         bundle = simulate(params, engine, rng)
         sim_time_total += time.perf_counter() - t0
+        if bundle.qe_fallback_count is not None:
+            fallback_count_total += bundle.qe_fallback_count
+            fallback_cells_total += n_paths_per_batch * n_steps
 
         for strike in strikes:
             t1 = time.perf_counter()
@@ -254,7 +306,11 @@ def price_batched_multi_strike(
         assert result is not None  # n_batches >= 1 is enforced above
         results[strike] = result
         wall_time[strike] = shared_share + strike_time[strike]
-    return results, wall_time
+
+    qe_fallback_fraction = (
+        fallback_count_total / fallback_cells_total if fallback_cells_total > 0 else None
+    )
+    return results, wall_time, qe_fallback_fraction
 
 
 def run_sweep(
@@ -287,18 +343,27 @@ def run_sweep(
     ]
     total_units = len(units)
     rows: list[SweepCell] = []
+    # P2 (code review 2026-09-06): heston_vanilla_price depends on (param_set, strike, expiry)
+    # only -- not on scheme or n_steps -- so caching it here turns len(schemes)*len(n_steps_grid)
+    # repeated quadratures per (param_set, strike, expiry) into exactly one.
+    reference_cache: dict[tuple[str, float, float], float] = {}
     start = time.perf_counter()
     for done, (scheme, n_steps, param_set_name, expiry) in enumerate(units, start=1):
         params = _PARAM_SETS[param_set_name]
         n_paths_per_batch, n_batches = resolve_batch_plan(
             n_steps, paths_per_cell, max_batch_bytes, n_paths_per_batch_override
         )
-        results, wall_times = price_batched_multi_strike(
+        results, wall_times, qe_fallback_fraction = price_batched_multi_strike(
             params, scheme, n_steps, expiry, strikes, n_paths_per_batch, n_batches, base_seed
         )
         for strike in strikes:
             result = results[strike]
-            reference = heston_vanilla_price(params, strike, expiry, is_call=True)
+            cache_key = (param_set_name, strike, expiry)
+            if cache_key not in reference_cache:
+                reference_cache[cache_key] = heston_vanilla_price(
+                    params, strike, expiry, is_call=True
+                )
+            reference = reference_cache[cache_key]
             bias = result.pv - reference
             bias_over_se = bias / result.std_err if result.std_err > 0.0 else math.inf
             rows.append(
@@ -315,6 +380,7 @@ def run_sweep(
                     wall_time_s=wall_times[strike],
                     n_paths_per_batch=n_paths_per_batch,
                     n_batches=n_batches,
+                    qe_fallback_fraction=qe_fallback_fraction,
                 )
             )
 
@@ -332,22 +398,53 @@ def run_sweep(
     return rows
 
 
-def rank_schemes(rows: Sequence[SweepCell]) -> Scheme:
-    """The scheme whose `|bias|` first falls inside 3 SE at the COARSEST step count, across BOTH
-    parameter sets, tie-broken on wall time.
+# Empirical scale for this study's discounted call payoff standard deviation across its
+# strike/expiry/param-set grid: `se * sqrt(n_paths)` measured in test_validation_gates.py's G1/G2
+# gates (n_paths=20_000) tops out at ~0.073*sqrt(20_000) ~= 10.3 (G2, the degenerate
+# Black-Scholes gate, the widest measured case). 12.0 keeps a margin above that measured worst
+# case without being so loose the se_tol conjunct below stops meaning anything.
+_SE_TOL_REFERENCE_PAYOFF_STD = 12.0
+
+
+def se_tol_for_paths_per_cell(paths_per_cell: int) -> float:
+    """Minimum-precision bound for `rank_schemes`' `se_tol` conjunct (P0-2, code review
+    2026-09-06): `se_tol = _SE_TOL_REFERENCE_PAYOFF_STD / sqrt(paths_per_cell)`.
+
+    This is the standard MC standard-error scaling (`se ~ payoff_std / sqrt(n)`) run backwards:
+    given a conservative upper bound on this study's payoff standard deviation
+    (`_SE_TOL_REFERENCE_PAYOFF_STD`, derived from measured gate SEs -- see its own comment), this
+    is the `se` a cell run at `paths_per_cell` total paths SHOULD achieve. A row reporting a
+    LARGER `se` than this at the same nominal path count is behaving worse than that reference
+    payoff, so `rank_schemes` treats it as too imprecise to count as a pass, regardless of how
+    small `|bias|` looks relative to that inflated `se`.
+    """
+    return _SE_TOL_REFERENCE_PAYOFF_STD / math.sqrt(paths_per_cell)
+
+
+def rank_schemes(rows: Sequence[SweepCell], se_tol: float) -> Scheme:
+    """The scheme whose `|bias|` first falls inside 3 SE, AT A PRECISION OF AT LEAST `se_tol`, at
+    the COARSEST step count, across BOTH parameter sets, tie-broken on wall time.
 
     Concretely: group each scheme's rows by `n_steps`. A step count "passes" for a scheme when,
     across every row recorded at that step count (every param_set / strike / expiry combination
-    present, with both param sets required to be represented), `|bias| < 3*se` holds for ALL of
-    them. Each scheme's rank key is `(smallest passing n_steps, else +inf; total wall time of the
-    rows at that n_steps)`; schemes are ordered by that key ascending -- a coarser passing step
-    count wins outright, and summed wall time at that step count breaks a tie between schemes that
-    first pass at the same step count.
+    present, with both param sets required to be represented), BOTH `|bias| < 3*se` AND
+    `se < se_tol` hold for ALL of them. Each scheme's rank key is `(smallest passing n_steps, else
+    +inf; total wall time of the rows at that n_steps)`; schemes are ordered by that key ascending
+    -- a coarser passing step count wins outright, and summed wall time at that step count breaks
+    a tie between schemes that first pass at the same step count.
 
-    Strike rows at a step count are now priced off a SHARED `PathBundle` (module docstring, fix
-    1) and are therefore correlated with each other. That does not affect this check: "ALL rows
-    pass" is a conjunction of independent per-row bounds (`|bias| < 3*se`), not a comparison
-    BETWEEN rows, so correlation between them changes nothing about what this function computes.
+    The `se_tol` conjunct exists (P0-2, BLOCKER-adjacent, code review 2026-09-06) because
+    `|bias| < 3*se` alone is vacuously easier to satisfy the LARGER `se` is: a scheme with higher
+    payoff variance could pass at a coarser step count and win the ranking BECAUSE it is less
+    precise, exactly the failure mode every other 3-SE gate in this slice already guards against
+    with a second conjunct bounding `se` itself (see test_validation_gates.py's module
+    docstring). `se_tol_for_paths_per_cell` derives a principled `se_tol` from `paths_per_cell`;
+    callers pass it in explicitly (no default) so the derivation is visible at the call site.
+
+    Strike rows at a step count are priced off a SHARED `PathBundle` (module docstring, fix 1)
+    and are therefore correlated with each other. That does not affect this check: "ALL rows
+    pass" is a conjunction of independent per-row bounds, not a comparison BETWEEN rows, so
+    correlation between them changes nothing about what this function computes.
     """
     schemes = sorted({row.scheme for row in rows})
     if not schemes:
@@ -366,7 +463,7 @@ def rank_schemes(rows: Sequence[SweepCell]) -> Scheme:
             group = by_steps[n_steps]
             if len({row.param_set for row in group}) < 2:
                 continue  # both param sets must be represented at this step count
-            if all(abs(row.bias) < 3.0 * row.se for row in group):
+            if all(abs(row.bias) < 3.0 * row.se and row.se < se_tol for row in group):
                 key = (float(n_steps), sum(row.wall_time_s for row in group))
                 break
 
@@ -430,10 +527,16 @@ def render_report(
     chosen: Scheme,
     antithetic_reduction: Mapping[str, float],
     manifest: RunManifest,
+    se_tol: float,
 ) -> str:
     """Render the study's markdown artifact (written to `docs/studies/p2m1-scheme-convergence.md`
     by `main()`). The illustrative/uncalibrated disclaimer is the FIRST content line, so the
-    scheme decision is never read out of context."""
+    scheme decision is never read out of context.
+
+    `se_tol` (P0-2, code review 2026-09-06) is the precision bound `rank_schemes` was called
+    with; it is recorded here so a reader of ADR-006 Amendment 4 s4 can see exactly how the
+    scheme decision was made, not just what it was.
+    """
     lines: list[str] = [
         "# P2.M1 Slice 1 -- Scheme Convergence Study (QE vs full-truncation Euler)",
         "",
@@ -449,6 +552,17 @@ def render_report(
         f"- git_sha: `{manifest.git_sha}`",
         f"- params_hash: `{manifest.params_hash}`",
         f"- run_id: `{manifest.run_id}`",
+        "- NOTE: `engine.n_steps` in the manifest reflects only the FINEST grid point swept "
+        "(the manifest schema has one `n_steps` field; this study sweeps seven) -- see the "
+        "sweep table below for the full grid.",
+        "",
+        "## Ranking rule",
+        "",
+        "The scheme whose `|bias| < 3*se` AND `se < se_tol` first holds for EVERY row (both "
+        "param sets, every strike/expiry) at a given step count, at the COARSEST such step "
+        f"count, tie-broken on wall time. `se_tol = {se_tol:.6f}` for this run "
+        "(`se_tol_for_paths_per_cell`, derived from the target paths per cell above) -- see "
+        "`rank_schemes`' docstring for why a bias-only check is not enough.",
         "",
         "## Antithetic variance reduction achieved",
         "",
@@ -469,17 +583,23 @@ def render_report(
         "",
         "Strike rows at a given (scheme, n_steps, param_set, expiry) share one `PathBundle` "
         "(common random numbers across strikes -- module docstring fix 1), so their biases are "
-        "directly comparable rather than differing partly by sampling noise.",
+        "directly comparable rather than differing partly by sampling noise. `qe_fallback_frac` "
+        "is the fraction of (path, step) cells where QE's martingale correction fell back to "
+        "the uncorrected K0 (Amendment A1); blank for euler-ft, which has no such fallback.",
         "",
         "| scheme | n_steps | param_set | strike | expiry | pv | se | bias | bias/se | "
-        "wall_time_s | n_paths_per_batch | n_batches |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "wall_time_s | n_paths_per_batch | n_batches | qe_fallback_frac |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for row in rows:
+        fallback_str = (
+            f"{row.qe_fallback_fraction:.4%}" if row.qe_fallback_fraction is not None else ""
+        )
         lines.append(
             f"| {row.scheme} | {row.n_steps} | {row.param_set} | {row.strike} | {row.expiry} | "
             f"{row.pv:.5f} | {row.se:.5f} | {row.bias:+.5f} | {row.bias_over_se:+.2f} | "
-            f"{row.wall_time_s:.3f} | {row.n_paths_per_batch} | {row.n_batches} |"
+            f"{row.wall_time_s:.3f} | {row.n_paths_per_batch} | {row.n_batches} | "
+            f"{fallback_str} |"
         )
     lines.append("")
     return "\n".join(lines)
@@ -491,6 +611,7 @@ class StudyResult:
     chosen_scheme: Scheme
     antithetic_reduction: dict[str, float]
     manifest: RunManifest
+    se_tol: float
 
 
 def run_study(
@@ -525,7 +646,8 @@ def run_study(
         expiries=expiries,
         verbose=verbose,
     )
-    chosen = rank_schemes(rows)
+    se_tol = se_tol_for_paths_per_cell(paths_per_cell)
+    chosen = rank_schemes(rows, se_tol=se_tol)
 
     representative_n_steps = n_steps_grid[len(n_steps_grid) // 2]
     representative_strike = strikes[len(strikes) // 2]
@@ -566,6 +688,7 @@ def run_study(
         chosen_scheme=chosen,
         antithetic_reduction=antithetic_reduction,
         manifest=manifest,
+        se_tol=se_tol,
     )
 
 
@@ -613,7 +736,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         base_seed=args.seed,
     )
     report = render_report(
-        result.rows, result.chosen_scheme, result.antithetic_reduction, result.manifest
+        result.rows,
+        result.chosen_scheme,
+        result.antithetic_reduction,
+        result.manifest,
+        se_tol=result.se_tol,
     )
 
     out_path: Path = args.out
