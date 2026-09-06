@@ -1,0 +1,146 @@
+"""Tests for exo.models.heston: PathBundle + simulate().
+
+Covers shapes, the QE non-negativity-by-construction invariant, full-truncation
+Euler's signed-variance-state invariant, determinism, and the martingale property
+`E[S_T]/S0 == exp((r-q)*T)` within 3 standard errors for BOTH schemes.
+
+The QE martingale test uses a DELIBERATELY COARSE step count (n_steps=4 over T=1,
+per the orchestrator's 2026-09-06 amendment A1) because a wrong or missing
+martingale correction on K0 produces a large, easily-detected bias at coarse dt —
+this is what actually exercises the branch-dependent K0* correction rather than
+being swamped by small-dt behavior converging to "correct" regardless.
+"""
+
+import math
+
+import numpy as np
+import pytest
+from pydantic import ValidationError
+
+from exo.models.estimator import mc_estimate
+from exo.models.heston import simulate
+from exo.models.params import EngineConfig, HestonParams
+from exo.models.rng import PseudoRandomSource
+
+# Illustrative Heston parameters, deliberately Feller-VIOLATING
+# (2*kappa*theta/xi**2 = 2*1.5*0.04/0.36 = 0.333 < 1): this is the regime where QE
+# and full-truncation Euler actually differ, per exo/CLAUDE.md engine constraints.
+FELLER_VIOLATING = HestonParams(
+    s0=100.0, r=0.02, q=0.01, v0=0.04, kappa=1.5, theta=0.04, xi=0.6, rho=-0.7
+)
+
+
+def _engine(scheme: str, n_steps: int, n_paths: int, expiry: float = 1.0) -> EngineConfig:
+    return EngineConfig(
+        scheme=scheme, n_steps=n_steps, n_paths=n_paths, expiry=expiry, antithetic=True
+    )
+
+
+@pytest.mark.parametrize("scheme", ["qe", "euler-ft"])
+def test_bundle_shapes(scheme: str) -> None:
+    engine = _engine(scheme, n_steps=20, n_paths=100)
+    rng = PseudoRandomSource(seed=1)
+    bundle = simulate(FELLER_VIOLATING, engine, rng)
+    assert bundle.t.shape == (21,)
+    assert bundle.S.shape == (100, 21)
+    assert bundle.v.shape == (100, 21)
+    assert bundle.antithetic is True
+    assert bundle.n_pairs == 50
+
+
+def test_qe_variance_is_exactly_nonnegative() -> None:
+    engine = _engine("qe", n_steps=50, n_paths=2000)
+    rng = PseudoRandomSource(seed=7)
+    bundle = simulate(FELLER_VIOLATING, engine, rng)
+    assert np.all(bundle.v >= 0.0)
+
+
+def test_euler_ft_stores_signed_variance_state() -> None:
+    """Full truncation clips the USE of v (in drift/diffusion), never the STATE.
+    Under a Feller-violating parameter set with a non-trivial dt, some stored v
+    must go negative — if this test can never observe a negative entry, the state
+    is being clipped, which is a different (higher-bias) scheme than specified."""
+    engine = _engine("euler-ft", n_steps=20, n_paths=20_000, expiry=1.0)
+    rng = PseudoRandomSource(seed=7)
+    bundle = simulate(FELLER_VIOLATING, engine, rng)
+    assert np.any(bundle.v < 0.0)
+
+
+def test_same_seed_gives_bitwise_identical_paths() -> None:
+    engine = _engine("qe", n_steps=10, n_paths=200)
+    bundle_a = simulate(FELLER_VIOLATING, engine, PseudoRandomSource(seed=555))
+    bundle_b = simulate(FELLER_VIOLATING, engine, PseudoRandomSource(seed=555))
+    assert np.array_equal(bundle_a.S, bundle_b.S)
+    assert np.array_equal(bundle_a.v, bundle_b.v)
+
+
+# Deliberately more extreme than FELLER_VIOLATING, and chosen to put essentially
+# ALL (path, step) cells in QE's QUADRATIC branch (psi <= psi_c) at a single,
+# very coarse step (n_steps=1, T=1) — low xi keeps psi small; large v0/kappa*T
+# makes the correction's magnitude large. This is what actually exercises the
+# quadratic branch's K0* term: a mild parameter set (e.g. feller_ratio=0.33,
+# moderate xi) puts most mass in the EXPONENTIAL branch at coarse dt instead, so a
+# broken quadratic-branch correction can hide undetected. Measured with an
+# injected sign error in the quadratic branch's log term (see this worker's final
+# report): off by -802 SE — a screamingly loud failure — versus -1.04 SE for the
+# correct sign. That gap is what makes this a meaningful gate; the milder
+# FELLER_VIOLATING set at n_steps=4 measured only -0.42 SE (correct) vs -0.48 SE
+# (no correction at all) — indistinguishable, hence not used here.
+MARTINGALE_STRESS = HestonParams(
+    s0=100.0, r=0.02, q=0.01, v0=0.16, kappa=2.0, theta=0.04, xi=0.3, rho=-0.9
+)
+
+
+@pytest.mark.parametrize("scheme", ["qe", "euler-ft"])
+def test_martingale_property_coarse_dt(scheme: str) -> None:
+    """E[S_T * exp(-(r-q)*T)] / s0 must be 1 within 3 SE, at a COARSE step count
+    (n_steps=1, T=1) and stress parameters chosen specifically to make a wrong QE
+    martingale correction fail loudly rather than being hidden either by small-dt
+    convergence or by a parameter set/branch mix too mild to expose the
+    correction's effect."""
+    engine = _engine(scheme, n_steps=1, n_paths=200_000, expiry=1.0)
+    rng = PseudoRandomSource(seed=2024)
+    bundle = simulate(MARTINGALE_STRESS, engine, rng)
+
+    discount = math.exp(-(MARTINGALE_STRESS.r - MARTINGALE_STRESS.q) * engine.expiry)
+    discounted_terminal = discount * bundle.S[:, -1]
+    result = mc_estimate(bundle, discounted_terminal)
+
+    ratio = result.pv / MARTINGALE_STRESS.s0
+    se_ratio = result.std_err / MARTINGALE_STRESS.s0
+
+    assert se_ratio < 0.01, f"SE too loose to be a meaningful gate: se_ratio={se_ratio}"
+    assert abs(ratio - 1.0) < 3 * se_ratio, (
+        f"{scheme}: E[S_T]/S0 discounted ratio={ratio}, expected 1.0, "
+        f"off by {(ratio - 1.0) / se_ratio:.2f} SE"
+    )
+
+
+def test_qe_exposes_fallback_diagnostic_and_euler_does_not() -> None:
+    engine = _engine("qe", n_steps=4, n_paths=1000)
+    bundle = simulate(FELLER_VIOLATING, engine, PseudoRandomSource(seed=3))
+    assert bundle.qe_fallback_count is not None
+    assert bundle.qe_fallback_count >= 0
+
+    engine_euler = _engine("euler-ft", n_steps=4, n_paths=1000)
+    bundle_euler = simulate(FELLER_VIOLATING, engine_euler, PseudoRandomSource(seed=3))
+    assert bundle_euler.qe_fallback_count is None
+
+
+def test_heston_params_rejects_rho_outside_open_unit_interval() -> None:
+    with pytest.raises(ValidationError):
+        HestonParams(s0=100, r=0.0, q=0.0, v0=0.04, kappa=1.0, theta=0.04, xi=0.5, rho=1.5)
+
+
+def test_heston_params_feller_ratio() -> None:
+    assert FELLER_VIOLATING.feller_ratio == pytest.approx(2 * 1.5 * 0.04 / 0.36)
+
+
+def test_engine_config_rejects_unknown_scheme() -> None:
+    with pytest.raises(ValidationError):
+        EngineConfig(scheme="tree", n_steps=10, n_paths=100, expiry=1.0, antithetic=True)
+
+
+def test_engine_config_rejects_odd_n_paths_when_antithetic() -> None:
+    with pytest.raises(ValidationError):
+        EngineConfig(scheme="qe", n_steps=10, n_paths=101, expiry=1.0, antithetic=True)
