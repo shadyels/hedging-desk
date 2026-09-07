@@ -1,7 +1,7 @@
 schema_version = 1
-run_id = "2026-09-07T12-22-27Z-scheme-convergence"
-created_ns = 1788783747273783000
-git_sha = "b813a7654a61c0f401daa47a312401695e1317ba"
+run_id = "2026-09-07T21-10-10Z-scheme-convergence"
+created_ns = 1788815410864791000
+git_sha = "0a36eba54ff9cbbe0410ecbf2a11b23d4e83e1c5"
 model_id = "heston-scheme-convergence-v1"
 params_hash = "1c6059c947d021bc63613316713a87ad9e965df5b35a05c7d0e06370c9cbb3ee"
 seed = 20260906
