@@ -187,6 +187,32 @@ def test_qe_exposes_fallback_diagnostic_and_euler_does_not() -> None:
     assert bundle_euler.qe_fallback_count is None
 
 
+# Deliberately extreme (kappa*rho/xi far outside any illustrative parameter set this slice uses)
+# to brute-force EVERY (path, step) cell into the martingale correction's inadmissible region
+# (SHOULD-5, third code-review round, 2026-09-06). Verified directly before writing this test:
+# with n_steps=1, n_paths=2000, expiry=2.0 (dt=2.0), qe_fallback_count == n_paths == 2000 (100%).
+QE_FALLBACK_STRESS = HestonParams(
+    s0=100.0, r=0.02, q=0.01, v0=0.04, kappa=20.0, theta=0.04, xi=5.0, rho=0.99
+)
+
+
+def test_qe_fallback_count_non_zero_path_is_exercised() -> None:
+    """SHOULD-5: every existing assertion on `qe_fallback_count`/`qe_fallback_fraction` is
+    satisfied at zero (`>= 0`, `is not None`), and every QE row in the definitive artifact reads
+    0.0000% -- an inverted `fallback_mask` (`~quad_admissible` swapped for `quad_admissible`, or
+    vice versa in the exponential branch) or a broken aggregation (e.g. summing the wrong array,
+    or never incrementing) would look IDENTICAL to a correct implementation under every test that
+    only ever observes zero. This forces the inadmissible branch with QE_FALLBACK_STRESS and
+    asserts the count is not just non-zero but essentially the WHOLE grid (fraction ~= 1.0),
+    matching the value independently verified before this test was written."""
+    engine = EngineConfig(scheme="qe", n_steps=1, n_paths=2000, expiry=2.0, antithetic=True)
+    bundle = simulate(QE_FALLBACK_STRESS, engine, PseudoRandomSource(seed=1))
+    assert bundle.qe_fallback_count is not None
+    assert bundle.qe_fallback_count > 0
+    fraction = bundle.qe_fallback_count / (engine.n_paths * engine.n_steps)
+    assert fraction == pytest.approx(1.0)
+
+
 def test_heston_params_rejects_rho_outside_open_unit_interval() -> None:
     with pytest.raises(ValidationError):
         HestonParams(s0=100, r=0.0, q=0.0, v0=0.04, kappa=1.0, theta=0.04, xi=0.5, rho=1.5)

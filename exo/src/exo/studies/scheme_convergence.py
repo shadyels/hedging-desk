@@ -90,6 +90,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import sys
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -468,7 +469,7 @@ def _shared_se_per_cell(
 def _first_passing_step(
     scheme_rows: Sequence[SweepCell],
     shared_se: Mapping[tuple[int, str, float, float], tuple[float, int]],
-) -> tuple[int, float] | None:
+) -> tuple[int, float, int] | None:
     """The coarsest `n_steps` (from `scheme_rows`, one scheme's rows only) at which EVERY row
     recorded at that step count (every param_set / strike / expiry combination present, with
     both param sets required to be represented) satisfies `|bias| < 3 * shared_se[cell]`, AND
@@ -476,8 +477,14 @@ def _first_passing_step(
     a cell with only 1 scheme present degenerates `shared_se` to that scheme's own `se`, which is
     exactly the bound the shared-SE fix replaced -- such a cell can never count toward a pass).
 
-    Returns `(n_steps, total wall_time_s of the rows at that n_steps)`, or `None` if no step
-    count in `scheme_rows` passes -- this scheme has not converged on this grid.
+    Returns `(n_steps, total wall_time_s of the rows at that n_steps, total paths simulated at
+    that n_steps -- n_paths_per_batch * n_batches, identical across the group since both are
+    derived from n_steps alone)`, or `None` if no step count in `scheme_rows` passes -- this
+    scheme has not converged on this grid. The total-paths figure exists (SHOULD-9, third
+    code-review round, 2026-09-06) so a cost-to-accuracy comparison between two schemes'
+    different first-passing step counts can note when they simulated unequal path counts
+    (`resolve_batch_plan`'s `ceil` rounding), which matters for how conservative the comparison
+    is.
     """
     by_steps: dict[int, list[SweepCell]] = {}
     for row in scheme_rows:
@@ -493,8 +500,24 @@ def _first_passing_step(
         if any(n_schemes < 2 for _se, n_schemes in cell_scales):
             continue  # shared_se degenerates to one scheme's own se at some cell here
         if all(abs(row.bias) < 3.0 * se for row, (se, _n) in zip(group, cell_scales, strict=True)):
-            return n_steps, sum(row.wall_time_s for row in group)
+            total_paths = group[0].n_paths_per_batch * group[0].n_batches
+            return n_steps, sum(row.wall_time_s for row in group), total_paths
     return None
+
+
+class InconclusiveRankingError(ValueError):
+    """Raised by `rank_schemes` when the swept grid cannot support a scheme decision: either no
+    scheme converged at any step count, or every scheme converged at the COARSEST step count
+    swept (no discriminating power -- see `rank_schemes`' docstring). Carries `rows` (SHOULD-7,
+    third code-review round, 2026-09-06) so a caller -- `run_study` -- can still preserve the
+    sweep as evidence (a rendered report) instead of losing a potentially hour-long run with
+    nothing to show for it. Subclasses `ValueError` so existing `pytest.raises(ValueError, ...)`
+    call sites keep working unchanged.
+    """
+
+    def __init__(self, message: str, rows: Sequence[SweepCell]) -> None:
+        super().__init__(message)
+        self.rows = rows
 
 
 def rank_schemes(rows: Sequence[SweepCell]) -> Scheme:
@@ -503,11 +526,24 @@ def rank_schemes(rows: Sequence[SweepCell]) -> Scheme:
 
     A scheme that never passes at any step count in `rows` is EXCLUDED from the ranking, not
     penalized with an infinite key that still competes on wall time -- wall time may only ever
-    break a tie between schemes that BOTH genuinely converged. If NO scheme passes at any step
-    count, this raises `ValueError` rather than silently falling back to ranking by wall time
-    (P0-2, second fix, 2026-09-06): a fallback that quietly becomes the entire decision is a
-    defect in its own right, and it is exactly what let a stopwatch reading (Euler is ~3x faster
-    per step than QE) masquerade as a convergence result in the definitive run.
+    break a tie between schemes that BOTH genuinely converged. This function raises
+    `InconclusiveRankingError` (a `ValueError`) in TWO cases, rather than silently falling back
+    to ranking by wall time, because a fallback that quietly becomes the entire decision is a
+    defect in its own right:
+
+    1. If NO scheme passes at any step count (P0-2, second fix, 2026-09-06) -- exactly what let
+       a stopwatch reading (Euler is ~3x faster per step than QE) masquerade as a convergence
+       result in the definitive run, when every T=2.0 row failed an unsatisfiable absolute
+       `se_tol` for BOTH schemes.
+    2. If EVERY scheme first-passes at the COARSEST step count swept (SHOULD-2, third
+       code-review round, 2026-09-06) -- `shared_se = min(se)` closes INTER-scheme gaming (a
+       noisier scheme cannot buy passage relative to its peer), but does not stop BOTH schemes
+       being imprecise AT ONCE: if `shared_se` is loose enough that every scheme's bias already
+       falls inside it at the coarsest step, the grid never had a chance to discriminate between
+       them, and ranking by wall time from there is the SAME failure as case 1, reached from the
+       other side. Increasing `paths_per_cell` (shrinking `shared_se`) is the fix, not a finer
+       step grid -- see `_shared_se_per_cell`'s docstring for why refining `n_steps` does not
+       shrink `se`.
 
     Requires at least two schemes present in `rows`: `shared_se` is a scale one scheme's own
     precision cannot inflate away, which only means something when there is a peer to compare
@@ -528,26 +564,43 @@ def rank_schemes(rows: Sequence[SweepCell]) -> Scheme:
         )
 
     shared_se = _shared_se_per_cell(rows)
+    coarsest_n_steps = min(row.n_steps for row in rows)
 
     best_scheme: Scheme | None = None
     best_key: tuple[float, float] | None = None
+    first_pass_n_steps: dict[Scheme, int] = {}
     for scheme in schemes:
         scheme_rows = [row for row in rows if row.scheme == scheme]
         passing = _first_passing_step(scheme_rows, shared_se)
         if passing is None:
             continue  # never converges on this grid -- excluded, not ranked via an infinite key
-        n_steps, wall_time = passing
+        n_steps, wall_time, _total_paths = passing
+        first_pass_n_steps[scheme] = n_steps
         key = (float(n_steps), wall_time)
         if best_key is None or key < best_key:
             best_key = key
             best_scheme = scheme
 
     if best_scheme is None:
-        raise ValueError(
+        raise InconclusiveRankingError(
             "no scheme converged on this grid: every scheme failed |bias| < 3*shared_se at "
             "every step count swept. This is not rankable by wall time -- it means the grid "
-            "needs finer steps, more paths (to shrink shared_se), or both."
+            "needs finer steps, more paths (to shrink shared_se), or both.",
+            rows,
         )
+
+    if len(first_pass_n_steps) == len(schemes) and all(
+        n_steps == coarsest_n_steps for n_steps in first_pass_n_steps.values()
+    ):
+        raise InconclusiveRankingError(
+            "the sweep has no discriminating power: EVERY scheme first-passes at the coarsest "
+            f"step count swept (n_steps={coarsest_n_steps}). shared_se exceeds the biases being "
+            "resolved, so this grid decides nothing -- ranking by wall time from here would be "
+            "the same failure this round already fixed once, reached from the other side. "
+            "Increase paths_per_cell to shrink shared_se.",
+            rows,
+        )
+
     return best_scheme
 
 
@@ -555,14 +608,19 @@ def rank_schemes(rows: Sequence[SweepCell]) -> Scheme:
 class ConvergenceCost:
     """Per-scheme convergence cost, for the artifact's cost-to-accuracy comparison (P0-2, fix 3,
     2026-09-06): the coarsest step count at which a scheme first passes `rank_schemes`' shared-SE
-    bar, the wall time MEASURED at that step count, and the resulting cost per step. `None`
-    fields mean the scheme never converged on the swept grid.
+    bar, the wall time MEASURED at that step count, the resulting cost per step, and the total
+    paths simulated at that step count (SHOULD-9, third code-review round, 2026-09-06 -- two
+    schemes' first-passing step counts can simulate UNEQUAL total paths, since
+    `resolve_batch_plan`'s `ceil` rounding is a function of `n_steps`; recording it lets the
+    report state which direction that skews a given cost comparison). `None` fields mean the
+    scheme never converged on the swept grid.
     """
 
     scheme: Scheme
     first_passing_n_steps: int | None
     wall_time_s_at_passing: float | None
     cost_per_step_s: float | None
+    total_paths_at_passing: int | None
 
 
 def convergence_costs(rows: Sequence[SweepCell]) -> list[ConvergenceCost]:
@@ -586,16 +644,18 @@ def convergence_costs(rows: Sequence[SweepCell]) -> list[ConvergenceCost]:
                     first_passing_n_steps=None,
                     wall_time_s_at_passing=None,
                     cost_per_step_s=None,
+                    total_paths_at_passing=None,
                 )
             )
         else:
-            n_steps, wall_time = passing
+            n_steps, wall_time, total_paths = passing
             costs.append(
                 ConvergenceCost(
                     scheme=scheme,
                     first_passing_n_steps=n_steps,
                     wall_time_s_at_passing=wall_time,
                     cost_per_step_s=wall_time / n_steps,
+                    total_paths_at_passing=total_paths,
                 )
             )
     return costs
@@ -648,11 +708,18 @@ _DISCLAIMER = (
 )
 
 
+def _render_optional_int(value: int | None) -> str:
+    return str(value) if value is not None else "unknown"
+
+
 def render_report(
     rows: Sequence[SweepCell],
-    chosen: Scheme,
+    chosen: Scheme | None,
     antithetic_reduction: Mapping[str, float],
     manifest: RunManifest,
+    *,
+    antithetic_reduction_n_steps: int | None = None,
+    antithetic_reduction_n_paths: int | None = None,
 ) -> str:
     """Render the study's markdown artifact (written to `docs/studies/p2m1-scheme-convergence.md`
     by `main()`). The illustrative/uncalibrated disclaimer is the FIRST content line, so the
@@ -661,15 +728,42 @@ def render_report(
     Recomputes `convergence_costs(rows)` internally (P0-2, fix 3, 2026-09-06) so the artifact
     states not just WHICH scheme was chosen but WHY: each scheme's first all-pass step count,
     its measured cost there, and the resulting cost-to-accuracy ratio against the chosen scheme.
+
+    `chosen=None` (SHOULD-7, third code-review round, 2026-09-06) means `rank_schemes` raised
+    `InconclusiveRankingError` -- either no scheme converged, or the grid had no discriminating
+    power (every scheme first-passed at the coarsest step swept). The report still renders IN
+    FULL in that case -- sweep table and cost-to-accuracy comparison included -- with a "NO
+    SCHEME CONVERGED" banner in place of a chosen-scheme line, so a caller can preserve the
+    evidence of a (potentially hour-long) run before failing loudly, rather than losing it.
+
+    `antithetic_reduction_n_steps`/`antithetic_reduction_n_paths` (SHOULD-9, third code-review
+    round, 2026-09-06) name the `(n_steps, n_paths)` of the cell the antithetic-reduction ratios
+    below were measured at; without them those two ratios are not reproducible from the artifact
+    alone. Optional (default `None`, rendered as "unknown") only so existing callers/tests that
+    predate this field are not forced to supply it.
     """
     costs = {cost.scheme: cost for cost in convergence_costs(rows)}
-    chosen_cost = costs[chosen]
+    chosen_cost = costs[chosen] if chosen is not None else None
+    if chosen is None:
+        chosen_line = (
+            "**NO SCHEME CONVERGED on this grid.** `rank_schemes` raised "
+            "`InconclusiveRankingError`: either no scheme passed `|bias| < 3*shared_se` at any "
+            "step count, or every scheme passed at the COARSEST step count swept (the grid has "
+            "no discriminating power -- `shared_se` exceeds the biases being resolved). The "
+            "ADR-006 Amendment 4 s4 decision CANNOT be made from this run as configured. The "
+            "sweep table below preserves the raw evidence; see the Cost-to-accuracy comparison "
+            "for what each scheme actually achieved."
+        )
+    else:
+        chosen_line = (
+            f"**Chosen scheme: `{chosen}`** (fills ADR-006 Amendment 4 s4, previously PENDING)."
+        )
     lines: list[str] = [
         "# P2.M1 Slice 1 -- Scheme Convergence Study (QE vs full-truncation Euler)",
         "",
         _DISCLAIMER,
         "",
-        f"**Chosen scheme: `{chosen}`** (fills ADR-006 Amendment 4 s4, previously PENDING).",
+        chosen_line,
         "",
         "## Provenance",
         "",
@@ -698,34 +792,44 @@ def render_report(
         "",
         'The interesting number is not "which scheme is faster per step" but the RATIO of '
         "total wall-clock cost each scheme actually pays to first reach the shared-SE bar above "
-        "-- a scheme needing far fewer steps can win even when each of its steps costs more.",
+        "-- a scheme needing far fewer steps can win even when each of its steps costs more. "
+        "`total_paths` is the actual path count simulated at that scheme's first-passing "
+        "`n_steps` (SHOULD-9, third code-review round, 2026-09-06): compared schemes can "
+        "simulate UNEQUAL totals here, since `resolve_batch_plan`'s `ceil` rounding is a "
+        "function of `n_steps` -- when the scheme with the FEWER total paths still wins (a "
+        "larger `total_paths` inflates that scheme's own wall time, working against it), the "
+        "comparison is CONSERVATIVE, not favorable to the winner.",
         "",
-        "| scheme | first all-pass n_steps | wall_time_s at that n_steps | cost_per_step_s | "
-        "cost vs chosen |",
-        "|---|---|---|---|---|",
+        "| scheme | first all-pass n_steps | wall_time_s at that n_steps | total_paths | "
+        "cost_per_step_s | cost vs chosen |",
+        "|---|---|---|---|---|---|",
     ]
     for scheme in sorted(costs):
         cost = costs[scheme]
         if cost.first_passing_n_steps is None:
-            lines.append(f"| {scheme} | never converged on this grid | | | |")
+            lines.append(f"| {scheme} | never converged on this grid | | | | |")
             continue
         assert cost.wall_time_s_at_passing is not None
         assert cost.cost_per_step_s is not None
-        chosen_wall_time = chosen_cost.wall_time_s_at_passing
+        chosen_wall_time = chosen_cost.wall_time_s_at_passing if chosen_cost is not None else None
         if chosen_wall_time is not None and chosen_wall_time > 0.0:
             cost_ratio = f"{cost.wall_time_s_at_passing / chosen_wall_time:.2f}x"
         else:
             cost_ratio = ""
         lines.append(
             f"| {scheme} | {cost.first_passing_n_steps} | {cost.wall_time_s_at_passing:.3f} | "
-            f"{cost.cost_per_step_s:.6f} | {cost_ratio} |"
+            f"{cost.total_paths_at_passing} | {cost.cost_per_step_s:.6f} | {cost_ratio} |"
         )
     lines += [
         "",
         "## Antithetic variance reduction achieved",
         "",
         "`se_plain / se_antithetic`, per scheme, at one representative cell (feller_violating, "
-        "ATM, T=0.5y or the sweep's first expiry). A ratio > 1 is a genuine reduction; a ratio "
+        "ATM, T=0.5y or the sweep's first expiry, "
+        f"n_steps=`{_render_optional_int(antithetic_reduction_n_steps)}`, "
+        f"n_paths=`{_render_optional_int(antithetic_reduction_n_paths)}` "
+        "-- named explicitly, SHOULD-9 third code-review round 2026-09-06, so these two ratios "
+        "are reproducible from the artifact alone). A ratio > 1 is a genuine reduction; a ratio "
         "< 1 means antithetics made the estimator WORSE -- a real, reportable possibility under "
         "QE (mirroring the variance draw is a valid antithetic but its reduction is not "
         "guaranteed), recorded here as a finding, not hidden as a bug.",
@@ -766,8 +870,10 @@ def render_report(
 @dataclass(frozen=True)
 class StudyResult:
     rows: list[SweepCell]
-    chosen_scheme: Scheme
+    chosen_scheme: Scheme | None
     antithetic_reduction: dict[str, float]
+    antithetic_reduction_n_steps: int
+    antithetic_reduction_n_paths: int
     manifest: RunManifest
 
 
@@ -791,6 +897,14 @@ def run_study(
     `paths_per_cell` -- the actual per-cell total varies slightly by `n_steps` (rounded up by
     `resolve_batch_plan`, module docstring fix 2), so the resolved `(n_paths_per_batch,
     n_batches)` per cell is recorded directly in the rendered report instead.
+
+    If `rank_schemes` raises `InconclusiveRankingError` (SHOULD-7, third code-review round,
+    2026-09-06 -- no scheme converged, or the grid has no discriminating power), this function
+    does NOT propagate the exception: it returns a `StudyResult` with `chosen_scheme=None`
+    instead, with every other field (rows, antithetic measurement, manifest) still populated, so
+    `main()` can render and write the sweep as evidence before failing loudly rather than losing
+    a potentially hour-long run with nothing to show for it. `rank_schemes` itself is unaffected
+    and still raises for callers that invoke it directly.
     """
     rows = run_sweep(
         paths_per_cell=paths_per_cell,
@@ -803,7 +917,6 @@ def run_study(
         expiries=expiries,
         verbose=verbose,
     )
-    chosen = rank_schemes(rows)
 
     representative_n_steps = n_steps_grid[len(n_steps_grid) // 2]
     representative_strike = strikes[len(strikes) // 2]
@@ -824,6 +937,11 @@ def run_study(
         for scheme in schemes
     }
 
+    try:
+        chosen: Scheme | None = rank_schemes(rows)
+    except InconclusiveRankingError:
+        chosen = None
+
     params_payload: dict[str, dict[str, float]] = {
         name: params.model_dump() for name, params in _PARAM_SETS.items()
     }
@@ -836,13 +954,22 @@ def run_study(
         params_hash=params_hash(params_payload),
         seed=base_seed,
         n_paths=paths_per_cell,
-        engine=EngineSettings(scheme=chosen, n_steps=n_steps_grid[-1], antithetic=True),
+        # When chosen is None (ranking was inconclusive), schemes[0] is a MEANINGLESS
+        # placeholder here -- the manifest schema has no "no decision" representation for this
+        # field. render_report's "NO SCHEME CONVERGED" banner is the actual signal, not this.
+        engine=EngineSettings(
+            scheme=chosen if chosen is not None else schemes[0],
+            n_steps=n_steps_grid[-1],
+            antithetic=True,
+        ),
         params=params_payload,
     )
     return StudyResult(
         rows=rows,
         chosen_scheme=chosen,
         antithetic_reduction=antithetic_reduction,
+        antithetic_reduction_n_steps=representative_n_steps,
+        antithetic_reduction_n_paths=representative_n_paths,
         manifest=manifest,
     )
 
@@ -895,6 +1022,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         result.chosen_scheme,
         result.antithetic_reduction,
         result.manifest,
+        antithetic_reduction_n_steps=result.antithetic_reduction_n_steps,
+        antithetic_reduction_n_paths=result.antithetic_reduction_n_paths,
     )
 
     out_path: Path = args.out
@@ -908,6 +1037,18 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     print(f"wrote {out_path}")
     print(f"wrote {manifest_path}")
+
+    if result.chosen_scheme is None:
+        # SHOULD-7 (third code-review round, 2026-09-06): the report and manifest above are
+        # ALREADY WRITTEN -- the sweep is preserved as evidence -- so failing loudly here loses
+        # nothing. Failing loudly and preserving evidence are not in tension.
+        print(
+            "NO SCHEME CONVERGED on this grid -- see the written report for the raw sweep "
+            "evidence and the Cost-to-accuracy comparison for what each scheme achieved.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
     print(f"chosen scheme: {result.chosen_scheme}")
 
 

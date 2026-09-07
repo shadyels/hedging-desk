@@ -112,9 +112,7 @@ def test_antithetic_mirror_of_a_zero_draw_is_clamped_away_from_one(
     import exo.models.rng as rng_module
 
     class _ZeroGenerator:
-        def uniform(
-            self, low: float, high: float, size: tuple[int, ...]
-        ) -> NDArray[np.float64]:
+        def uniform(self, low: float, high: float, size: tuple[int, ...]) -> NDArray[np.float64]:
             return np.zeros(size)
 
     monkeypatch.setattr(rng_module, "_stream_generator", lambda seed, stream: _ZeroGenerator())

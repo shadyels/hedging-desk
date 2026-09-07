@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import math
 import tracemalloc
+from pathlib import Path
 
 import pytest
 
@@ -59,18 +60,47 @@ def test_run_sweep_tiny_produces_one_row_per_cell() -> None:
 
 
 def test_rank_schemes_returns_one_of_the_two_schemes() -> None:
+    """SHOULD-2 (third code-review round, 2026-09-06): `paths_per_cell=2000` (this test's
+    previous size) measures `se ~= 0.21` with bias/se ratios of 0.14-0.37 for QE at EVERY step
+    count -- inside the noise regime, so the ranking passes on a coincidence rather than a real
+    discrimination between schemes. `paths_per_cell=20_000` with this grid is independently
+    verified (before writing this test) to give a genuine, non-coincidental separation: QE first
+    passes at n_steps=4, euler-ft only at n_steps=52 -- while still running in ~1.5s."""
     rows = run_sweep(
-        paths_per_cell=2000,
-        n_paths_per_batch_override=2000,
-        base_seed=1,
+        paths_per_cell=20_000,
+        n_paths_per_batch_override=20_000,
+        base_seed=20260906,
         schemes=("qe", "euler-ft"),
-        n_steps_grid=(4, 12, 52, 104, 252),
-        strikes=(100.0,),
-        expiries=(1.0,),
+        n_steps_grid=(4, 12, 52, 104),
+        strikes=(90.0, 100.0, 110.0),
+        expiries=(0.5, 2.0),
         verbose=False,
     )
     chosen = rank_schemes(rows)
     assert chosen in ("qe", "euler-ft")
+
+
+def test_rank_schemes_raises_when_every_scheme_first_passes_at_the_coarsest_step() -> None:
+    """SHOULD-2 (third code-review round, 2026-09-06): `shared_se = min(se)` closes INTER-scheme
+    gaming (a noisier scheme can't buy passage by being imprecise relative to its peer), but it
+    does not stop BOTH schemes being imprecise AT ONCE -- if every scheme first-passes at the
+    COARSEST step count swept, the grid never had a chance to discriminate (shared_se exceeds
+    the biases being resolved) and ranking would otherwise degenerate into a wall-time race,
+    exactly the class of failure this whole round already fixed once, reached from the other
+    side. `paths_per_cell=100` with this grid/seed is independently verified (before writing
+    this test) to put BOTH schemes' first pass at n_steps=4, the coarsest step swept."""
+    rows = run_sweep(
+        paths_per_cell=100,
+        n_paths_per_batch_override=100,
+        base_seed=20260906,
+        schemes=("qe", "euler-ft"),
+        n_steps_grid=(4, 12, 52, 104),
+        strikes=(90.0, 100.0, 110.0),
+        expiries=(0.5, 2.0),
+        verbose=False,
+    )
+    with pytest.raises(ValueError, match="no discriminating power"):
+        rank_schemes(rows)
 
 
 def test_rank_schemes_picks_coarser_passing_step_count() -> None:
@@ -132,8 +162,10 @@ def test_rank_schemes_shared_se_prevents_a_noisier_scheme_from_passing_on_its_ow
     not step count -- this permanently excluded high-variance cells in the real run and caused
     `rank_schemes` to fall through to a wall-time tie-break for BOTH schemes. The corrected rule
     scores each row against `shared_se = min(se across the schemes present at that exact cell)`:
-    refining `n_steps` still helps (every scheme's own `se` still shrinks with more effective
-    paths over time), but a scheme cannot borrow its OWN inflated `se` to excuse a real bias.
+    refining `n_steps` still helps because it shrinks the discretization BIAS (not `se`, which is
+    set by path count and payoff variance and does not trend with `n_steps` -- see
+    `_shared_se_per_cell`'s docstring), but a scheme cannot borrow its OWN inflated `se` to
+    excuse a real bias.
 
     Scheme "A" has bias=2.0 and se=1.0 at EVERY step count here (never actually converges):
     under the OLD (pre-code-review) rule, `|bias| < 3*se` (2.0 < 3.0) would have called A
@@ -209,9 +241,7 @@ def test_shared_se_degeneracy_guard_is_per_cell_not_global() -> None:
         SweepCell(
             "qe", 4, "feller_satisfying", 100.0, 1.0, 10.0, 0.1, 0.05, 0.5, 1.0, 200, 1, None
         ),
-        SweepCell(
-            "qe", 4, "feller_violating", 100.0, 1.0, 10.0, 1.0, 2.0, 2.0, 1.0, 200, 1, None
-        ),
+        SweepCell("qe", 4, "feller_violating", 100.0, 1.0, 10.0, 1.0, 2.0, 2.0, 1.0, 200, 1, None),
         SweepCell(
             "euler-ft", 4, "feller_satisfying", 100.0, 1.0, 10.0, 0.1, 0.05, 0.5, 1.0, 200, 1, None
         ),
@@ -229,9 +259,7 @@ def test_convergence_costs_applies_the_same_per_cell_degeneracy_guard() -> None:
         SweepCell(
             "qe", 4, "feller_satisfying", 100.0, 1.0, 10.0, 0.1, 0.05, 0.5, 1.0, 200, 1, None
         ),
-        SweepCell(
-            "qe", 4, "feller_violating", 100.0, 1.0, 10.0, 1.0, 2.0, 2.0, 1.0, 200, 1, None
-        ),
+        SweepCell("qe", 4, "feller_violating", 100.0, 1.0, 10.0, 1.0, 2.0, 2.0, 1.0, 200, 1, None),
         SweepCell(
             "euler-ft", 4, "feller_satisfying", 100.0, 1.0, 10.0, 0.1, 0.05, 0.5, 1.0, 200, 1, None
         ),
@@ -278,19 +306,106 @@ def test_render_report_states_illustrative_uncalibrated_up_front() -> None:
 
 
 def test_run_study_end_to_end_at_tiny_size() -> None:
+    """See test_rank_schemes_returns_one_of_the_two_schemes for why `paths_per_cell=20_000`
+    (not the noise-regime 2000 this test previously used) is required for a genuine, not
+    coincidental, ranking."""
     result = run_study(
-        paths_per_cell=2000,
-        n_paths_per_batch_override=2000,
-        base_seed=1,
+        paths_per_cell=20_000,
+        n_paths_per_batch_override=20_000,
+        base_seed=20260906,
         schemes=("qe", "euler-ft"),
-        n_steps_grid=(4, 12, 52, 104, 252),
-        strikes=(100.0,),
-        expiries=(1.0,),
+        n_steps_grid=(4, 12, 52, 104),
+        strikes=(90.0, 100.0, 110.0),
+        expiries=(0.5, 2.0),
         verbose=False,
     )
     assert result.chosen_scheme in ("qe", "euler-ft")
     assert set(result.antithetic_reduction) == {"qe", "euler-ft"}
-    assert result.manifest.seed == 1
+    assert result.manifest.seed == 20260906
+
+
+def test_run_study_preserves_rows_when_ranking_is_inconclusive() -> None:
+    """SHOULD-7 (third code-review round, 2026-09-06): `chosen = rank_schemes(rows)` used to run
+    immediately after `run_sweep`, so on either `InconclusiveRankingError` raise path (no scheme
+    converged, or no discriminating power) the simulated rows -- ~50 minutes of compute in the
+    real run -- were lost with no artifact. `run_study` must catch the ranking failure and still
+    return a `StudyResult` with `chosen_scheme=None` and every row/antithetic-measurement/
+    manifest field populated, so `main()` can render and write a report before failing loudly.
+    Uses the same deliberately-noisy config verified in
+    test_rank_schemes_raises_when_every_scheme_first_passes_at_the_coarsest_step."""
+    result = run_study(
+        paths_per_cell=100,
+        n_paths_per_batch_override=100,
+        base_seed=20260906,
+        schemes=("qe", "euler-ft"),
+        n_steps_grid=(4, 12, 52, 104),
+        strikes=(90.0, 100.0, 110.0),
+        expiries=(0.5, 2.0),
+        verbose=False,
+    )
+    assert result.chosen_scheme is None
+    assert len(result.rows) > 0
+    assert set(result.antithetic_reduction) == {"qe", "euler-ft"}
+    assert result.manifest.seed == 20260906
+
+
+def test_render_report_shows_no_scheme_converged_banner_when_chosen_is_none() -> None:
+    manifest = RunManifest(
+        schema_version=1,
+        run_id="test-run",
+        created_ns=0,
+        git_sha="deadbeef" * 5,
+        model_id="heston-scheme-convergence-v1",
+        params_hash="abc123",
+        seed=1,
+        n_paths=400,
+        engine=EngineSettings(scheme="qe", n_steps=4, antithetic=True),
+        params={},
+    )
+    rows = run_sweep(
+        paths_per_cell=200,
+        n_paths_per_batch_override=200,
+        base_seed=1,
+        schemes=("qe", "euler-ft"),
+        n_steps_grid=(4,),
+        strikes=(100.0,),
+        expiries=(1.0,),
+        verbose=False,
+    )
+    report = render_report(rows, None, {"qe": 1.1, "euler-ft": 0.9}, manifest)
+    assert "NO SCHEME CONVERGED" in report
+    # the sweep table itself must still be present -- this is the "preserve the evidence" part.
+    assert "## Sweep results" in report
+    assert all(row.param_set in report for row in rows[:1])
+
+
+def test_main_writes_the_report_before_failing_when_ranking_is_inconclusive(
+    tmp_path: Path,
+) -> None:
+    """SHOULD-7: the CLI must not lose the sweep silently -- it writes the report (with the "NO
+    SCHEME CONVERGED" banner and the raw rows) and THEN fails loudly (non-zero exit), rather
+    than either succeeding silently or crashing with nothing written."""
+    out_path = tmp_path / "report.md"
+    manifest_dir = tmp_path / "manifests"
+    argv = [
+        "--paths-per-cell",
+        "100",
+        "--n-paths-per-batch",
+        "100",
+        "--seed",
+        "20260906",
+        "--out",
+        str(out_path),
+        "--manifest-dir",
+        str(manifest_dir),
+    ]
+    with pytest.raises(SystemExit) as exc_info:
+        scheme_convergence.main(argv)
+    assert exc_info.value.code != 0
+    assert out_path.exists()
+    written = out_path.read_text()
+    assert "NO SCHEME CONVERGED" in written
+    assert "## Sweep results" in written
 
 
 # --- DEFECT regression tests (found across two review rounds, fixed in this revision) -----------
