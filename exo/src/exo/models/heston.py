@@ -10,15 +10,20 @@ built now would make that unimplementable in M2 without rewriting this module,
 which the M2 payoff-abstraction rule forbids.
 
 ponytail: retaining the full (n_paths, n_steps+1) `S` and `v` matrices as float64 costs ~810 MB
-at 200k paths x 252 steps (two such matrices) -- BUT peak memory is actually ~1.62 GB, not 810
-MB (corrected 2026-09-06, code review P0-1): `simulate()` also allocates the full (n_paths,
-n_steps) DRAW matrices up front (QE: `u`, `z`; euler-ft: `z_variance`, `z_spot`), two more
-float64 arrays of essentially the same size (~806 MB at the same path/step count), alongside
-`S`/`v`. Ceiling: ~1.62 GB at 200k paths x 252 steps (four arrays total). Trigger: P2.M2's LSM
-work, or any run that needs more paths/steps than fit in memory at once — retain only a
-declared observation grid, or batch paths (see `PriceResult.combine()` in estimator.py, which
-exists for exactly this; `studies/scheme_convergence.py`'s `resolve_batch_plan` is the first
-consumer and accounts for all four arrays).
+at 200k paths x 252 steps (two such matrices) -- BUT peak memory is actually ~2.02 GB, not 810
+MB and not the ~1.62 GB an earlier correction claimed (corrected AGAIN 2026-09-06, second
+code-review round -- see `studies/scheme_convergence.py`'s `_BYTES_PER_PATH_STEP` comment for
+the measured breakdown): `simulate()` allocates `S`, `v`, and two draw matrices up front (QE:
+`u`, `z`; euler-ft: `z_variance`, `z_spot`) -- four arrays -- but `rng.py`'s antithetic
+`_draw` builds each draw via `np.concatenate([base, mirror])`, so `base` (half-size) + `mirror`
+(half-size) + the concatenated result (full-size) are ALL LIVE AT ONCE at the moment of
+concatenation: a FIFTH full-size array's worth of memory, not four. Measured directly with
+`tracemalloc` against the real `simulate()` (antithetic=True, the only path this study runs):
+peak/array ~= 5.02-5.08. Ceiling: ~2.02 GB at 200k paths x 252 steps (five arrays' worth).
+Trigger: P2.M2's LSM work, or any run that needs more paths/steps than fit in memory at once —
+retain only a declared observation grid, or batch paths (see `PriceResult.combine()` in
+estimator.py, which exists for exactly this; `studies/scheme_convergence.py`'s
+`resolve_batch_plan` is the first consumer and accounts for the full measured footprint).
 
 Two schemes are implemented:
 

@@ -31,17 +31,19 @@ study-only streaming variant.
    that correlation between rows.
 
 2. **Peak memory per batch depends on `n_steps`, so the batch SIZE must too.** Peak memory for
-   one batch is `n_paths_per_batch * (n_steps + 1) * _BYTES_PER_PATH_STEP` bytes. `heston.py`'s
-   `simulate()` allocates FOUR (n_paths, n_steps[+1]) float64 arrays up front -- `S`, `v`, and
-   TWO draw matrices (QE: `u`, `z`; euler-ft: `z_variance`, `z_spot`) -- not two (corrected
-   2026-09-06, P0-1: an earlier revision of this module counted only `S`/`v`, understating peak
-   memory by 2x and letting a 200k-path batch actually peak at ~1.62 GB against an 800 MB
-   declared ceiling at `n_steps=1008`). A FIXED `n_paths_per_batch` sized for a coarse step count
-   blows the SAME ceiling at a fine one -- batching exists precisely to keep peak memory at one
-   batch, and holding batch SIZE constant instead of peak memory constant defeats that at exactly
-   the step counts where the path matrix is largest. `resolve_batch_plan` instead holds
-   `paths_per_cell` (the quantity that actually determines the cell's SE) constant and derives
-   `n_paths_per_batch` per `n_steps` to respect `max_batch_bytes` (default 800_000_000).
+   one batch is `n_paths_per_batch * (n_steps + 1) * _BYTES_PER_PATH_STEP` bytes, MEASURED (not
+   hand-counted -- see `_BYTES_PER_PATH_STEP`'s own comment and
+   `test_bytes_per_path_step_covers_measured_peak_with_tracemalloc`) against the real
+   `simulate()` on its antithetic path, the only path this study runs. Getting this constant
+   right took THREE tries (2026-09-06, two code-review rounds): first counting 2 arrays (`S`,
+   `v` only), then 4 (adding the two draw matrices but missing that antithetic concatenation
+   holds a 5th full-size array live at the moment of the `np.concatenate`), now `tracemalloc`-
+   measured at 5. A FIXED `n_paths_per_batch` sized for a coarse step count blows the SAME
+   ceiling at a fine one -- batching exists precisely to keep peak memory at one batch, and
+   holding batch SIZE constant instead of peak memory constant defeats that at exactly the step
+   counts where the path matrix is largest. `resolve_batch_plan` instead holds `paths_per_cell`
+   (the quantity that actually determines the cell's SE) constant and derives `n_paths_per_batch`
+   per `n_steps` to respect `max_batch_bytes` (default 800_000_000).
 
 Batches are EQUAL-SIZE within a cell, deliberately: `PriceResult.combine()` pools by raw path
 count (P0-4, code review 2026-09-06 -- see estimator.py's `combine()` docstring for why this
@@ -133,10 +135,10 @@ DEFAULT_SEED = 20260906
 # docstring.
 DEFAULT_PATHS_PER_CELL = 3_200_000
 # Peak-memory ceiling per batch, in bytes. A round ~800 MB budget this study chooses for itself
-# -- resolve_batch_plan sizes n_paths_per_batch per n_steps so no batch exceeds it. Below (not
-# "just under": corrected 2026-09-06, P0-1) `models/heston.py`'s own ~1.62 GB ponytail figure for
-# ALL FOUR of its (n_paths, n_steps[+1]) arrays at 200k paths x 252 steps -- a FIXED batch size at
-# that figure is exactly what this module's docstring, fix 2, replaced.
+# -- resolve_batch_plan sizes n_paths_per_batch per n_steps so no batch exceeds it. Below
+# `models/heston.py`'s own ~2.02 GB ponytail figure (tracemalloc-measured, second code-review
+# round 2026-09-06) for its antithetic-path peak at 200k paths x 252 steps -- a FIXED batch size
+# at that figure is exactly what this module's docstring, fix 2, replaced.
 DEFAULT_MAX_BATCH_BYTES = 800_000_000
 
 _THIS_FILE = Path(__file__).resolve()
@@ -145,11 +147,20 @@ _EXO_ROOT = _THIS_FILE.parents[3]  # .../hedging-desk/exo
 DEFAULT_REPORT_PATH = _REPO_ROOT / "docs" / "studies" / "p2m1-scheme-convergence.md"
 DEFAULT_MANIFEST_DIR = _EXO_ROOT / "run-manifests"
 
-# All FOUR arrays heston.py's simulate() allocates at (n_paths, n_steps[+1]) size, float64: S,
-# v, and the two draw matrices (QE: u, z; euler-ft: z_variance, z_spot). Corrected 2026-09-06
-# (P0-1, code review): an earlier revision counted only S and v (2 * 8), understating peak memory
-# by 2x -- see module docstring, fix 2.
-_BYTES_PER_PATH_STEP = 4 * 8
+# Peak bytes per (path, step) on the ANTITHETIC path (the only path this study ever runs).
+# heston.py's simulate() allocates S, v, and two draw matrices (QE: u, z; euler-ft: z_variance,
+# z_spot) at (n_paths, n_steps[+1]) size, float64 -- FOUR arrays, 4*8 bytes -- but
+# PseudoRandomSource._draw (rng.py) builds each draw via `np.concatenate([base, mirror])`, so at
+# the peak (second draw, with S/v already allocated) base (half) + mirror (half) + the
+# concatenated result (full) are ALL LIVE AT ONCE: that is a FIFTH full-size array's worth of
+# memory, not four. Measured directly with tracemalloc against the real simulate() (both
+# schemes, antithetic=True): peak/array ~= 5.02-5.08 (see
+# test_bytes_per_path_step_covers_measured_peak_with_tracemalloc, which asserts against the
+# allocator, not a hand re-count of the source -- a hand re-count got this wrong TWICE:
+# originally counting 2 arrays (S, v only), then 4 (missing the concatenation overhead).
+# Corrected 2026-09-06 (second code-review round) to 5*8; DO NOT restructure `_draw` to chase a
+# lower number -- a correct 5 beats a clever 4.
+_BYTES_PER_PATH_STEP = 5 * 8
 
 
 @dataclass(frozen=True)
@@ -411,11 +422,12 @@ def run_sweep(
     return rows
 
 
-# Empirical scale for this study's discounted call payoff standard deviation across its
-def _shared_se_per_cell(rows: Sequence[SweepCell]) -> dict[tuple[int, str, float, float], float]:
-    """`shared_se[(n_steps, param_set, strike, expiry)]` = the SMALLEST `se` among whichever
-    scheme(s) are present in `rows` at that exact cell (P0-2, SECOND correction, 2026-09-06 --
-    see module docstring).
+def _shared_se_per_cell(
+    rows: Sequence[SweepCell],
+) -> dict[tuple[int, str, float, float], tuple[float, int]]:
+    """`shared_se[(n_steps, param_set, strike, expiry)]` = `(smallest se, number of DISTINCT
+    schemes)` among whichever scheme(s) are present in `rows` at that exact cell (P0-2, SECOND
+    correction, 2026-09-06 -- see module docstring).
 
     This replaces an absolute `se_tol` derived from `paths_per_cell`, which was itself wrong:
     `se` is set by the payoff's variance (varies with strike/expiry), not by `n_steps` at all, so
@@ -424,25 +436,45 @@ def _shared_se_per_cell(rows: Sequence[SweepCell]) -> dict[tuple[int, str, float
     unsatisfiable `se_tol` for BOTH schemes, and `rank_schemes` fell through to a wall-time
     tie-break). Scoring against the SMALLER of the schemes actually present at a cell grounds
     the bound in what was actually achieved there: a scheme cannot pass by being noisier than its
-    own peer, but a peer's precision at one cell says nothing about a different cell's payoff
-    variance, so refining `n_steps` still helps (every scheme's own `se` still shrinks with more
-    effective paths) without ever letting inflated `se` excuse a real bias.
+    own peer.
+
+    The scheme COUNT is carried alongside the minimum (SHOULD-3, third code-review round,
+    2026-09-06) because `min` over a single scheme's own `se` (when only one scheme has a row at
+    that exact cell) silently reverts to exactly the bound the shared-SE fix replaced. Consumers
+    (`_first_passing_step`) must refuse to treat such a cell as a valid pass no matter how small
+    `|bias|` looks relative to that degenerate scale.
+
+    Refining `n_steps` does NOT shrink `se` (SHOULD-8, third code-review round, 2026-09-06 --
+    this exact confusion produced the first bad fix): `se` is set by the batch's PATH COUNT and
+    the payoff's variance, neither of which trends with `n_steps` here -- `resolve_batch_plan`'s
+    per-cell path counts are NON-MONOTONIC in `n_steps` (at `DEFAULT_PATHS_PER_CELL`/
+    `DEFAULT_MAX_BATCH_BYTES`: 3.20M, 4.62M, 3.40M, 3.24M, 3.24M, 3.21M, 3.21M across this
+    study's `N_STEPS_GRID`, from `ceil` rounding against a fixed memory ceiling). What refining
+    `n_steps` shrinks is the discretization BIAS. `shared_se` works regardless: it
+    is a snapshot of what was actually achieved at each INDIVIDUAL cell, and a scheme's bias
+    shrinking toward zero as steps refine is what lets it start passing `|bias| < 3*shared_se` --
+    the bound does not need to tighten for that to happen.
     """
-    shared_se: dict[tuple[int, str, float, float], float] = {}
+    se_by_cell_and_scheme: dict[tuple[int, str, float, float], dict[Scheme, float]] = {}
     for row in rows:
         cell = (row.n_steps, row.param_set, row.strike, row.expiry)
-        if cell not in shared_se or row.se < shared_se[cell]:
-            shared_se[cell] = row.se
-    return shared_se
+        se_by_cell_and_scheme.setdefault(cell, {})[row.scheme] = row.se
+    return {
+        cell: (min(per_scheme.values()), len(per_scheme))
+        for cell, per_scheme in se_by_cell_and_scheme.items()
+    }
 
 
 def _first_passing_step(
     scheme_rows: Sequence[SweepCell],
-    shared_se: Mapping[tuple[int, str, float, float], float],
+    shared_se: Mapping[tuple[int, str, float, float], tuple[float, int]],
 ) -> tuple[int, float] | None:
     """The coarsest `n_steps` (from `scheme_rows`, one scheme's rows only) at which EVERY row
     recorded at that step count (every param_set / strike / expiry combination present, with
-    both param sets required to be represented) satisfies `|bias| < 3 * shared_se[cell]`.
+    both param sets required to be represented) satisfies `|bias| < 3 * shared_se[cell]`, AND
+    every one of those cells has at least 2 distinct schemes contributing to `shared_se` (SHOULD-3:
+    a cell with only 1 scheme present degenerates `shared_se` to that scheme's own `se`, which is
+    exactly the bound the shared-SE fix replaced -- such a cell can never count toward a pass).
 
     Returns `(n_steps, total wall_time_s of the rows at that n_steps)`, or `None` if no step
     count in `scheme_rows` passes -- this scheme has not converged on this grid.
@@ -455,10 +487,12 @@ def _first_passing_step(
         group = by_steps[n_steps]
         if len({row.param_set for row in group}) < 2:
             continue  # both param sets must be represented at this step count
-        if all(
-            abs(row.bias) < 3.0 * shared_se[(row.n_steps, row.param_set, row.strike, row.expiry)]
-            for row in group
-        ):
+        cell_scales = [
+            shared_se[(row.n_steps, row.param_set, row.strike, row.expiry)] for row in group
+        ]
+        if any(n_schemes < 2 for _se, n_schemes in cell_scales):
+            continue  # shared_se degenerates to one scheme's own se at some cell here
+        if all(abs(row.bias) < 3.0 * se for row, (se, _n) in zip(group, cell_scales, strict=True)):
             return n_steps, sum(row.wall_time_s for row in group)
     return None
 

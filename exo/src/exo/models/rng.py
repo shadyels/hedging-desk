@@ -119,7 +119,8 @@ class PseudoRandomSource:
     ) -> NDArray[np.float64]:
         generator = _stream_generator(self.seed, stream)
         if not self.antithetic:
-            return _sample(generator, sampler, shape)
+            result = _sample(generator, sampler, shape)
+            return _clamp_open_unit_interval(result) if sampler == "uniform" else result
 
         if shape[0] % 2 != 0:
             raise ValueError(
@@ -130,7 +131,14 @@ class PseudoRandomSource:
         half_shape = (n_pairs, *shape[1:])
         base = _sample(generator, sampler, half_shape)
         mirror = _mirror(sampler, base)
-        return np.concatenate([base, mirror], axis=0)
+        combined = np.concatenate([base, mirror], axis=0)
+        # Clamp AFTER concatenation, not inside _sample before mirroring (SHOULD-4, third
+        # code-review round, 2026-09-06): clamping `base` alone does not close the MIRROR path --
+        # `1.0 - np.nextafter(0.0, 1.0)` rounds to EXACTLY `1.0` in float64 (the clamp value is far
+        # smaller than 1.0's ULP), so a raw `0.0` draw's mirror stayed exactly `1.0` and reached
+        # QE's exponential branch's `(1-p)/(1-u)` division unclamped. Clamping the concatenated
+        # result closes both the base draw's own boundary and its mirror's.
+        return _clamp_open_unit_interval(combined) if sampler == "uniform" else combined
 
     def normals(self, shape: tuple[int, ...], *, stream: str) -> NDArray[np.float64]:
         return self._draw(shape, stream, "normal")
@@ -144,18 +152,20 @@ def _sample(
 ) -> NDArray[np.float64]:
     if sampler == "normal":
         return generator.standard_normal(size=shape)
-    return _clamp_open_unit_interval(generator.uniform(low=0.0, high=1.0, size=shape))
+    return generator.uniform(low=0.0, high=1.0, size=shape)
 
 
 def _clamp_open_unit_interval(u: NDArray[np.float64]) -> NDArray[np.float64]:
-    """Clamp uniform draws strictly inside the OPEN interval (0, 1) (P2, code review
-    2026-09-06). `Generator.uniform`'s half-open `[0, 1)` can return exactly `0.0` (probability
-    ~2**-53, rare but not zero); `heston.py`'s QE scheme computes `ndtri(u)` (`-inf` at `u=0.0`)
-    in the quadratic branch and `(1-p)/(1-u)` (division by zero at `u=1.0`) in the exponential
-    branch -- the latter reachable via the antithetic mirror `1 - 0.0 == 1.0` even though the raw
-    draw itself never returns `1.0`. `np.nextafter` moves either endpoint the smallest
-    representable float64 step inward: noise relative to any real MC estimate, and closes both
-    failure modes for free.
+    """Clamp uniform draws strictly inside the OPEN interval (0, 1) (P2, code review 2026-09-06;
+    moved to run on `_draw`'s CONCATENATED result rather than inside `_sample`, SHOULD-4, third
+    code-review round, 2026-09-06 -- see `_draw`'s comment for why: clamping the pre-mirror
+    `base` alone does not close the antithetic MIRROR's boundary). `Generator.uniform`'s
+    half-open `[0, 1)` can return exactly `0.0` (probability ~2**-53, rare but not zero);
+    `heston.py`'s QE scheme computes `ndtri(u)` (`-inf` at `u=0.0`) in the quadratic branch and
+    `(1-p)/(1-u)` (division by zero at `u=1.0`) in the exponential branch -- the latter reachable
+    via the antithetic mirror `1 - 0.0 == 1.0` even though the raw draw itself never returns
+    `1.0`. `np.nextafter` moves either endpoint the smallest representable float64 step inward:
+    noise relative to any real MC estimate, and closes both failure modes for free.
     """
     lo = np.nextafter(np.float64(0.0), np.float64(1.0))
     hi = np.nextafter(np.float64(1.0), np.float64(0.0))

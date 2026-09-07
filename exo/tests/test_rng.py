@@ -7,6 +7,7 @@ exo/src/exo/models/rng.py's module docstring for why (P2.M4 bump-and-revalue Gre
 
 import numpy as np
 import pytest
+from numpy.typing import NDArray
 
 from exo.models.rng import PseudoRandomSource
 
@@ -93,3 +94,32 @@ def test_uniforms_from_a_real_draw_never_hit_the_endpoints() -> None:
     u = source.uniforms((1000, 2), stream="variance")
     assert np.all(u > 0.0)
     assert np.all(u < 1.0)
+
+
+def test_antithetic_mirror_of_a_zero_draw_is_clamped_away_from_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SHOULD-4 (third code-review round, 2026-09-06): the clamp ran inside `_sample`, i.e.
+    BEFORE `_mirror` -- so a raw `0.0` draw got clamped to `lo = np.nextafter(0.0, 1.0)`
+    (~5e-324), but `1.0 - lo` rounds to EXACTLY `1.0` in float64 (`lo` is far smaller than 1.0's
+    ULP), so the antithetic MIRROR of a zero draw was never closed. QE's exponential branch
+    computes `(1-p)/(1-u)`, dividing by zero at `u=1.0`. The fix clamps the CONCATENATED
+    (base + mirror) result in `_draw`, after mirroring, not inside `_sample` before it.
+
+    Forces the raw generator to return an all-zero draw (rather than relying on chance) by
+    monkeypatching `_stream_generator`, so this test does not depend on ever actually rolling a
+    literal `0.0` from PCG64."""
+    import exo.models.rng as rng_module
+
+    class _ZeroGenerator:
+        def uniform(
+            self, low: float, high: float, size: tuple[int, ...]
+        ) -> NDArray[np.float64]:
+            return np.zeros(size)
+
+    monkeypatch.setattr(rng_module, "_stream_generator", lambda seed, stream: _ZeroGenerator())
+    source = PseudoRandomSource(seed=1, antithetic=True)
+    u = source.uniforms((2, 1), stream="variance")
+    assert u.shape == (2, 1)
+    assert np.all(u > 0.0), f"base draw not clamped away from 0: {u}"
+    assert np.all(u < 1.0), f"antithetic mirror of a zero draw not clamped away from 1: {u}"
