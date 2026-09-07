@@ -1,6 +1,8 @@
 # Ponytail Debt Ledger
 
-**35 markers found, 5 with no upgrade trigger.**
+**35 markers catalogued below, 5 with no upgrade trigger.**
+
+> **The headline count is known to under-report the `delta-one/` side and predates this file's `exo/` rows.** A bare `grep -rn ponytail` over the tree returns 52 hits on this branch against 40 on `main` (some are prose references to markers, not marker definitions), while `main`'s ledger claimed 29. The drift is pre-existing: several `delta-one/` markers have no row here at all and several rows carry stale line numbers. The six `exo/` rows added for P2.M1 slice 1 are verified correct in both line number and content. **Owner needed: a standalone `chore/ponytail-reconcile` pass over `delta-one/` before P2.M2.** Enumerate with the BARE keyword — `grep -rn "ponytail" <paths>` — never `ponytail:`, since at least one marker (`exo/src/exo/models/heston.py:200`) is written `# ponytail (P0-3, ...)` with no colon and a `ponytail:` grep silently drops it.
 
 ## By File
 
