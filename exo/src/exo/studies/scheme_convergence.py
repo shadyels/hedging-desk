@@ -27,8 +27,8 @@ study-only streaming variant.
    then sit on COMMON RANDOM NUMBERS, so their biases differ only by the payoff's actual
    strike-dependence, not partly by independent sampling noise between strikes. It does mean
    strike rows at one step count are correlated with each other; `rank_schemes`' "ALL rows at
-   this step count pass" check is a per-row bound (`|bias| < 3*se`) and is unaffected by that
-   correlation between rows.
+   this step count pass" check is a per-row bound (`|bias| < 3*shared_se`) and is unaffected by
+   that correlation between rows.
 
 2. **Peak memory per batch depends on `n_steps`, so the batch SIZE must too.** Peak memory for
    one batch is `n_paths_per_batch * (n_steps + 1) * _BYTES_PER_PATH_STEP` bytes. `heston.py`'s
@@ -52,12 +52,25 @@ approximate. Where `paths_per_cell` does not divide evenly by the memory-derived
 paths simulated (`n_batches * n_paths_per_batch`) is rounded UP from `paths_per_cell` rather than
 left as one ragged, smaller final batch.
 
-**`rank_schemes` needs its OWN minimum-precision conjunct** (P0-2, code review 2026-09-06): every
-other gate in this slice asserts `|bias| < 3*se` AND `se < tol_abs` (a test that can pass by
-being imprecise is not a gate) -- `rank_schemes` originally checked only the first, so a scheme
-with higher payoff variance could pass at a COARSER step count and win the ranking BECAUSE it is
-less precise. `se_tol_for_paths_per_cell` derives a bound from `paths_per_cell`; see its own
-docstring and `rank_schemes`' for the exact rule, which the rendered report also states.
+**`rank_schemes` needs its OWN minimum-precision conjunct, and an ABSOLUTE one is WRONG** (P0-2,
+two corrections, 2026-09-06). Every other gate in this slice asserts `|bias| < 3*se` AND
+`se < tol_abs` (a test that can pass by being imprecise is not a gate) -- `rank_schemes`
+originally checked only the first, so a scheme with higher payoff variance could pass at a
+COARSER step count and win the ranking BECAUSE it is less precise. The FIRST fix
+(`se_tol_for_paths_per_cell`, an absolute bound derived from `paths_per_cell`) was itself wrong:
+`se` does not depend on `n_steps` at all -- it is set by the payoff's variance, which varies with
+strike and expiry. A fixed absolute `se_tol` therefore permanently excludes whichever
+strike/expiry cells have intrinsically higher payoff variance (e.g. longer expiries), NO MATTER
+how many steps are swept, and when EVERY row at EVERY step count fails that unsatisfiable bound
+for BOTH schemes, `rank_schemes` fell through to its wall-time tie-break for both -- turning the
+convergence study into a stopwatch reading (Euler is ~3x faster per step) and recording that as
+if it were a convergence result. The CORRECTED rule (see `rank_schemes`' own docstring) scores
+each row against `shared_se = min(se across the schemes present at that exact cell)` instead: a
+scale grounded in what both schemes actually achieved AT THAT CELL, which no amount of step
+refinement can help a scheme cheat by inflating its own `se`. A scheme that never passes on any
+step count is excluded from the ranking outright; if NO scheme ever passes, `rank_schemes` raises
+rather than falling back to wall time -- wall time may only break a tie between schemes that both
+genuinely converged.
 
 **The QE inadmissibility fallback fraction is reported, not merely counted** (P0-3, BLOCKER, code
 review 2026-09-06): `PathBundle.qe_fallback_count` (heston.py) existed but was consumed by
@@ -399,47 +412,72 @@ def run_sweep(
 
 
 # Empirical scale for this study's discounted call payoff standard deviation across its
-# strike/expiry/param-set grid: `se * sqrt(n_paths)` measured in test_validation_gates.py's G1/G2
-# gates (n_paths=20_000) tops out at ~0.073*sqrt(20_000) ~= 10.3 (G2, the degenerate
-# Black-Scholes gate, the widest measured case). 12.0 keeps a margin above that measured worst
-# case without being so loose the se_tol conjunct below stops meaning anything.
-_SE_TOL_REFERENCE_PAYOFF_STD = 12.0
+def _shared_se_per_cell(rows: Sequence[SweepCell]) -> dict[tuple[int, str, float, float], float]:
+    """`shared_se[(n_steps, param_set, strike, expiry)]` = the SMALLEST `se` among whichever
+    scheme(s) are present in `rows` at that exact cell (P0-2, SECOND correction, 2026-09-06 --
+    see module docstring).
 
-
-def se_tol_for_paths_per_cell(paths_per_cell: int) -> float:
-    """Minimum-precision bound for `rank_schemes`' `se_tol` conjunct (P0-2, code review
-    2026-09-06): `se_tol = _SE_TOL_REFERENCE_PAYOFF_STD / sqrt(paths_per_cell)`.
-
-    This is the standard MC standard-error scaling (`se ~ payoff_std / sqrt(n)`) run backwards:
-    given a conservative upper bound on this study's payoff standard deviation
-    (`_SE_TOL_REFERENCE_PAYOFF_STD`, derived from measured gate SEs -- see its own comment), this
-    is the `se` a cell run at `paths_per_cell` total paths SHOULD achieve. A row reporting a
-    LARGER `se` than this at the same nominal path count is behaving worse than that reference
-    payoff, so `rank_schemes` treats it as too imprecise to count as a pass, regardless of how
-    small `|bias|` looks relative to that inflated `se`.
+    This replaces an absolute `se_tol` derived from `paths_per_cell`, which was itself wrong:
+    `se` is set by the payoff's variance (varies with strike/expiry), not by `n_steps` at all, so
+    an absolute bound can permanently exclude high-variance cells no matter how many steps are
+    swept -- exactly what happened in the definitive run (every T=2.0 row failed an
+    unsatisfiable `se_tol` for BOTH schemes, and `rank_schemes` fell through to a wall-time
+    tie-break). Scoring against the SMALLER of the schemes actually present at a cell grounds
+    the bound in what was actually achieved there: a scheme cannot pass by being noisier than its
+    own peer, but a peer's precision at one cell says nothing about a different cell's payoff
+    variance, so refining `n_steps` still helps (every scheme's own `se` still shrinks with more
+    effective paths) without ever letting inflated `se` excuse a real bias.
     """
-    return _SE_TOL_REFERENCE_PAYOFF_STD / math.sqrt(paths_per_cell)
+    shared_se: dict[tuple[int, str, float, float], float] = {}
+    for row in rows:
+        cell = (row.n_steps, row.param_set, row.strike, row.expiry)
+        if cell not in shared_se or row.se < shared_se[cell]:
+            shared_se[cell] = row.se
+    return shared_se
 
 
-def rank_schemes(rows: Sequence[SweepCell], se_tol: float) -> Scheme:
-    """The scheme whose `|bias|` first falls inside 3 SE, AT A PRECISION OF AT LEAST `se_tol`, at
-    the COARSEST step count, across BOTH parameter sets, tie-broken on wall time.
+def _first_passing_step(
+    scheme_rows: Sequence[SweepCell],
+    shared_se: Mapping[tuple[int, str, float, float], float],
+) -> tuple[int, float] | None:
+    """The coarsest `n_steps` (from `scheme_rows`, one scheme's rows only) at which EVERY row
+    recorded at that step count (every param_set / strike / expiry combination present, with
+    both param sets required to be represented) satisfies `|bias| < 3 * shared_se[cell]`.
 
-    Concretely: group each scheme's rows by `n_steps`. A step count "passes" for a scheme when,
-    across every row recorded at that step count (every param_set / strike / expiry combination
-    present, with both param sets required to be represented), BOTH `|bias| < 3*se` AND
-    `se < se_tol` hold for ALL of them. Each scheme's rank key is `(smallest passing n_steps, else
-    +inf; total wall time of the rows at that n_steps)`; schemes are ordered by that key ascending
-    -- a coarser passing step count wins outright, and summed wall time at that step count breaks
-    a tie between schemes that first pass at the same step count.
+    Returns `(n_steps, total wall_time_s of the rows at that n_steps)`, or `None` if no step
+    count in `scheme_rows` passes -- this scheme has not converged on this grid.
+    """
+    by_steps: dict[int, list[SweepCell]] = {}
+    for row in scheme_rows:
+        by_steps.setdefault(row.n_steps, []).append(row)
 
-    The `se_tol` conjunct exists (P0-2, BLOCKER-adjacent, code review 2026-09-06) because
-    `|bias| < 3*se` alone is vacuously easier to satisfy the LARGER `se` is: a scheme with higher
-    payoff variance could pass at a coarser step count and win the ranking BECAUSE it is less
-    precise, exactly the failure mode every other 3-SE gate in this slice already guards against
-    with a second conjunct bounding `se` itself (see test_validation_gates.py's module
-    docstring). `se_tol_for_paths_per_cell` derives a principled `se_tol` from `paths_per_cell`;
-    callers pass it in explicitly (no default) so the derivation is visible at the call site.
+    for n_steps in sorted(by_steps):
+        group = by_steps[n_steps]
+        if len({row.param_set for row in group}) < 2:
+            continue  # both param sets must be represented at this step count
+        if all(
+            abs(row.bias) < 3.0 * shared_se[(row.n_steps, row.param_set, row.strike, row.expiry)]
+            for row in group
+        ):
+            return n_steps, sum(row.wall_time_s for row in group)
+    return None
+
+
+def rank_schemes(rows: Sequence[SweepCell]) -> Scheme:
+    """The scheme whose `|bias|` first falls inside `3 * shared_se` (see `_shared_se_per_cell`)
+    at the COARSEST step count, across BOTH parameter sets, tie-broken on wall time.
+
+    A scheme that never passes at any step count in `rows` is EXCLUDED from the ranking, not
+    penalized with an infinite key that still competes on wall time -- wall time may only ever
+    break a tie between schemes that BOTH genuinely converged. If NO scheme passes at any step
+    count, this raises `ValueError` rather than silently falling back to ranking by wall time
+    (P0-2, second fix, 2026-09-06): a fallback that quietly becomes the entire decision is a
+    defect in its own right, and it is exactly what let a stopwatch reading (Euler is ~3x faster
+    per step than QE) masquerade as a convergence result in the definitive run.
+
+    Requires at least two schemes present in `rows`: `shared_se` is a scale one scheme's own
+    precision cannot inflate away, which only means something when there is a peer to compare
+    against.
 
     Strike rows at a step count are priced off a SHARED `PathBundle` (module docstring, fix 1)
     and are therefore correlated with each other. That does not affect this check: "ALL rows
@@ -449,30 +487,84 @@ def rank_schemes(rows: Sequence[SweepCell], se_tol: float) -> Scheme:
     schemes = sorted({row.scheme for row in rows})
     if not schemes:
         raise ValueError("rank_schemes requires at least one sweep row")
+    if len(schemes) < 2:
+        raise ValueError(
+            "rank_schemes requires at least two schemes present in `rows`: shared_se is a scale "
+            "computed ACROSS schemes at each cell, and needs a peer to compare against"
+        )
+
+    shared_se = _shared_se_per_cell(rows)
 
     best_scheme: Scheme | None = None
     best_key: tuple[float, float] | None = None
     for scheme in schemes:
         scheme_rows = [row for row in rows if row.scheme == scheme]
-        by_steps: dict[int, list[SweepCell]] = {}
-        for row in scheme_rows:
-            by_steps.setdefault(row.n_steps, []).append(row)
-
-        key: tuple[float, float] = (math.inf, sum(row.wall_time_s for row in scheme_rows))
-        for n_steps in sorted(by_steps):
-            group = by_steps[n_steps]
-            if len({row.param_set for row in group}) < 2:
-                continue  # both param sets must be represented at this step count
-            if all(abs(row.bias) < 3.0 * row.se and row.se < se_tol for row in group):
-                key = (float(n_steps), sum(row.wall_time_s for row in group))
-                break
-
+        passing = _first_passing_step(scheme_rows, shared_se)
+        if passing is None:
+            continue  # never converges on this grid -- excluded, not ranked via an infinite key
+        n_steps, wall_time = passing
+        key = (float(n_steps), wall_time)
         if best_key is None or key < best_key:
             best_key = key
             best_scheme = scheme
 
-    assert best_scheme is not None  # schemes is non-empty, so the loop assigns at least once
+    if best_scheme is None:
+        raise ValueError(
+            "no scheme converged on this grid: every scheme failed |bias| < 3*shared_se at "
+            "every step count swept. This is not rankable by wall time -- it means the grid "
+            "needs finer steps, more paths (to shrink shared_se), or both."
+        )
     return best_scheme
+
+
+@dataclass(frozen=True)
+class ConvergenceCost:
+    """Per-scheme convergence cost, for the artifact's cost-to-accuracy comparison (P0-2, fix 3,
+    2026-09-06): the coarsest step count at which a scheme first passes `rank_schemes`' shared-SE
+    bar, the wall time MEASURED at that step count, and the resulting cost per step. `None`
+    fields mean the scheme never converged on the swept grid.
+    """
+
+    scheme: Scheme
+    first_passing_n_steps: int | None
+    wall_time_s_at_passing: float | None
+    cost_per_step_s: float | None
+
+
+def convergence_costs(rows: Sequence[SweepCell]) -> list[ConvergenceCost]:
+    """Per-scheme `ConvergenceCost`, using the same `shared_se`/`_first_passing_step` rule
+    `rank_schemes` uses to choose a winner. This is what lets the rendered report show WHY a
+    scheme was chosen, not merely which one was: the interesting number is not "scheme X is
+    slower per step" but the RATIO of total cost each scheme actually pays to first reach the
+    shared-SE bar -- a scheme that needs far fewer steps can still win even if each of its steps
+    costs more (see the module docstring's QE-vs-Euler numbers).
+    """
+    schemes = sorted({row.scheme for row in rows})
+    shared_se = _shared_se_per_cell(rows)
+    costs: list[ConvergenceCost] = []
+    for scheme in schemes:
+        scheme_rows = [row for row in rows if row.scheme == scheme]
+        passing = _first_passing_step(scheme_rows, shared_se)
+        if passing is None:
+            costs.append(
+                ConvergenceCost(
+                    scheme=scheme,
+                    first_passing_n_steps=None,
+                    wall_time_s_at_passing=None,
+                    cost_per_step_s=None,
+                )
+            )
+        else:
+            n_steps, wall_time = passing
+            costs.append(
+                ConvergenceCost(
+                    scheme=scheme,
+                    first_passing_n_steps=n_steps,
+                    wall_time_s_at_passing=wall_time,
+                    cost_per_step_s=wall_time / n_steps,
+                )
+            )
+    return costs
 
 
 def measure_antithetic_reduction(
@@ -527,16 +619,17 @@ def render_report(
     chosen: Scheme,
     antithetic_reduction: Mapping[str, float],
     manifest: RunManifest,
-    se_tol: float,
 ) -> str:
     """Render the study's markdown artifact (written to `docs/studies/p2m1-scheme-convergence.md`
     by `main()`). The illustrative/uncalibrated disclaimer is the FIRST content line, so the
     scheme decision is never read out of context.
 
-    `se_tol` (P0-2, code review 2026-09-06) is the precision bound `rank_schemes` was called
-    with; it is recorded here so a reader of ADR-006 Amendment 4 s4 can see exactly how the
-    scheme decision was made, not just what it was.
+    Recomputes `convergence_costs(rows)` internally (P0-2, fix 3, 2026-09-06) so the artifact
+    states not just WHICH scheme was chosen but WHY: each scheme's first all-pass step count,
+    its measured cost there, and the resulting cost-to-accuracy ratio against the chosen scheme.
     """
+    costs = {cost.scheme: cost for cost in convergence_costs(rows)}
+    chosen_cost = costs[chosen]
     lines: list[str] = [
         "# P2.M1 Slice 1 -- Scheme Convergence Study (QE vs full-truncation Euler)",
         "",
@@ -558,11 +651,42 @@ def render_report(
         "",
         "## Ranking rule",
         "",
-        "The scheme whose `|bias| < 3*se` AND `se < se_tol` first holds for EVERY row (both "
-        "param sets, every strike/expiry) at a given step count, at the COARSEST such step "
-        f"count, tie-broken on wall time. `se_tol = {se_tol:.6f}` for this run "
-        "(`se_tol_for_paths_per_cell`, derived from the target paths per cell above) -- see "
-        "`rank_schemes`' docstring for why a bias-only check is not enough.",
+        "The scheme whose `|bias| < 3 * shared_se` first holds for EVERY row (both param sets, "
+        "every strike/expiry) at a given step count, at the COARSEST such step count, tie-broken "
+        "on wall time -- where `shared_se` at a cell is the SMALLEST `se` among the schemes "
+        "present there, so a scheme cannot pass by being noisier than its own peer. A scheme "
+        "that never passes at any step count is excluded from the ranking; if NO scheme passes "
+        "at any step count, this run would have raised rather than silently ranking by wall "
+        "time -- see `rank_schemes`' docstring for the full rule and why an earlier revision's "
+        "absolute `se_tol` was wrong.",
+        "",
+        "## Cost-to-accuracy comparison",
+        "",
+        'The interesting number is not "which scheme is faster per step" but the RATIO of '
+        "total wall-clock cost each scheme actually pays to first reach the shared-SE bar above "
+        "-- a scheme needing far fewer steps can win even when each of its steps costs more.",
+        "",
+        "| scheme | first all-pass n_steps | wall_time_s at that n_steps | cost_per_step_s | "
+        "cost vs chosen |",
+        "|---|---|---|---|---|",
+    ]
+    for scheme in sorted(costs):
+        cost = costs[scheme]
+        if cost.first_passing_n_steps is None:
+            lines.append(f"| {scheme} | never converged on this grid | | | |")
+            continue
+        assert cost.wall_time_s_at_passing is not None
+        assert cost.cost_per_step_s is not None
+        chosen_wall_time = chosen_cost.wall_time_s_at_passing
+        if chosen_wall_time is not None and chosen_wall_time > 0.0:
+            cost_ratio = f"{cost.wall_time_s_at_passing / chosen_wall_time:.2f}x"
+        else:
+            cost_ratio = ""
+        lines.append(
+            f"| {scheme} | {cost.first_passing_n_steps} | {cost.wall_time_s_at_passing:.3f} | "
+            f"{cost.cost_per_step_s:.6f} | {cost_ratio} |"
+        )
+    lines += [
         "",
         "## Antithetic variance reduction achieved",
         "",
@@ -575,8 +699,8 @@ def render_report(
         "| scheme | se_plain / se_antithetic |",
         "|---|---|",
     ]
-    for scheme, ratio in antithetic_reduction.items():
-        lines.append(f"| {scheme} | {ratio:.4f} |")
+    for scheme_name, ratio in antithetic_reduction.items():
+        lines.append(f"| {scheme_name} | {ratio:.4f} |")
     lines += [
         "",
         "## Sweep results",
@@ -611,7 +735,6 @@ class StudyResult:
     chosen_scheme: Scheme
     antithetic_reduction: dict[str, float]
     manifest: RunManifest
-    se_tol: float
 
 
 def run_study(
@@ -646,8 +769,7 @@ def run_study(
         expiries=expiries,
         verbose=verbose,
     )
-    se_tol = se_tol_for_paths_per_cell(paths_per_cell)
-    chosen = rank_schemes(rows, se_tol=se_tol)
+    chosen = rank_schemes(rows)
 
     representative_n_steps = n_steps_grid[len(n_steps_grid) // 2]
     representative_strike = strikes[len(strikes) // 2]
@@ -688,7 +810,6 @@ def run_study(
         chosen_scheme=chosen,
         antithetic_reduction=antithetic_reduction,
         manifest=manifest,
-        se_tol=se_tol,
     )
 
 
@@ -740,7 +861,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         result.chosen_scheme,
         result.antithetic_reduction,
         result.manifest,
-        se_tol=result.se_tol,
     )
 
     out_path: Path = args.out

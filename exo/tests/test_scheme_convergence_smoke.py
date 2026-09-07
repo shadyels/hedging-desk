@@ -32,7 +32,6 @@ from exo.studies.scheme_convergence import (
     resolve_batch_plan,
     run_study,
     run_sweep,
-    se_tol_for_paths_per_cell,
 )
 
 
@@ -56,24 +55,27 @@ def test_run_sweep_tiny_produces_one_row_per_cell() -> None:
 
 def test_rank_schemes_returns_one_of_the_two_schemes() -> None:
     rows = run_sweep(
-        paths_per_cell=200,
-        n_paths_per_batch_override=200,
+        paths_per_cell=2000,
+        n_paths_per_batch_override=2000,
         base_seed=1,
         schemes=("qe", "euler-ft"),
-        n_steps_grid=(4, 12),
+        n_steps_grid=(4, 12, 52, 104, 252),
         strikes=(100.0,),
         expiries=(1.0,),
         verbose=False,
     )
-    chosen = rank_schemes(rows, se_tol=se_tol_for_paths_per_cell(200))
+    chosen = rank_schemes(rows)
     assert chosen in ("qe", "euler-ft")
 
 
 def test_rank_schemes_picks_coarser_passing_step_count() -> None:
-    """Hand-built rows: 'qe' passes (|bias| < 3*se AND se < se_tol=2.0, both param sets) already
-    at n_steps=4; 'euler-ft' only passes at n_steps=12. rank_schemes must prefer the
+    """Hand-built rows: 'qe' passes (|bias| < 3*shared_se, both param sets) already at
+    n_steps=4; 'euler-ft' only passes at n_steps=12. rank_schemes must prefer the
     coarser-passing scheme, even though euler-ft's failing n_steps=4 rows are individually
-    faster (wall_time_s)."""
+    faster (wall_time_s). Both schemes share `se=1.0` at every cell here, so `shared_se` is
+    trivially `1.0` throughout -- this test is about step-count preference, not the shared-SE
+    mechanism itself (see test_rank_schemes_shared_se_prevents_a_noisier_scheme_from_passing_on_
+    its_own_se below for that)."""
     rows = [
         SweepCell("qe", 4, "feller_satisfying", 100.0, 1.0, 10.0, 1.0, 0.1, 0.1, 1.0, 200, 1, None),
         SweepCell(
@@ -116,44 +118,69 @@ def test_rank_schemes_picks_coarser_passing_step_count() -> None:
             None,
         ),
     ]
-    assert rank_schemes(rows, se_tol=2.0) == "qe"
+    assert rank_schemes(rows) == "qe"
 
 
-def test_rank_schemes_se_tol_conjunct_disqualifies_an_imprecise_pass() -> None:
-    """P0-2 (BLOCKER-adjacent, code review 2026-09-06): `rank_schemes` previously had no
-    minimum-precision conjunct -- a scheme with high payoff variance could pass `|bias| < 3*se`
-    at a coarser step count BECAUSE it is imprecise, and win the ranking for it.
+def test_rank_schemes_shared_se_prevents_a_noisier_scheme_from_passing_on_its_own_se() -> None:
+    """P0-2, SECOND correction (2026-09-06): the first fix used an absolute `se_tol` that could
+    never be satisfied by refining `n_steps` when `se` is set by expiry/strike (payoff variance),
+    not step count -- this permanently excluded high-variance cells in the real run and caused
+    `rank_schemes` to fall through to a wall-time tie-break for BOTH schemes. The corrected rule
+    scores each row against `shared_se = min(se across the schemes present at that exact cell)`:
+    refining `n_steps` still helps (every scheme's own `se` still shrinks with more effective
+    paths over time), but a scheme cannot borrow its OWN inflated `se` to excuse a real bias.
 
-    Scheme "A" passes the bias check at n_steps=4 (bias=2.0 < 3*se=3.0) but ONLY because se=1.0
-    is huge; se_tol=0.5 correctly disqualifies it there, and it never becomes precise enough to
-    pass at any step count in these rows. Scheme "B" passes BOTH conjuncts at n_steps=4
-    (bias=0.05 < 3*0.2=0.6, se=0.2 < 0.5).
-
-    WITHOUT the se_tol conjunct, the OLD rule would have called both "A" and "B" passing at
-    n_steps=4 and tie-broken on wall time -- A's n_steps=4 rows are deliberately FASTER
-    (wall_time=0.05) than B's (wall_time=1.0), so the old rule would pick "A". WITH se_tol, A is
-    disqualified everywhere in these rows (key stays +inf) and B wins outright.
-    """
+    Scheme "A" has bias=2.0 and se=1.0 at EVERY step count here (never actually converges):
+    under the OLD (pre-code-review) rule, `|bias| < 3*se` (2.0 < 3.0) would have called A
+    "passing" already at n_steps=4. Scheme "B" is precise (se=0.1) throughout and only becomes
+    accurate at n_steps=12. `shared_se` at every cell here is `min(1.0, 0.1) = 0.1` (B's), so A's
+    bias=2.0 fails `2.0 < 3*0.1 = 0.3` at every step count -- A never passes -- and B passes at
+    n_steps=12."""
     rows = [
-        SweepCell("A", 4, "feller_satisfying", 100.0, 1.0, 10.0, 1.0, 2.0, 2.0, 0.05, 200, 1, None),
-        SweepCell("A", 4, "feller_violating", 100.0, 1.0, 10.0, 1.0, 2.0, 2.0, 0.05, 200, 1, None),
-        SweepCell("A", 12, "feller_satisfying", 100.0, 1.0, 10.0, 1.0, 2.0, 2.0, 2.0, 200, 1, None),
-        SweepCell("A", 12, "feller_violating", 100.0, 1.0, 10.0, 1.0, 2.0, 2.0, 2.0, 200, 1, None),
+        SweepCell("A", 4, "feller_satisfying", 100.0, 1.0, 10.0, 1.0, 2.0, 2.0, 1.0, 200, 1, None),
+        SweepCell("A", 4, "feller_violating", 100.0, 1.0, 10.0, 1.0, 2.0, 2.0, 1.0, 200, 1, None),
+        SweepCell("A", 12, "feller_satisfying", 100.0, 1.0, 10.0, 1.0, 2.0, 2.0, 1.0, 200, 1, None),
+        SweepCell("A", 12, "feller_violating", 100.0, 1.0, 10.0, 1.0, 2.0, 2.0, 1.0, 200, 1, None),
+        SweepCell("B", 4, "feller_satisfying", 100.0, 1.0, 10.0, 0.1, 2.0, 20.0, 1.0, 200, 1, None),
+        SweepCell("B", 4, "feller_violating", 100.0, 1.0, 10.0, 0.1, 2.0, 20.0, 1.0, 200, 1, None),
         SweepCell(
-            "B", 4, "feller_satisfying", 100.0, 1.0, 10.0, 0.2, 0.05, 0.25, 1.0, 200, 1, None
+            "B", 12, "feller_satisfying", 100.0, 1.0, 10.0, 0.1, 0.05, 0.5, 0.5, 200, 1, None
         ),
-        SweepCell("B", 4, "feller_violating", 100.0, 1.0, 10.0, 0.2, 0.05, 0.25, 1.0, 200, 1, None),
+        SweepCell("B", 12, "feller_violating", 100.0, 1.0, 10.0, 0.1, 0.05, 0.5, 0.5, 200, 1, None),
     ]
-    assert rank_schemes(rows, se_tol=0.5) == "B"
+    assert rank_schemes(rows) == "B"
 
 
-def test_se_tol_for_paths_per_cell_shrinks_as_paths_grow() -> None:
-    """se_tol must tighten (shrink) as paths_per_cell grows -- more paths should demand more
-    precision to pass, not less."""
-    loose = se_tol_for_paths_per_cell(200)
-    tight = se_tol_for_paths_per_cell(3_200_000)
-    assert tight < loose
-    assert tight > 0.0
+def test_rank_schemes_raises_when_no_scheme_converges_rather_than_wall_time_fallback() -> None:
+    """P0-2, SECOND fix (2026-09-06): a fallback that silently ranks by wall time when no scheme
+    passes is a defect in its own right -- it is exactly what let a stopwatch reading masquerade
+    as a convergence result in the definitive run (every T=2.0 row failed an unsatisfiable
+    absolute se_tol for BOTH schemes, so the old rank_schemes fell through to ranking by total
+    wall time and picked euler-ft purely because it is faster per step, not because it
+    converged). rank_schemes must raise instead of ever reaching that fallback.
+
+    Scheme "A" is much FASTER (wall_time=0.1) than "B" (wall_time=10.0), but NEITHER scheme's
+    bias (5.0) falls inside `3*shared_se` (shared_se=1.0, so the bound is 3.0) at the only step
+    count present. A naive wall-time fallback would pick "A"; the fix must raise instead."""
+    rows = [
+        SweepCell("A", 4, "feller_satisfying", 100.0, 1.0, 10.0, 1.0, 5.0, 5.0, 0.1, 200, 1, None),
+        SweepCell("A", 4, "feller_violating", 100.0, 1.0, 10.0, 1.0, 5.0, 5.0, 0.1, 200, 1, None),
+        SweepCell("B", 4, "feller_satisfying", 100.0, 1.0, 10.0, 1.0, 5.0, 5.0, 10.0, 200, 1, None),
+        SweepCell("B", 4, "feller_violating", 100.0, 1.0, 10.0, 1.0, 5.0, 5.0, 10.0, 200, 1, None),
+    ]
+    with pytest.raises(ValueError, match="no scheme converged"):
+        rank_schemes(rows)
+
+
+def test_rank_schemes_requires_at_least_two_schemes() -> None:
+    rows = [
+        SweepCell(
+            "qe", 4, "feller_satisfying", 100.0, 1.0, 10.0, 0.1, 0.05, 0.5, 1.0, 200, 1, None
+        ),
+        SweepCell("qe", 4, "feller_violating", 100.0, 1.0, 10.0, 0.1, 0.05, 0.5, 1.0, 200, 1, None),
+    ]
+    with pytest.raises(ValueError, match="at least two schemes"):
+        rank_schemes(rows)
 
 
 def test_measure_antithetic_reduction_returns_a_finite_positive_ratio() -> None:
@@ -187,9 +214,7 @@ def test_render_report_states_illustrative_uncalibrated_up_front() -> None:
         expiries=(1.0,),
         verbose=False,
     )
-    report = render_report(
-        rows, "qe", {"qe": 1.1, "euler-ft": 0.9}, manifest, se_tol=se_tol_for_paths_per_cell(200)
-    )
+    report = render_report(rows, "qe", {"qe": 1.1, "euler-ft": 0.9}, manifest)
     head = report[:400].lower()
     assert "illustrative" in head
     assert "uncalibrated" in head
@@ -197,11 +222,11 @@ def test_render_report_states_illustrative_uncalibrated_up_front() -> None:
 
 def test_run_study_end_to_end_at_tiny_size() -> None:
     result = run_study(
-        paths_per_cell=200,
-        n_paths_per_batch_override=200,
+        paths_per_cell=2000,
+        n_paths_per_batch_override=2000,
         base_seed=1,
         schemes=("qe", "euler-ft"),
-        n_steps_grid=(4, 12),
+        n_steps_grid=(4, 12, 52, 104, 252),
         strikes=(100.0,),
         expiries=(1.0,),
         verbose=False,
