@@ -110,7 +110,7 @@ from exo.provenance import EngineSettings, RunManifest, git_sha, params_hash
 # illustrative, UNCALIBRATED texture (ADR-006 Amendment 4 s1) -- kept as LOCAL constants rather
 # than loaded from exo.toml so this study's grid does not silently drift if exo.toml's numbers are
 # later tweaked for an unrelated reason. s0=100 (not AAPL's/MSFT's actual spot) so the strike grid
-# {90, 100, 110} below lands as OTM/ATM/ITM for both.
+# {90, 100, 110} below lands as ITM/ATM/OTM for a call on both.
 FELLER_VIOLATING = HestonParams(
     s0=100.0, r=0.02, q=0.01, v0=0.04, kappa=1.5, theta=0.04, xi=0.6, rho=-0.7
 )  # feller_ratio = 2*1.5*0.04/0.6**2 = 0.333 < 1
