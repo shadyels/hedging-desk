@@ -38,7 +38,26 @@ def price_from_bundle(payoff: Payoff, bundle: PathBundle, *, r: float) -> PriceR
     `bundle`'s own path order, `discount` reduces it to one `(n_paths,)` array without
     reordering, and that array is handed to `mc_estimate(bundle, ...)` unchanged -- the
     antithetic pair-mean standard error is positional and would silently mispair otherwise.
+
+    Requires `bundle.t[-1] == payoff.expiry` EXACTLY, for the same reason `price()` requires
+    `engine.expiry == payoff.expiry` exactly (see `price()`'s docstring) -- `bundle.t[-1]` is
+    `np.linspace`'s endpoint, set to the exact `expiry` it was simulated with, not a value that
+    could pick up floating-point drift. This is a BELT, not the only fix (HIGH-1, code review,
+    fix round 1): `price_from_bundle` is the function several products SHARE one bundle
+    through, and both `barrier.py` and `autocallable.py` independently bound their own
+    monitoring/terminal-leg indices to the payoff's own expiry rather than the bundle's last
+    column, so a caller that calls `payoff.cashflows(bundle)` directly (bypassing this guard
+    entirely, as this slice's own G4 companion test does) is still priced correctly. This guard
+    exists so the *pricer-mediated* path fails loud instead of silently pricing the wrong
+    contract -- measured, before the fix, at a 13.5 SE silent mispricing on a 2-year bundle
+    against a 1-year down-and-out call.
     """
+    if bundle.t[-1] != payoff.expiry:
+        raise ValueError(
+            f"bundle horizon {bundle.t[-1]} != payoff.expiry {payoff.expiry} -- pricing a "
+            "payoff against a bundle simulated to a different horizon would silently price "
+            "the wrong contract."
+        )
     ledger = payoff.cashflows(bundle)
     discounted = discount(ledger, r=r)
     return mc_estimate(bundle, discounted)
