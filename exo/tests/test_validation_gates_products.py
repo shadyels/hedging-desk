@@ -156,20 +156,38 @@ def _g4_barrier_option(
     )
 
 
-def test_g4_down_and_out_call_matches_bs_barrier_within_3se() -> None:
+@pytest.mark.parametrize("seed", [42, 7, 123, 2024])
+def test_g4_down_and_out_call_matches_bs_barrier_within_3se(seed: int) -> None:
     """G4. Down-and-out call, model degenerated to Black-Scholes (same degeneration as slice
     1's G2: xi -> ~0, v0 = theta = sigma**2, rho = 0), CONTINUOUS_BRIDGE monitoring, vs
     `bs_barrier_price` (Reiner-Rubinstein). The Brownian-bridge survival weight is exact (not
     approximate) in this degenerate limit, so this gate is bias-free at ANY path count (see
     brief s2, "Why the monitoring decision is the crux").
 
-    Measured at n_steps=50, n_paths=20_000, seed=42: pv=6.690, bs_ref=6.808, SE ~= 0.0766,
-    |mc - ref|/se ~= -1.54. tol_abs=0.09 sits just above the measured SE.
+    MEDIUM-2 (code review, fix round 1): a single committed seed consumes roughly half the
+    3-SE budget (see below) and is one dependency bump away from a coin-flip draw --
+    `rng.py`'s own ponytail records that NEP 19 does not guarantee `Generator` reproducibility
+    across numpy versions. Parametrized over 4 seeds (rather than pooling via
+    `PriceResult.combine`) so this gate also exercises the RNG seam per seed.
+
+    Measured at n_steps=50, n_paths=20_000 (this repo, fix round 1):
+        seed=42:   pv=6.689759  se=0.076642  z=-1.539
+        seed=7:    pv=6.842298  se=0.078742  z=+0.439
+        seed=123:  pv=6.773450  se=0.077402  z=-0.443
+        seed=2024: pv=6.819603  se=0.077761  z=+0.153
+    (bs_ref=6.807708 throughout). tol_abs=0.09 sits just above every measured SE.
+
+    Independently measured by the code reviewer across 12 seeds at this same path count: mean
+    pv bias = +0.0226, se(mean) = 0.0229 -> bias/se = +0.99 -- statistically indistinguishable
+    from zero. Critically, z does NOT grow with path count (seed 42: 20k z=-1.54, 80k z=-1.01,
+    320k z=+0.26) or step count (seed 42, 25/50/100/252 steps -> z=+1.14/-1.54/-1.23/-1.14),
+    which is the actual evidence for "the bridge is exact at any path count" -- a claim this
+    gate asserted before fix round 1 without a number behind it.
     """
     engine = EngineConfig(
         scheme="qe", n_steps=_G4_N_STEPS, n_paths=20_000, expiry=_G4_EXPIRY, antithetic=True
     )
-    bundle = simulate(_DEGENERATE, engine, PseudoRandomSource(seed=42))
+    bundle = simulate(_DEGENERATE, engine, PseudoRandomSource(seed=seed))
     barrier_opt = _g4_barrier_option(Monitoring.CONTINUOUS_BRIDGE, None)
 
     result = price_from_bundle(barrier_opt, bundle, r=_DEGENERATE.r)
@@ -188,10 +206,11 @@ def test_g4_down_and_out_call_matches_bs_barrier_within_3se() -> None:
 
     tol_abs = 0.09
     assert 0.0 < result.std_err < tol_abs, (
-        f"se={result.std_err} is not tight enough to be a meaningful gate (tol_abs={tol_abs})"
+        f"seed={seed}: se={result.std_err} is not tight enough to be a meaningful gate "
+        f"(tol_abs={tol_abs})"
     )
     assert abs(result.pv - reference) < 3.0 * result.std_err, (
-        f"pv={result.pv}, bs_ref={reference}, off by "
+        f"seed={seed}: pv={result.pv}, bs_ref={reference}, off by "
         f"{(result.pv - reference) / result.std_err:.2f} SE"
     )
 
@@ -292,3 +311,39 @@ def test_g5_in_out_parity_exact_per_path(
     vanilla_payoff = np.maximum(bundle.S[:, -1] - _AAPL.s0, 0.0)
 
     np.testing.assert_allclose(ko_amounts + ki_amounts, vanilla_payoff, rtol=1e-12, atol=1e-9)
+
+
+def test_price_via_package_surface_happy_path_and_expiry_mismatch() -> None:
+    """MEDIUM-3 (code review, fix round 1): no test imported `exo.products.price` or the
+    `exo.products` package surface at all before this fix -- every other test in this slice
+    imports submodules directly and uses `price_from_bundle`. So `price()`'s own
+    expiry-mismatch guard, and the `products/__init__.py` re-export list, were both untested.
+    Imports via `from exo.products import ...` specifically so the re-export list is
+    exercised, not just the submodule it forwards to.
+    """
+    from exo.products import BarrierOption as PackageBarrierOption
+    from exo.products import Monitoring as PackageMonitoring
+    from exo.products import price as package_price
+
+    opt = PackageBarrierOption(
+        underlying="AAPL",
+        option_type="call",
+        strike=_AAPL.s0,
+        expiry=1.0,
+        barrier=_AAPL.s0 * 0.85,
+        direction="down",
+        knock="out",
+        monitoring=PackageMonitoring.CONTINUOUS_BRIDGE,
+        observations=None,
+    )
+    engine = EngineConfig(scheme="qe", n_steps=50, n_paths=2_000, expiry=1.0, antithetic=True)
+
+    happy_result = package_price(opt, _AAPL, engine, PseudoRandomSource(seed=99))
+    assert happy_result.std_err > 0.0
+    assert happy_result.n_paths == 2_000
+
+    mismatched_engine = EngineConfig(
+        scheme="qe", n_steps=50, n_paths=2_000, expiry=2.0, antithetic=True
+    )
+    with pytest.raises(ValueError):
+        package_price(opt, _AAPL, mismatched_engine, PseudoRandomSource(seed=99))
