@@ -7,7 +7,7 @@ reference pricers used as this slice's blocking validation gates.
 
 from __future__ import annotations
 
-from exo.models.analytic import bs_call_price, bs_put_price
+from exo.models.analytic import bs_barrier_price, bs_call_price, bs_put_price
 from exo.models.estimator import PriceResult, mc_estimate
 from exo.models.heston import PathBundle, simulate
 from exo.models.heston_cf import heston_vanilla_price
@@ -21,6 +21,7 @@ __all__ = [
     "PriceResult",
     "PseudoRandomSource",
     "RandomSource",
+    "bs_barrier_price",
     "bs_call_price",
     "bs_put_price",
     "heston_vanilla_price",
