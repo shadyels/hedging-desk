@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 import numpy as np
+import pytest
 
 from exo.models.heston import simulate
 from exo.models.params import EngineConfig, HestonParams
@@ -121,3 +122,123 @@ def test_memory_prices_at_or_above_no_memory() -> None:
     no_memory_result = price_from_bundle(_note(memory=False), bundle, r=_MSFT.r)
 
     assert memory_result.pv >= no_memory_result.pv
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "notional",
+        "autocall_trigger",
+        "coupon_barrier",
+        "protection_barrier",
+        "initial_level",
+        "coupon_rate",
+        "expiry",
+    ],
+)
+def test_autocallable_rejects_non_finite_scalar_fields(field: str) -> None:
+    """HIGH-3 (security review, fix round 1): before the fix, `Autocallable(notional=nan,
+    ...)` constructed with no exception, then contaminated the ledger with NaN silently."""
+    kwargs: dict[str, object] = dict(
+        underlying="SYNTH",
+        notional=1000.0,
+        observations=(0.25, 0.5, 0.75, 1.0),
+        autocall_trigger=120.0,
+        coupon_barrier=100.0,
+        coupon_rate=0.02,
+        memory=False,
+        protection_barrier=100.0,
+        initial_level=100.0,
+        expiry=1.0,
+    )
+    kwargs[field] = float("nan")
+    with pytest.raises(ValueError):
+        Autocallable(**kwargs)  # type: ignore[arg-type]
+
+
+def test_autocallable_rejects_nan_observation() -> None:
+    with pytest.raises(ValueError):
+        Autocallable(
+            underlying="SYNTH",
+            notional=1000.0,
+            observations=(0.25, float("nan"), 0.75, 1.0),
+            autocall_trigger=120.0,
+            coupon_barrier=100.0,
+            coupon_rate=0.02,
+            memory=False,
+            protection_barrier=100.0,
+            initial_level=100.0,
+            expiry=1.0,
+        )
+
+
+def test_autocallable_accepts_terminal_observation_within_grid_tolerance() -> None:
+    """LOW-1 (code review, fix round 1): `observations[-1] == expiry` must use the same
+    `1e-9 * expiry` tolerance `observation_indices` already defines, not exact float
+    equality -- a monthly TARF-style schedule accumulates real float drift
+    (`sum(1/12 for _ in range(24))` is `1.9999999999999991`, not exactly `2.0`)."""
+    expiry = 2.0
+    obs_list: list[float] = []
+    acc = 0.0
+    for _ in range(24):
+        acc += 1.0 / 12.0
+        obs_list.append(acc)
+    observations = tuple(obs_list)
+    assert observations[-1] != expiry  # sanity: this really is the float-drift case
+
+    Autocallable(
+        underlying="SYNTH",
+        notional=1000.0,
+        observations=observations,
+        autocall_trigger=1e9,
+        coupon_barrier=1e9,
+        coupon_rate=0.01,
+        memory=False,
+        protection_barrier=100.0,
+        initial_level=100.0,
+        expiry=expiry,
+    )  # must not raise
+
+
+def test_price_from_bundle_rejects_bundle_horizon_mismatch() -> None:
+    """HIGH-1 (code review, fix round 1): `price_from_bundle` had no guard against a bundle
+    simulated to a different horizon than the payoff."""
+    engine = EngineConfig(scheme="qe", n_steps=20, n_paths=4, expiry=2.0, antithetic=False)
+    bundle = simulate(_MSFT, engine, PseudoRandomSource(seed=1, antithetic=False))
+
+    with pytest.raises(ValueError):
+        price_from_bundle(_note(memory=False), bundle, r=_MSFT.r)  # note.expiry == 1.0
+
+
+def test_cashflows_reads_terminal_spot_at_its_own_expiry_not_bundle_last_column() -> None:
+    """HIGH-1 (code review, fix round 1): before the fix, the maturity leg read
+    `bundle.S[:, -1]` (the bundle's last column) instead of the note's own final observation
+    index. This forges a bundle identical up to the note's own expiry index but with garbage
+    afterward, and asserts the ledger is unchanged."""
+    note = Autocallable(
+        underlying="SYNTH",
+        notional=1000.0,
+        observations=(0.5, 1.0),
+        autocall_trigger=1e9,  # unreachable: isolates the terminal-leg indexing
+        coupon_barrier=1e9,
+        coupon_rate=0.02,
+        memory=False,
+        protection_barrier=100.0,
+        initial_level=100.0,
+        expiry=1.0,
+    )
+    n_steps = 20
+    engine = EngineConfig(scheme="qe", n_steps=n_steps, n_paths=2, expiry=2.0, antithetic=False)
+    bundle = simulate(
+        HestonParams(s0=100.0, r=0.0, q=0.0, v0=0.04, kappa=1.5, theta=0.04, xi=0.6, rho=-0.7),
+        engine,
+        PseudoRandomSource(seed=1, antithetic=False),
+    )
+    ledger = note.cashflows(bundle)  # note.observations land on grid indices [5, 10]
+
+    forged_s = bundle.S.copy()
+    forged_s[:, 11:] = -999.0  # would corrupt bundle.S[:, -1] if read directly
+    forged_bundle = replace(bundle, S=forged_s)
+    forged_ledger = note.cashflows(forged_bundle)
+
+    np.testing.assert_array_equal(ledger.amounts, forged_ledger.amounts)

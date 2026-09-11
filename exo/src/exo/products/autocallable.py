@@ -14,13 +14,14 @@ state: both are "a per-path counter that resets on one condition and is read by 
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
 
 from exo.models.heston import PathBundle
-from exo.products.base import CashflowLedger, observation_indices
+from exo.products.base import CashflowLedger, observation_indices, validate_observation_schedule
 
 
 @dataclass(frozen=True)
@@ -38,8 +39,10 @@ class Autocallable:
     - Maturity (only for paths never called): pays `notional` if `S_T >= protection_barrier`,
       else `notional * S_T / initial_level`. This is IN ADDITION TO any maturity-date coupon.
 
-    `initial_level` is S0. `observations[-1]` must equal `expiry` -- the maturity leg is paid
-    alongside the final observation's coupon/autocall check, not on a separate date.
+    `initial_level` is S0. `observations[-1]` must equal `expiry` within `1e-9 * expiry` (not
+    exact float equality -- see `base.validate_observation_schedule`'s `require_terminal`
+    docstring) -- the maturity leg is paid alongside the final observation's coupon/autocall
+    check, not on a separate date.
     """
 
     underlying: str
@@ -54,37 +57,35 @@ class Autocallable:
     expiry: float
 
     def __post_init__(self) -> None:
-        if self.notional <= 0.0:
-            raise ValueError(f"notional must be positive, got {self.notional}")
-        if self.expiry <= 0.0:
-            raise ValueError(f"expiry must be positive, got {self.expiry}")
-        if self.autocall_trigger <= 0.0 or self.coupon_barrier <= 0.0:
+        # NaN/Inf bypass every `<=`/`<` guard below under IEEE-754 (HIGH-3, security review) --
+        # checked explicitly alongside each range check, not left to fall out of it.
+        if not math.isfinite(self.notional) or self.notional <= 0.0:
+            raise ValueError(f"notional must be a positive finite number, got {self.notional}")
+        if not math.isfinite(self.expiry) or self.expiry <= 0.0:
+            raise ValueError(f"expiry must be a positive finite number, got {self.expiry}")
+        if not math.isfinite(self.autocall_trigger) or self.autocall_trigger <= 0.0:
             raise ValueError(
-                "autocall_trigger and coupon_barrier must be positive, got "
-                f"{self.autocall_trigger}, {self.coupon_barrier}"
+                f"autocall_trigger must be a positive finite number, got {self.autocall_trigger}"
             )
-        if self.protection_barrier <= 0.0:
-            raise ValueError(f"protection_barrier must be positive, got {self.protection_barrier}")
-        if self.initial_level <= 0.0:
-            raise ValueError(f"initial_level must be positive, got {self.initial_level}")
-        if self.coupon_rate < 0.0:
-            raise ValueError(f"coupon_rate must be non-negative, got {self.coupon_rate}")
-        if len(self.observations) == 0:
-            raise ValueError("observations must be non-empty")
-        if any(o <= 0.0 or o > self.expiry for o in self.observations):
+        if not math.isfinite(self.coupon_barrier) or self.coupon_barrier <= 0.0:
             raise ValueError(
-                f"observations must lie within (0, expiry={self.expiry}], got {self.observations}"
+                f"coupon_barrier must be a positive finite number, got {self.coupon_barrier}"
             )
-        if list(self.observations) != sorted(self.observations) or len(
-            set(self.observations)
-        ) != len(self.observations):
-            raise ValueError(f"observations must be strictly ascending, got {self.observations}")
-        if self.observations[-1] != self.expiry:
+        if not math.isfinite(self.protection_barrier) or self.protection_barrier <= 0.0:
             raise ValueError(
-                f"the last observation ({self.observations[-1]}) must equal expiry "
-                f"({self.expiry}) -- the maturity leg is paid alongside the final "
-                "observation's coupon check"
+                f"protection_barrier must be a positive finite number, got "
+                f"{self.protection_barrier}"
             )
+        if not math.isfinite(self.initial_level) or self.initial_level <= 0.0:
+            raise ValueError(
+                f"initial_level must be a positive finite number, got {self.initial_level}"
+            )
+        if not math.isfinite(self.coupon_rate) or self.coupon_rate < 0.0:
+            raise ValueError(
+                f"coupon_rate must be a non-negative finite number, got {self.coupon_rate}"
+            )
+
+        validate_observation_schedule(self.observations, self.expiry, require_terminal=True)
 
     def cashflows(self, bundle: PathBundle) -> CashflowLedger:
         obs_idx = observation_indices(np.asarray(self.observations, dtype=np.float64), bundle)
@@ -101,7 +102,7 @@ class Autocallable:
             coupon_hit = s_j >= self.coupon_barrier
             autocall_hit = s_j >= self.autocall_trigger
 
-            n_missed = missed_since_payment if self.memory else np.zeros(n_paths)
+            n_missed = missed_since_payment if self.memory else 0.0
             coupon_amt = self.notional * self.coupon_rate * (1.0 + n_missed)
 
             cf = np.where(coupon_hit, coupon_amt, 0.0)
@@ -115,8 +116,12 @@ class Autocallable:
             )
             called = called | (active & autocall_hit)
 
+        # Read the terminal spot at THIS note's own final observation index, never at the
+        # bundle's last column (HIGH-1, code review): `price_from_bundle` lets several products
+        # share one bundle, and a bundle simulated past `expiry` must not have its extra steps
+        # read as the maturity date.
         never_called = ~called
-        s_t = bundle.S[:, -1]
+        s_t = bundle.S[:, obs_idx[-1]]
         maturity = np.where(
             s_t >= self.protection_barrier,
             self.notional,
