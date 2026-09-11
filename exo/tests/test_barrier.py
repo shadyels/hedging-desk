@@ -6,6 +6,9 @@ level analogue and test_validation_gates_products for the blocking G5 gate).
 
 from __future__ import annotations
 
+from dataclasses import replace
+
+import numpy as np
 import pytest
 
 from exo.models.heston import simulate
@@ -130,3 +133,97 @@ def test_barrier_option_rejects_non_ascending_observations() -> None:
             monitoring=Monitoring.DISCRETE,
             observations=(0.5, 0.3),
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("strike", float("nan")),
+        ("barrier", float("nan")),
+        ("expiry", float("nan")),
+        ("strike", float("inf")),
+        ("barrier", float("inf")),
+    ],
+)
+def test_barrier_option_rejects_non_finite_scalar_fields(field: str, value: float) -> None:
+    """HIGH-3 (security review, fix round 1): before the fix, e.g. `barrier=nan` passed
+    __post_init__'s `<= 0.0` check (False for NaN) with no exception anywhere."""
+    kwargs: dict[str, object] = dict(
+        underlying="AAPL",
+        option_type="call",
+        strike=100.0,
+        expiry=1.0,
+        barrier=90.0,
+        direction="down",
+        knock="out",
+        monitoring=Monitoring.CONTINUOUS_BRIDGE,
+        observations=None,
+    )
+    kwargs[field] = value
+    with pytest.raises(ValueError):
+        BarrierOption(**kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("field", ["option_type", "direction", "knock"])
+def test_barrier_option_rejects_case_typo_in_categorical_fields(field: str) -> None:
+    """MEDIUM-6 (security review, fix round 1): before the fix, `option_type="Call"` (a case
+    typo) was silently accepted by __post_init__ and then priced as the OTHER branch (a put),
+    since every categorical field is consumed through a two-way `if x == ... else` branch."""
+    kwargs: dict[str, object] = dict(
+        underlying="AAPL",
+        option_type="call",
+        strike=100.0,
+        expiry=1.0,
+        barrier=90.0,
+        direction="down",
+        knock="out",
+        monitoring=Monitoring.CONTINUOUS_BRIDGE,
+        observations=None,
+    )
+    kwargs[field] = str(kwargs[field]).capitalize()
+    with pytest.raises(ValueError):
+        BarrierOption(**kwargs)  # type: ignore[arg-type]
+
+
+def test_price_from_bundle_rejects_bundle_horizon_mismatch() -> None:
+    """HIGH-1 (code review, fix round 1): `price_from_bundle` had no guard against a bundle
+    simulated to a different horizon than the payoff -- measured, pre-fix, at a 13.5 SE silent
+    mispricing on a 2-year bundle against a 1-year down-and-out call."""
+    engine = EngineConfig(scheme="qe", n_steps=20, n_paths=4, expiry=2.0, antithetic=False)
+    bundle = simulate(_AAPL, engine, PseudoRandomSource(seed=1, antithetic=False))
+    opt = _sheet(Monitoring.CONTINUOUS_BRIDGE, None, barrier=150.0)  # opt.expiry == 1.0
+
+    with pytest.raises(ValueError):
+        price_from_bundle(opt, bundle, r=_AAPL.r)
+
+
+def test_cashflows_ignores_bundle_steps_beyond_its_own_expiry() -> None:
+    """HIGH-1 (code review, fix round 1): before the fix, CONTINUOUS_BRIDGE monitored
+    `np.arange(bundle.t.shape[0])` (the WHOLE bundle horizon) and read the terminal spot at
+    `bundle.S[:, -1]` (the bundle's last column) -- both wrong when a bundle outlives the
+    option. This forges a second bundle identical up to the option's own expiry index but
+    with garbage afterward, and asserts the ledger is unchanged -- proving `cashflows()` never
+    reads past its own expiry, rather than merely agreeing statistically on average."""
+    engine = EngineConfig(scheme="qe", n_steps=20, n_paths=4, expiry=2.0, antithetic=False)
+    bundle = simulate(_AAPL, engine, PseudoRandomSource(seed=1, antithetic=False))
+    expiry_idx = 10  # t=1.0 on this 20-step, 2-year (dt=0.1) grid
+
+    opt = BarrierOption(
+        underlying="AAPL",
+        option_type="call",
+        strike=_AAPL.s0,
+        expiry=1.0,
+        barrier=1.0,  # unreachable: isolates the terminal-leg indexing, not survival
+        direction="down",
+        knock="out",
+        monitoring=Monitoring.CONTINUOUS_BRIDGE,
+        observations=None,
+    )
+    ledger = opt.cashflows(bundle)
+
+    forged_s = bundle.S.copy()
+    forged_s[:, expiry_idx + 1 :] = -999.0  # would corrupt bundle.S[:, -1] if read directly
+    forged_bundle = replace(bundle, S=forged_s)
+    forged_ledger = opt.cashflows(forged_bundle)
+
+    np.testing.assert_array_equal(ledger.amounts, forged_ledger.amounts)
