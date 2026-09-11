@@ -9,14 +9,13 @@
 | File | Line | Simplified | Ceiling | Upgrade |
 |------|------|-----------|---------|---------|
 | `delta-one/crates/d1-core/src/keeper.rs` | 117 | Weighted-average cost-basis (no lot tracking, no realized P&L) — **per-book cash half DELIVERED P1.M5 Slice 1** | cash is now tracked per book (`seed_cash` at startup, moved on every fill, `credit_dividend` on a dividend tick, `accrue_cash` per sample); lot tracking, realized P&L and the Σ-book-position invariants remain | partially closed — cost-basis simplification still stands |
-| `delta-one/crates/d1-core/src/order.rs` | 28 | FIX OrderCancelRequest not driven | Slice 1 only | FIX gateway P1.M2 Slice 2 |
-| `delta-one/crates/d1-core/src/order.rs` | 32 | FIX OrderCancelReplaceRequest not driven | Slice 1 only | FIX gateway P1.M2 Slice 2 |
-| `delta-one/crates/d1-core/src/order.rs` | 147 | Append-only slab, no freelist | single-session memory | freelist + eviction policy for long uptime (P1.M2 Slices 2-3) |
+| `delta-one/crates/d1-core/src/order.rs` | 28 | FIX OrderCancelRequest not driven | Slice 1 only | Re-targeted to P1.M4 |
+| `delta-one/crates/d1-core/src/order.rs` | 32 | FIX OrderCancelReplaceRequest not driven | Slice 1 only | Re-targeted to P1.M4 |
+| `delta-one/crates/d1-core/src/order.rs` | 147 | Append-only slab, no freelist | single-session memory | freelist + eviction policy for sustained long-running session use (production uptime, not milestone completion) |
 | `delta-one/crates/d1-core/src/order.rs` | 221 | Exec validation debug-only | compile-time checks | promote to error if live venue sends malformed execs |
 | `delta-one/crates/d1-core/src/cross.rs` | 41 | ⚠️ **no-trigger** — omits `transfer_id`/`reason` | intentional M4 omission | none named |
-| `delta-one/crates/d1-core/src/ids.rs` | 48 | FIX ExecID capped at 20 bytes | truncation on oversize | Slice 2: reject/hash oversize, never truncate |
 | `delta-one/crates/d1-gateway-nats/src/lib.rs` | 60 | ⚠️ **no-trigger** — NATS startup failure degrades | intentional DoD behavior | none named |
-| `delta-one/crates/d1-gateway-nats/src/lib.rs` | 173 | `seen_msg_ids` unbounded dedup cache | unbounded memory | eviction policy or JetStream dedupe for long uptime |
+| `delta-one/crates/d1-gateway-nats/src/lib.rs` | 173 | `seen_msg_ids` unbounded dedup cache | unbounded memory | eviction policy or JetStream dedupe for sustained long-running session use (production uptime, not milestone completion) |
 | `delta-one/crates/d1-gateway-nats/src/lib.rs` | 213 | Log-and-drop on full ring | demo-sized ring | backpressure protocol |
 | `delta-one/crates/d1/src/main.rs` | 120 | ⚠️ **no-trigger** — NATS errors logged, not fatal | intentional degradation | none named |
 | `delta-one/crates/d1-gateway-fix/src/convert.rs` | 34 | No `TransactTime` (60) field | missing required spec field | add time dependency + field if real venue requires validation |
@@ -56,12 +55,12 @@ Six sites use log-and-drop on a full ring/queue, all gated on implementing a "ba
 **Risk:** Silent data loss under load. Upgrade together when load testing shows the need.
 
 ### Unbounded Growth (3 markers)
-Three dedup/cache structures grow without bound, all gated on "long uptime":
+Three dedup/cache structures grow without bound, all gated on sustained long-running session use (production uptime):
 - `d1-core/src/order.rs:147` — `seen_execs` slab slots
 - `d1-gateway-nats/lib.rs:173` — `seen_msg_ids` dedupe map
 - `d1-gateway-fix/src/lib.rs:84` — exec event ring
 
-**Risk:** OOM on continuous operation beyond single session. Upgrade together during P1.M2 Slices 2-3 when real gateways drive long-running sessions.
+**Risk:** OOM on continuous operation beyond single session. Upgrade together when production uptime requirements demand it.
 
 ### Post-trade Kafka demo ceilings (P1.M4 Slice 2, 1 marker)
 The Kafka wiring ships with one demo-grade shortcut:

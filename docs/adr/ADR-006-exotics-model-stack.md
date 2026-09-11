@@ -94,12 +94,11 @@ license any other `models/` change in M2.
 - **The explicit non-goal stands:** market-quality calibration remains out of scope, exactly as the
   Consequences section above states. Adding two families does not soften it.
 
-## Amendment 4 (2026-09-05) — P2.M1 scoping, and the reserved home for the discretization decision
+## Amendment 4 (2026-09-05) — P2.M1 scoping, and the discretization scheme decision (resolved in §4 below)
 
 P2.M1 readiness was assessed on 2026-09-05 (see `docs/ROADMAP.md` P2.M1). The milestone is
 unblocked, but four questions its own text does not settle were answered by desk lead. Three are
-decided here; the fourth (§4) is **reserved and pending**, because it is an empirical question and
-the experiment has not been run.
+decided here; the fourth (§4) is **resolved in the subsection below**, with empirical evidence from the convergence study.
 
 ### 1. The illustrative model parameter set lives in `exo.toml`, not in `protocol/` refdata
 
