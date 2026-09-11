@@ -12,10 +12,15 @@ which carries a `rv_continuous` object-oriented dispatch layer this hot path doe
 
 from __future__ import annotations
 
+import math
 from typing import Literal
 
 import numpy as np
 from scipy.special import ndtr  # type: ignore[import-untyped]  # scipy ships no py.typed marker
+
+_OPTION_TYPES = ("call", "put")
+_DIRECTIONS = ("down", "up")
+_KNOCKS = ("out", "in")
 
 
 def _norm_cdf(x: float) -> float:
@@ -100,15 +105,51 @@ def bs_barrier_price(
 
     Validate this function by IDENTITY, never by copied magic numbers (see
     `exo/tests/test_analytic_barrier.py`): `DO+DI==vanilla` (and up-), `H->0` gives the
-    vanilla, `H->S0` drives the knock-out to ~0. The real correctness check on the A/B/C/D
-    algebra itself is `test_validation_gates_products.py`'s G4 gate (vs the Heston MC engine
-    degenerated to BS) -- the in-out identity alone cannot catch a sign error in the knock-IN
-    formula, since `out := vanilla - in` satisfies that identity trivially for ANY `in`.
+    vanilla, `H->S0` drives the knock-out to ~0, plus seam-continuity and single-branch-pinning
+    tests added in fix round 1 (MEDIUM-1, code review) that between them exercise all eight
+    (direction, option_type, strike-vs-barrier) branches of the A/B/C/D table below -- the
+    in-out identity ALONE only exercises the branch each specific test's parameters land on
+    (four of eight, before fix round 1) and cannot by itself catch a sign error in the knock-IN
+    formula, since `out := vanilla - in` satisfies that identity trivially for ANY `in`. G4
+    (`test_validation_gates_products.py`, vs the Heston MC engine degenerated to BS) is the
+    real correctness check for the ONE cell it exercises (down-call, strike > barrier); it does
+    not, by itself, validate the other seven.
+
+    RAISES `ValueError` if `barrier` is already breached at inception (`s0 <= barrier` for
+    `direction="down"`, `s0 >= barrier` for `"up"`) -- the Reiner-Rubinstein table assumes spot
+    starts on the LIVE side of the barrier, and evaluating it on the wrong side returns a
+    negative option price (HIGH-2, code review, fix round 1: measured `S0=100, K=100, H=105,
+    down-and-out call = -6.28`, not the true 0). Note this function and the MC side
+    (`products/base.barrier_survival`) therefore agree ONLY on the live side of the barrier:
+    the MC side handles an inception breach correctly (survival is exactly 0 from `t=0`), so
+    this closed form errs on the side of refusing to answer rather than silently returning a
+    number that would diverge from its own gate reference.
     """
+    if option_type not in _OPTION_TYPES:
+        raise ValueError(f"option_type must be one of {_OPTION_TYPES}, got {option_type!r}")
+    if direction not in _DIRECTIONS:
+        raise ValueError(f"direction must be one of {_DIRECTIONS}, got {direction!r}")
+    if knock not in _KNOCKS:
+        raise ValueError(f"knock must be one of {_KNOCKS}, got {knock!r}")
+
+    # NaN/Inf bypass every `<=`/`>=` guard below under IEEE-754 (HIGH-3, security review) --
+    # checked explicitly alongside the range checks, not left to fall out of them.
+    if not all(math.isfinite(x) for x in (s0, strike, barrier, expiry, sigma, r, q)):
+        raise ValueError(
+            f"s0, strike, barrier, expiry, sigma, r and q must all be finite, got "
+            f"s0={s0}, strike={strike}, barrier={barrier}, expiry={expiry}, sigma={sigma}, "
+            f"r={r}, q={q}"
+        )
     if s0 <= 0.0 or strike <= 0.0 or barrier <= 0.0 or expiry <= 0.0 or sigma <= 0.0:
         raise ValueError(
             f"s0, strike, barrier, expiry and sigma must all be positive, got "
             f"s0={s0}, strike={strike}, barrier={barrier}, expiry={expiry}, sigma={sigma}"
+        )
+    if (direction == "down" and s0 <= barrier) or (direction == "up" and s0 >= barrier):
+        raise ValueError(
+            f"barrier {barrier} is already breached at inception (s0={s0}, "
+            f"direction={direction!r}) -- the Reiner-Rubinstein formulas assume s0 is on the "
+            "live side of the barrier; see this function's own docstring."
         )
 
     b = r - q
