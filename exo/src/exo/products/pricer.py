@@ -1,0 +1,67 @@
+"""Discounting and MC pricing for anything implementing `Payoff` (products/base.py).
+
+`price_from_bundle` exists so several products can share one simulated `PathBundle` -- the
+same trick `studies/scheme_convergence.py` already uses for multi-strike pricing under one
+bundle -- which is what P2.M4's portfolio revaluation will need, and what this slice's own G4
+companion test uses to compare CONTINUOUS_BRIDGE vs DISCRETE monitoring on perfectly-correlated
+paths.
+
+# ponytail (P2-4, P2.M1 slice 2): discounting is FLAT at `params.r` (or the caller-supplied `r`
+# in `price_from_bundle`) -- a single scalar rate applied to every cashflow date, no curve.
+# Ceiling: no term structure, so any product whose cashflow dates span enough of the curve to
+# matter is priced at a slightly wrong forward rate at each leg. Trigger: P4.M1's rates
+# foundation, which is the first milestone that has a curve to discount against.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+from numpy.typing import NDArray
+
+from exo.models.estimator import PriceResult, mc_estimate
+from exo.models.heston import PathBundle, simulate
+from exo.models.params import EngineConfig, HestonParams
+from exo.models.rng import RandomSource
+from exo.products.base import CashflowLedger, Payoff
+
+
+def discount(ledger: CashflowLedger, *, r: float) -> NDArray[np.float64]:
+    """Discount every leg of `ledger` at flat rate `r`, summed per path -> `(n_paths,)`."""
+    result: NDArray[np.float64] = ledger.amounts @ np.exp(-r * ledger.t)
+    return result
+
+
+def price_from_bundle(payoff: Payoff, bundle: PathBundle, *, r: float) -> PriceResult:
+    """Price `payoff` against an already-simulated `bundle`, discounting at flat rate `r`.
+
+    Row order is preserved end to end: `payoff.cashflows` returns a ledger indexed by
+    `bundle`'s own path order, `discount` reduces it to one `(n_paths,)` array without
+    reordering, and that array is handed to `mc_estimate(bundle, ...)` unchanged -- the
+    antithetic pair-mean standard error is positional and would silently mispair otherwise.
+    """
+    ledger = payoff.cashflows(bundle)
+    discounted = discount(ledger, r=r)
+    return mc_estimate(bundle, discounted)
+
+
+def price(
+    payoff: Payoff, params: HestonParams, engine: EngineConfig, rng: RandomSource
+) -> PriceResult:
+    """Simulate a fresh `PathBundle` under `params`/`engine`/`rng` and price `payoff` against
+    it, discounting at `params.r`.
+
+    Requires `engine.expiry == payoff.expiry` EXACTLY (not within a tolerance): both are
+    user-specified literals at the construction site, not values derived from a shared
+    computation that could pick up floating-point drift, so any mismatch is a genuine
+    configuration error -- pricing a 1-year engine against a payoff that pays at a different
+    date would silently price the wrong contract. Exact equality makes that error loud rather
+    than occasionally, confusingly tolerant.
+    """
+    if engine.expiry != payoff.expiry:
+        raise ValueError(
+            f"EngineConfig.expiry={engine.expiry} does not match payoff.expiry="
+            f"{payoff.expiry} -- these must match exactly, or the payoff would be priced "
+            "against the wrong contract horizon."
+        )
+    bundle = simulate(params, engine, rng)
+    return price_from_bundle(payoff, bundle, r=params.r)
