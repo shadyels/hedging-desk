@@ -17,6 +17,7 @@ from exo.products.base import (
     ScheduleAlignmentError,
     barrier_survival,
     observation_indices,
+    validate_observation_schedule,
 )
 from exo.products.pricer import discount, price, price_from_bundle
 
@@ -32,4 +33,5 @@ __all__ = [
     "observation_indices",
     "price",
     "price_from_bundle",
+    "validate_observation_schedule",
 ]
