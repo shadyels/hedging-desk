@@ -19,6 +19,11 @@ import numpy as np
 from scipy.special import ndtr  # type: ignore[import-untyped]  # scipy ships no py.typed marker
 
 _OPTION_TYPES = ("call", "put")
+# Deliberately DUPLICATED from products/base.py's own `_DIRECTIONS`, not imported from it (R2-4,
+# fix round 2, code review): models/ must never import from products/ -- that would invert the
+# dependency direction exo/CLAUDE.md's M2 rule exists to protect (payoffs may depend on models,
+# models must never depend on payoffs). A future tidy-up should NOT "fix" this into a shared
+# import.
 _DIRECTIONS = ("down", "up")
 _KNOCKS = ("out", "in")
 
