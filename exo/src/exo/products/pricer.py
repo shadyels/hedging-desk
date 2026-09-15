@@ -51,6 +51,21 @@ def price_from_bundle(payoff: Payoff, bundle: PathBundle, *, r: float) -> PriceR
     exists so the *pricer-mediated* path fails loud instead of silently pricing the wrong
     contract -- measured, before the fix, at a 13.5 SE silent mispricing on a 2-year bundle
     against a 1-year down-and-out call.
+
+    # ponytail (P2-8, architect review, fix round 3): the exact `bundle.t[-1] != payoff.expiry`
+    # guard above means this function CANNOT price a shorter-dated payoff against a shared
+    # longer bundle -- which is the single use case this docstring's own opening paragraph
+    # advertises for P2.M4's portfolio revaluation. The HIGH-1 fix round (fix round 1) made that
+    # case SAFE -- `barrier.py`/`autocallable.py` independently bound their own monitoring/
+    # terminal-leg indices to the payoff's own expiry, not the bundle's last column -- but this
+    # guard keeps it UNREACHABLE through the public pricer regardless: every current
+    # shorter-dated caller (this slice's own G4 companion test included) must bypass
+    # `price_from_bundle` entirely and call `discount(payoff.cashflows(bundle), r=...)` directly
+    # to get the safe behaviour. Ceiling: shared-bundle pricing through this function is
+    # restricted to one common expiry across every payoff sharing the bundle. Trigger: P2.M4,
+    # whose portfolio revaluation is the actual consumer of the shared-bundle case -- relaxing
+    # this guard (e.g. to `bundle.t[-1] >= payoff.expiry`) is a deliberate P2.M4 decision to make
+    # then, against real portfolio-loop requirements, not an oversight to silently fix here.
     """
     if bundle.t[-1] != payoff.expiry:
         raise ValueError(

@@ -129,6 +129,26 @@ def bs_barrier_price(
     the MC side handles an inception breach correctly (survival is exactly 0 from `t=0`), so
     this closed form errs on the side of refusing to answer rather than silently returning a
     number that would diverge from its own gate reference.
+
+    EVIDENCE COVERAGE ACROSS THE EIGHT (direction, option_type, strike-vs-barrier) CELLS is
+    uneven, and worth knowing before trusting a mismatch on any given cell (architect review,
+    fix round 3, reservation (d)). Independent evidence, strongest to weakest: down-call,
+    `K>H` (branch `C`) is checked against a REAL Heston Monte Carlo engine degenerated to
+    Black-Scholes (`test_validation_gates_products.py`'s G4 gate) -- an independent numerical
+    method, not this module's own algebra. Up-call `K>H` and down-put `K<H` (both branch `A`)
+    are pinned EXACTLY against `bs_call_price`/`bs_put_price` respectively (fix round 1,
+    MEDIUM-1) -- an independent closed form, not a limit of this same one. The remaining four
+    cells rest only on this module's OWN degenerate limits (`H->0`, `H->S0`) and seam-continuity
+    checks at the branch boundary, both of which are self-referential (they check this
+    function's internal consistency, not agreement with anything computed independently). THE
+    WEAK PAIR IS UP-BARRIER PUTS: `K<H` (branch `C`) is evidenced only by `H->S0+` and
+    `H->infinity` limits plus a self-referential seam, and `K>H` (branch `A-B+D`) inherits
+    only from that same seam. A sign error would break both limits outright, so the residual
+    risk here is a subtler coefficient error the limits are too coarse to catch -- low
+    probability, and self-limiting (any real gate that prices an up-barrier put compares
+    against independent MC, same as G4 does for down-call), but worth naming: the first P2.M2
+    gate that prices an up-barrier put should treat a disagreement as a suspected bug in THIS
+    reference first, not in its own MC.
     """
     if option_type not in _OPTION_TYPES:
         raise ValueError(f"option_type must be one of {_OPTION_TYPES}, got {option_type!r}")

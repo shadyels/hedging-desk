@@ -14,7 +14,21 @@ Critically, keeping `r` OUT of the payoff means a payoff's shape does not change
 (fix round 1, code review): this does not survive P2.M2's LSM American exercise unchanged --
 Longstaff-Schwartz must discount *inside* the backward induction to compare continuation value
 against intrinsic value at each exercise date, so "r stays out of the payoff" is a property of
-this ledger shape, not an absolute invariant every future payoff must honour.
+this ledger shape, not an absolute invariant every future payoff must honour. SECOND CAVEAT
+(fix round 3, architect review, reservation (e)): it also does not survive P2.M2's mini future,
+for a different reason than LSM's. ADR-006 Amendment 3 defines a mini future as a
+continuously-monitored knock-out PLUS a daily financing accrual, and financing accrual is
+rate-driven -- the payoff will need a rate (risk-free plus issuer spread) as an input, and under
+a P2.M4 rho bump that leg SHOULD move. That is genuine rho, not the artifact this rationale
+warns against (a payoff that discounts INTERNALLY and so needs its own bump-awareness just to
+stay consistent with an external rate it never sees again). The M2 implementer has two available
+shapes for this: a rate field on the mini-future term sheet (which P2.M4's bump loop must then
+know to bump, same as any other term-sheet field), or an `r` argument threaded through
+`cashflows` (which touches every payoff's signature, not just the mini future's). BOTH shapes
+are `products/`-local changes -- neither requires touching `models/` -- so neither violates
+`exo/CLAUDE.md`'s M2 rule, despite reading, out of context, like exactly the kind of change that
+rule exists to catch. Spelling this out here so an M2 reader who hits the financing leg does not
+conclude this abstraction is broken and re-cut it unnecessarily.
 
 The `Payoff` Protocol takes a single `PathBundle`. `exo/CLAUDE.md`'s M2 abstraction rule: if a new
 payoff requires touching `models/`, the abstraction is wrong. Every payoff-specific mechanism
@@ -290,9 +304,20 @@ def barrier_survival(
     # Derived ceiling at a 20k-path, 252-step barrier price call: ~413 MB (decimal MB, from the
     # MEASURED ratio, not the rounded-up declared one); several GB at `heston.py`'s 200k x 252
     # memory ceiling if a portfolio revaluation calls this once per barrier position without
-    # releasing the bundle in between. Trigger: P2.M4's portfolio revaluation loop -- whether
-    # this needs restructuring into a step-wise accumulation (trading vectorization for memory)
-    # is the architect's call, to be made against this measured number, not against an estimate.
+    # releasing the bundle in between. Trigger (widened, fix round 3, architect review,
+    # reservation (b)): P2.M4's portfolio revaluation loop is NOT the first consumer at risk --
+    # P2.M2's mini future is. A mini future is an open-ended, continuously-monitored knock-out
+    # with DAILY financing accrual (ADR-006 Amendment 3), the first product that pushes
+    # `n_steps` into the high hundreds on a long horizon. At n_paths=20_000, n_steps=504 (roughly
+    # two years of daily steps), the SAME measured ~10.2 ratio above gives ~824 MB (decimal MB;
+    # 20_000 x 505 x 8 bytes x ~10.2) for a single `barrier_survival` call -- before P2-6's third
+    # matrix (see `CashflowLedger`'s own marker) lands on the same product and compounds with
+    # this one rather than being independent. Fires at whichever comes first: P2.M2's mini
+    # future on a daily grid, or P2.M4's portfolio revaluation. Concrete threshold, not a
+    # judgment call: `n_paths * n_steps > 1.2e7` is roughly where a single call's peak crosses
+    # ~1 GB at the measured ratio -- whether this needs restructuring into a step-wise
+    # accumulation (trading vectorization for memory) is the architect's call, to be made
+    # against this measured number, not against an estimate.
     """
     if direction not in _DIRECTIONS:
         raise ValueError(f"direction must be one of {_DIRECTIONS}, got {direction!r}")
