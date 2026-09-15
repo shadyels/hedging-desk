@@ -7,7 +7,7 @@ Exotics pricing and rehedging service. Computes theoretical values and Greeks fo
 | Package | Role |
 |---------|------|
 | `models/`   | dynamics + numerics: GBM, Heston, Heston-local-vol (LSV, P4), MC engine, QMC (Sobol + Brownian bridge), variance reduction, Longstaff–Schwartz early-exercise engine (American warrants, P2.M2), (PDE solver in a later milestone) |
-| `products/` | payoff definitions: autocallable, barrier option, reverse convertible, barrier reverse convertible, bonus certificate, warrant (call/put, European and American), mini future (long/short), TARF, PTARF |
+| `products/` | **Abstraction:** payoffs are frozen dataclass term sheets implementing the `Payoff` Protocol, returning an undiscounted dated `CashflowLedger`; discounting lives in `products/pricer.py`, never inside a payoff; barrier monitoring modes (`CONTINUOUS_BRIDGE` / `DISCRETE`) live in `products/base.py`. **Built:** barrier option, Phoenix autocallable (P2.M1). **Planned:** reverse convertible, barrier reverse convertible, bonus certificate (P2.M2); warrant (call/put, European and American, P2.M2); mini future (long/short, P2.M2); TARF, PTARF (P2.M3). |
 | `greeks/`   | bump-and-revalue with common random numbers; pathwise where implemented |
 | `bus/`      | NATS client (official `nats-py`), Protobuf encode/decode, target publisher, fill/risk consumer |
 | `hedger/`   | Tier-2 optimizer (ADR-009): vega/liquidity QP over the option chain → `HedgeProposal`; rates mapping (rho per ccy bucket → futures qty) → `InternalTransferRequest` + RATES-IR targets |
