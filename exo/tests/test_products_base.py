@@ -15,6 +15,7 @@ from exo.models.estimator import mc_estimate
 from exo.models.heston import PathBundle, simulate
 from exo.models.params import EngineConfig, HestonParams
 from exo.models.rng import PseudoRandomSource
+from exo.products import base
 from exo.products.base import (
     CashflowLedger,
     Monitoring,
@@ -186,6 +187,17 @@ def test_barrier_survival_rejects_invalid_direction() -> None:
         barrier_survival(bundle, 90.0, "Down", Monitoring.CONTINUOUS_BRIDGE, obs_idx)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("monitoring", [Monitoring.CONTINUOUS_BRIDGE, Monitoring.DISCRETE])
+def test_barrier_survival_rejects_non_finite_level(monitoring: Monitoring) -> None:
+    """R2-2 (security review, fix round 2): before this fix, a NaN `level` under DISCRETE made
+    `obs_s <= level` False everywhere, so survival came back a silent 1.0 (never-breached) with
+    NO signal at all -- a wrong answer, not just a propagated NaN."""
+    bundle = _bundle(n_steps=10, n_paths=50, expiry=1.0)
+    obs_idx = np.arange(bundle.t.shape[0])
+    with pytest.raises(ValueError):
+        barrier_survival(bundle, float("nan"), "down", monitoring, obs_idx)
+
+
 def test_cashflow_ledger_rejects_mismatched_shapes() -> None:
     """LOW-5 (code review, fix round 1): `amounts` must be `(n_paths, n_obs)` with
     `amounts.shape[1] == t.shape[0]` -- a payoff returning `(n_obs, n_paths)` must fail loud
@@ -228,14 +240,17 @@ def test_bridge_peak_memory_covers_measured_tracemalloc_ratio() -> None:
     it at ~2.02 GB, always understating. This measures the REAL `barrier_survival` call
     instead, at two sizes, and asserts the ratio matches what was actually observed --
     ~10.2 at both n_paths=20_000/n_steps=100 and n_paths=40_000/n_steps=200 when this test was
-    written (see `base.py`'s own `P2-7` ponytail marker for the number this backs)."""
+    written (see `base.py`'s own `P2-7` ponytail marker for the number this backs).
+
+    R2-1 (fix round 2): asserts against `base._BRIDGE_PEAK_ARRAY_RATIO`, the SAME module-level
+    constant the `P2-7` marker's declared ceiling names -- not a test-local literal -- mirroring
+    how `test_bytes_per_path_step_covers_measured_peak_with_tracemalloc` reads
+    `scheme_convergence._BYTES_PER_PATH_STEP`, so the declared number and this guard cannot
+    drift apart the way a comment-only figure could.
+    """
     params = HestonParams(
         s0=100.0, r=0.02, q=0.01, v0=0.04, kappa=1.5, theta=0.04, xi=0.6, rho=-0.7
     )
-    # Declared ceiling for P2-7's marker (11 arrays' worth); measured ratio at both sizes
-    # tested here clusters at ~10.2, so 11 leaves headroom without being loose enough to hide
-    # a real regression (e.g. back to the reviewer's un-measured estimate of ~8).
-    declared_ratio = 11.0
     tolerance = 0.5
 
     for n_paths, n_steps in [(20_000, 100), (40_000, 200)]:
@@ -254,11 +269,11 @@ def test_bridge_peak_memory_covers_measured_tracemalloc_ratio() -> None:
             tracemalloc.stop()
 
         measured_ratio = peak / bytes_per_array
-        assert declared_ratio >= measured_ratio - tolerance, (
+        assert measured_ratio - tolerance <= base._BRIDGE_PEAK_ARRAY_RATIO, (
             f"n_paths={n_paths} n_steps={n_steps}: measured peak/array ratio "
-            f"{measured_ratio:.3f} exceeds the declared ceiling ({declared_ratio}) by more "
-            f"than the noise tolerance ({tolerance}) -- P2-7's marker no longer covers what "
-            "actually runs"
+            f"{measured_ratio:.3f} exceeds the declared ceiling "
+            f"({base._BRIDGE_PEAK_ARRAY_RATIO}) by more than the noise tolerance "
+            f"({tolerance}) -- P2-7's marker no longer covers what actually runs"
         )
         assert measured_ratio > 5.0, (
             f"n_paths={n_paths} n_steps={n_steps}: measured ratio {measured_ratio:.3f} is "

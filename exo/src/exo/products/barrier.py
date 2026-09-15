@@ -22,6 +22,7 @@ import numpy as np
 
 from exo.models.heston import PathBundle
 from exo.products.base import (
+    _DIRECTIONS,  # R2-4, fix round 2: the one products/ copy of the direction vocabulary
     CashflowLedger,
     Monitoring,
     barrier_survival,
@@ -30,7 +31,6 @@ from exo.products.base import (
 )
 
 _OPTION_TYPES = ("call", "put")
-_DIRECTIONS = ("down", "up")
 _KNOCKS = ("out", "in")
 
 
@@ -39,8 +39,11 @@ class BarrierOption:
     """A single-barrier European option term sheet.
 
     `observations` is required iff `monitoring == Monitoring.DISCRETE` (the declared fixing
-    schedule) and must be `None` for `Monitoring.CONTINUOUS_BRIDGE` (which monitors the full
-    simulation grid instead -- see `base.barrier_survival`).
+    schedule) and must be `None` for `Monitoring.CONTINUOUS_BRIDGE` (which monitors every grid
+    step from inception up to this option's OWN expiry, not the bundle's full horizon -- see
+    `cashflows()` below and `base.barrier_survival`; R2-3, fix round 2, corrected this from an
+    earlier, HIGH-1-fix-round-1-era description that this class still monitors "the full
+    simulation grid").
 
     This term sheet has no `s0` field (spot lives in the pricing-time `HestonParams`, not
     here), so it cannot itself check whether `barrier` is already breached relative to the

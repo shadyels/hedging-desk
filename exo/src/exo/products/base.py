@@ -25,6 +25,7 @@ THIS module (a function of a `PathBundle` that a product's `cashflows()` calls),
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal, Protocol
@@ -48,6 +49,16 @@ class Monitoring(StrEnum):
 
     CONTINUOUS_BRIDGE = "continuous_bridge"
     DISCRETE = "discrete"
+
+
+# Shared barrier-direction vocabulary (R2-4, fix round 2, code review): the ONE copy for
+# `products/` -- `barrier.py` imports this rather than re-declaring it, since `base.py` and
+# `barrier.py` are one package and there is no reason for two copies to be able to drift.
+# `analytic.py`'s OWN copy is deliberately NOT unified with this one: `models/` importing from
+# `products/` would invert the dependency direction `exo/CLAUDE.md`'s M2 rule exists to protect
+# (payoffs may depend on models, models must never depend on payoffs) -- see `analytic.py`'s own
+# comment at its copy.
+_DIRECTIONS = ("down", "up")
 
 
 class ScheduleAlignmentError(ValueError):
@@ -213,6 +224,14 @@ def validate_observation_schedule(
             )
 
 
+# Declared ceiling for `barrier_survival`'s CONTINUOUS_BRIDGE peak memory (P2-7 ponytail below),
+# tracemalloc-MEASURED at ~10.2 (fix round 1, security review MEDIUM-7). Lives here as the ONE
+# place the number is written -- `test_products_base.py`'s covering test imports and asserts
+# against THIS constant, not a test-local literal, so the declared ceiling and the guard cannot
+# drift apart the way a comment-only figure could (fix round 2, R2-1).
+_BRIDGE_PEAK_ARRAY_RATIO = 11.0
+
+
 def barrier_survival(
     bundle: PathBundle,
     level: float,
@@ -259,21 +278,32 @@ def barrier_survival(
     # gate (G4) validates against, but an approximation once vol is genuinely stochastic within
     # a step. Ceiling: accuracy is unverified outside the degenerate limit. Trigger: P4.M4's PDE
     # cross-check, which can quantify the approximation's bias under real Heston parameters.
-    # ponytail (P2-7, P2.M1 slice 2 fix round 1, security review MEDIUM-7): the CONTINUOUS_BRIDGE
-    # branch below holds roughly 11 full `(n_paths, n_steps+1)`-sized float64 arrays live at
-    # once (`obs_s`, `s_a`, `s_b`, `v_a`, `dt`'s broadcast, `x_a`, `x_b`, `denom`, `safe_denom`,
-    # `p_cross`, plus one more from `1.0 - p_cross`/`np.prod`'s own working memory) --
-    # `tracemalloc`-MEASURED against this real function (not hand-counted -- see this repo's own
-    # heston.py memory ponytail, wrong twice before a measurement settled it): peak/array ratio
-    # ~10.2 at both 20k x 100 and 40k x 200 paths x steps. Ceiling: ~424 MB at a 20k-path,
-    # 252-step barrier price call; several GB at `heston.py`'s 200k x 252 memory ceiling if a
-    # portfolio revaluation calls this once per barrier position without releasing the bundle in
-    # between. Trigger: P2.M4's portfolio revaluation loop -- whether this needs restructuring
-    # into a step-wise accumulation (trading vectorization for memory) is the architect's call,
-    # to be made against this measured number, not against an estimate.
+    # ponytail (P2-7, P2.M1 slice 2 fix round 1, security review MEDIUM-7): CONTINUOUS_BRIDGE's
+    # peak memory, `tracemalloc`-MEASURED against this real function (not hand-counted -- see
+    # this repo's own heston.py memory ponytail, wrong twice before a measurement settled it, and
+    # fix round 2 R2-1, which deleted an array-by-array hand-enumeration from this exact marker
+    # for the same reason: it was already wrong, counting `dt`'s `(1, n_steps)` broadcast as
+    # full-size). Peak/array ratio ~10.2 at both n_paths=20_000/n_steps=100 and n_paths=40_000/
+    # n_steps=200 ("one array" = one `(n_paths, n_steps+1)` float64 array's worth of bytes).
+    # Declared ceiling: `_BRIDGE_PEAK_ARRAY_RATIO` below (the SAME constant the covering test
+    # imports and asserts against, so the declared number and the guard cannot drift apart).
+    # Derived ceiling at a 20k-path, 252-step barrier price call: ~413 MB (decimal MB, from the
+    # MEASURED ratio, not the rounded-up declared one); several GB at `heston.py`'s 200k x 252
+    # memory ceiling if a portfolio revaluation calls this once per barrier position without
+    # releasing the bundle in between. Trigger: P2.M4's portfolio revaluation loop -- whether
+    # this needs restructuring into a step-wise accumulation (trading vectorization for memory)
+    # is the architect's call, to be made against this measured number, not against an estimate.
     """
-    if direction not in ("down", "up"):
-        raise ValueError(f"direction must be 'down' or 'up', got {direction!r}")
+    if direction not in _DIRECTIONS:
+        raise ValueError(f"direction must be one of {_DIRECTIONS}, got {direction!r}")
+    if not math.isfinite(level):
+        # R2-2 (fix round 2, security review): HIGH-3's site list (fix round 1) missed this
+        # parameter. Under DISCRETE, `obs_s <= level`/`obs_s >= level` is False everywhere for a
+        # NaN level, so survival came back a silent 1.0 (never-breached) with NO signal at all --
+        # strictly worse than CONTINUOUS_BRIDGE, where a NaN level at least propagates NaN
+        # (loud). Unreachable from BarrierOption today (its own `barrier` field is validated),
+        # but this function is publicly re-exported -- the same exposure LOW-2 already used.
+        raise ValueError(f"level must be finite, got {level}")
     if monitoring == Monitoring.CONTINUOUS_BRIDGE and not np.array_equal(
         obs_idx, np.arange(obs_idx.shape[0])
     ):
