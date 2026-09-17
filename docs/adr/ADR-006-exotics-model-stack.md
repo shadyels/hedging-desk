@@ -190,3 +190,139 @@ Euler's convergence point is sampling-sensitive — n_steps=252 under an earlier
 - **No change to the instrument universe, the wire format, or any other component.** This amendment
   moves nothing onto the bus and adds no `protocol/` field; it records where EXO-private inputs live
   and what M1 does not build.
+
+## Amendment 5 (2026-09-15) — P2.M1 Slice 2: payoff abstraction + barrier + autocallable
+
+P2.M1 Slice 2 ships the payoff abstraction, barrier option and autocallable term sheets,
+and the Reiner–Rubinstein reference pricer. This amendment records three key design decisions
+made in this slice and ratifies the undiscounted, dated cashflow ledger as the canonical
+representation for all path-dependent structured products.
+
+### 1. The payoff abstraction is an undiscounted, dated cashflow ledger
+
+The `CashflowLedger` dataclass carries two fields: `t`, an ascending array of payment times
+in years, shape `(n_obs,)`; and `amounts`, a 2D array shape `(n_paths, n_obs)` of undiscounted
+cashflows in product currency. Row order matches the `PathBundle` path order exactly — it
+is positional, so methods like the antithetic-pair standard-error estimator can rely on it.
+
+**Reasoning.** Early redemption (autocallable), coupon strips, P2.M3's TARF accumulation,
+and P2.M2's mini-future stop-out settlement all become "a cashflow on a different date"
+rather than four bespoke mechanisms. Discounting is centralized in `pricer.discount` and
+tested once. Keeping `r` out of the payoff means a payoff's shape does not change when P2.M4
+bumps `r` for rho — a payoff that discounted internally would change shape under a rate bump,
+requiring its own bump-awareness to stay consistent.
+
+**Known ceiling: path-independent payment dates (marker `P2-6` in `products/base.py`).** The
+`t` array is shared across all paths, so no payoff on this ledger can emit a cashflow whose
+*date* varies by path. Two products hit this ceiling — P2.M2's mini future (each path stops
+out on its own date) and P2.M2's LSM American exercise (each path exercises on its own date) —
+but it is an escape hatch, not a broken abstraction. The fix survives without re-cutting: widen
+`amounts` to `(n_paths, n_steps+1)` against the full simulation grid and emit one non-zero
+column per path. This changes how one payoff *populates* the ledger, not the ledger itself,
+`CashflowLedger.t`, its shape checks, `discount()`, `price_from_bundle` or the estimator.
+
+**Two sharpenings of the ceiling.** The architect added clarity on what `P2-6` actually blocks:
+
+- **The mini future may never need what `P2-6` names.** Rao-Blackwellization (replacing a
+  0/1 survival indicator with its conditional expectation) gives the bridge survival
+  *probability* at each step, not a crossing time. This enables an expected-residual-value
+  formulation weighted by incremental knock-out probability at each step — wide grid,
+  path-independent dates, no escape hatch needed.
+- **For LSM the gap is a protocol-surface problem, not a dating problem.** Longstaff–Schwartz
+  cannot be expressed as a forward `cashflows(bundle) -> ledger` at all — it needs an
+  intrinsic-value accessor at every exercise date and discounting *inside* the backward
+  induction. ADR-006 Amendment 3 already pre-sanctions this: exercise style is a numerics
+  property, engine in `models/`, so the escape is not a widened `amounts` but a new method
+  on the payoff-side surface. This prevents a future reader from concluding the ceiling is
+  absolute and re-cutting the abstraction unnecessarily.
+
+**Caveat (architect review, P2.M2 mini future).** It also does not survive P2.M2's mini future,
+for a different reason. ADR-006 Amendment 3 defines a mini future as a continuously-monitored
+knock-out *plus a daily financing accrual*, and financing accrual is rate-driven — the payoff will
+need a rate (risk-free plus issuer spread) as an input, and under a P2.M4 rho bump that leg
+**should** move. That is genuine rho, not the artifact this rationale warns against (a payoff that
+discounts internally and so needs its own bump-awareness just to stay consistent with an external
+rate it never sees again). The M2 implementer has two shapes available: a rate field on the mini-future
+term sheet (which P2.M4's bump loop must then know to bump), or an `r` argument threaded through
+`cashflows` (which touches every payoff's signature). Both are `products/`-local changes — neither
+requires touching `models/` — so neither violates the M2 rule. Spelling this out so an M2 reader
+who hits the financing leg does not conclude the abstraction is broken and re-cut it unnecessarily.
+
+### 2. Barrier monitoring is declared by the term sheet: `CONTINUOUS_BRIDGE` or `DISCRETE`
+
+Two monitoring modes are built in this slice: `Monitoring.CONTINUOUS_BRIDGE` uses a
+Brownian-bridge per-step survival probability; `Monitoring.DISCRETE` checks a declared
+observation schedule with a hard indicator. Each is exercised by a real product built in
+the same pass — barrier option and P2.M3's TARF will use them.
+
+**Why the bridge was necessary to meet the gate.** The roadmap's validation gate is "barrier
+vs the BS closed form with the model degenerated, within 3 standard errors". The Reiner–Rubinstein
+closed form prices **continuous** monitoring; an MC that tests the barrier once per step prices
+**discrete** monitoring. At representative parameters (`S0=100, H=90, sigma=0.2, T=1, m=252`),
+pricing the same term sheet under plain `DISCRETE` against the continuous-monitoring closed
+form misses by **4.01 standard errors** — the gate, written literally, fails on correct code.
+
+The resolution is on the MC side, not the reference side: apply the Brownian-bridge
+per-step survival probability (Glasserman, *Monte Carlo Methods in Financial
+Engineering*, §6.4), giving `p_cross_i = exp(-2 * ln(S_i/H) * ln(S_{i+1}/H) / (v_i * dt))` with
+`w_survive = prod_i (1 - p_cross_i)` and exactly 0 on any path whose endpoint already breached.
+
+**Three reasons this beats correcting the reference.** First, the gate becomes bias-free. Under
+BS-degenerate parameters variance is constant, so the bridge is exact and `|mc - ref| < 3*SE`
+holds at *any* path count. Under a BGK continuity correction the residual is `o(1/sqrt(m))` and
+unbounded relative to shrinking SE, so the path count would have to be silently capped. Evidence
+from code review: 12 seeds at 20k paths give bias/SE = **+0.99** (indistinguishable from zero),
+and the z-score does not grow with path count — 20k → −1.54, 80k → −1.01, 320k → +0.26.
+
+Second, it reduces variance for free — replacing a 0/1 survival indicator with its conditional
+expectation given the discrete skeleton is a Rao-Blackwellization. Third, it makes the payoff
+smooth in `S`, which matters for P2.M4's bump-and-revalue delta: a hard indicator barrier is
+severely noisy under bumping.
+
+Both modes exist because each has a named future consumer: `CONTINUOUS_BRIDGE` is what P2.M2's
+mini future needs for continuous knock-out, `DISCRETE` is what P2.M3's TARF needs for monthly
+fixings. Building both now, each exercised by a real product, is the minimal spanning set.
+
+**Two approximations in the bridge.** Survival is a *probability* carrying no crossing time
+(marker `P2-1` in `products/base.py`), so no rebate can be dated. And step vol is taken at the
+*left point* `sqrt(v_i)`, exact under BS-degeneracy but an approximation under stochastic vol
+(marker `P2-2`), triggering P4.M4's PDE cross-check.
+
+### 3. The autocallable is gated by degenerate identities, not digital-strip replication
+
+Two gates exercise the autocallable's correctness directly against exact closed forms:
+
+**G3a — coupon barrier triggers early redemption.** If trigger and coupon barrier are below
+every simulated path, every path redeems at observation 1. Then `pv == notional*(1+coupon_rate)*exp(-r*t1)`
+exactly, with `se == 0`.
+
+**G3b — autocallable reduces to a short put at the terminal leg.** Set `protection_barrier == initial_level`
+and `coupon_barrier` unreachably high. The payoff collapses exactly: `notional*[1{S_T>=B} + (S_T/S0)*1{S_T<B}]`
+becomes `notional - (notional/S0)*(S0-S_T)^+`, a short put struck at `S0`. Reference is
+`notional*exp(-r*T) - (notional/s0)*heston_vanilla_price(params, strike=s0, expiry=T, is_call=False)`.
+The notional leg is discounted because it is a cashflow at `T`, and the ledger
+is undiscounted-and-dated by design. This turns a product with no closed form into an exact
+comparison against analytics that already exist and are already gated.
+
+Setting `coupon_barrier == autocall_trigger` recovers snowball behaviour — one implementation
+covers both shapes.
+
+**Fixture scope: AAPL and MSFT only.** Amendment 4's scheme-convergence study validated the QE
+discretization at Feller ratio 0.333 (AAPL's regime) and measured the Feller-violating regime
+up to 0.333. `exo.toml`'s SPX sits at 0.231, further into that regime, and was not swept. Rather
+than fire the carried risk early, this slice uses only AAPL (0.333, near the tested boundary) and
+MSFT (1.633, Feller-satisfying). SPX's 0.231 regime is explicitly left to P2.M2's warrant gate,
+which Amendment 4 already names as the trigger for that carried risk.
+
+## Consequences (Amendment 5)
+
+- **No new dependency, no component changes, no wire-format changes.** The payoff abstraction is
+  `exo/` only, the two products are fixtures (not persisted), and the reference pricer (`bs_barrier_price`
+  in `models/analytic.py`) follows Amendment 4's explicit direction: built as a reusable pricer
+  rather than buried in a test module.
+- **The `exo/CLAUDE.md` M2 abstraction rule is satisfied at the outset.** The only `models/` change
+  is the gate reference pricer, which Amendment 4 explicitly directed be built as a reusable pricer
+  — the same reasoning that put `heston_vanilla_price` in `models/`. No payoff touches `models/`.
+- **The abstraction's known ceiling is `P2-6` (path-independent payment dates), owned by P2.M2.**
+  Both escape hatches — wider grid for mini futures, new payoff protocol method for LSM — are
+  `products/`-only changes that do not breach the M2 rule. No other component is touched.
