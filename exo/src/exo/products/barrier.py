@@ -6,10 +6,9 @@ parity (`KO + KI == vanilla`) hold EXACTLY, path by path -- a free machine-preci
 (`exo/tests/test_validation_gates_products.py`'s G5 gate), since the same `survival` value
 feeds both weights and `w_ko + w_ki == 1` identically.
 
-# ponytail (P2-5, P2.M1 slice 2): no rebate on knock-out -- a breached path simply pays 0 at
-# expiry rather than a consolation cashflow at the breach date. Ceiling: cannot price a barrier
-# with a rebate feature. Trigger: P2.M2, same trigger as `base.py`'s survival-carries-no-
-# crossing-time marker (a rebate needs the crossing date this module also does not have).
+# ponytail (P2-5, P2.M1 slice 2): no rebate on knock-out. Ceiling: cannot price a barrier with
+# a rebate feature. Trigger: P2.M2 (same trigger as base.py's crossing-time marker).
+# See docs/PONYTAIL-DEBT.md.
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ import numpy as np
 
 from exo.models.heston import PathBundle
 from exo.products.base import (
-    _DIRECTIONS,  # R2-4, fix round 2: the one products/ copy of the direction vocabulary
+    _DIRECTIONS,  # the one products/ copy of the direction vocabulary
     CashflowLedger,
     Monitoring,
     barrier_survival,
@@ -41,16 +40,11 @@ class BarrierOption:
     `observations` is required iff `monitoring == Monitoring.DISCRETE` (the declared fixing
     schedule) and must be `None` for `Monitoring.CONTINUOUS_BRIDGE` (which monitors every grid
     step from inception up to this option's OWN expiry, not the bundle's full horizon -- see
-    `cashflows()` below and `base.barrier_survival`; R2-3, fix round 2, corrected this from an
-    earlier, HIGH-1-fix-round-1-era description that this class still monitors "the full
-    simulation grid").
+    `cashflows()` below and `base.barrier_survival`).
 
     This term sheet has no `s0` field (spot lives in the pricing-time `HestonParams`, not
     here), so it cannot itself check whether `barrier` is already breached relative to the
-    underlying's actual starting level -- the caller is responsible for checking `barrier`
-    against the intended `s0` before pricing. `barrier_survival` handles an inception breach
-    correctly regardless (survival is 0 from `t=0`); `bs_barrier_price`, the gate reference for
-    this payoff, does not and raises instead (see its own docstring).
+    underlying's actual starting level -- the caller is responsible for that before pricing.
     """
 
     underlying: str
@@ -64,11 +58,9 @@ class BarrierOption:
     observations: tuple[float, ...] | None = None
 
     def __post_init__(self) -> None:
-        # Categorical fields are consumed through two-way branches below (and inside
-        # base.barrier_survival / analytic.bs_barrier_price), never an explicit elif/raise, so a
-        # case typo (e.g. "Call") would otherwise be silently accepted and priced as the OTHER
-        # branch. Same defect class this repo already ruled unacceptable for exo.toml key typos
-        # -- see params.py's `extra="forbid"` docstring rationale (MEDIUM-6, security review).
+        # Categorical fields are consumed through two-way branches, never an explicit
+        # elif/raise, so a case typo (e.g. "Call") would otherwise be silently accepted and
+        # priced as the OTHER branch.
         if self.option_type not in _OPTION_TYPES:
             raise ValueError(
                 f"option_type must be one of {_OPTION_TYPES}, got {self.option_type!r}"
@@ -78,8 +70,8 @@ class BarrierOption:
         if self.knock not in _KNOCKS:
             raise ValueError(f"knock must be one of {_KNOCKS}, got {self.knock!r}")
 
-        # NaN/Inf bypass every `<=`/`<`/`>` guard below under IEEE-754 (HIGH-3, security
-        # review) -- checked explicitly alongside each range check, not left to fall out of it.
+        # NaN/Inf bypass every `<=`/`<`/`>` guard below under IEEE-754 -- checked explicitly
+        # alongside each range check, not left to fall out of it.
         if not math.isfinite(self.strike) or self.strike <= 0.0:
             raise ValueError(f"strike must be a positive finite number, got {self.strike}")
         if not math.isfinite(self.barrier) or self.barrier <= 0.0:
@@ -101,22 +93,18 @@ class BarrierOption:
         expiry_idx = int(observation_indices(np.array([self.expiry]), bundle)[0])
 
         if self.monitoring == Monitoring.DISCRETE:
-            observations = self.observations
-            if observations is None:
-                raise ValueError("observations is required when monitoring is DISCRETE")
-            obs_idx = observation_indices(np.asarray(observations, dtype=np.float64), bundle)
+            assert self.observations is not None  # __post_init__ guarantees this for DISCRETE
+            obs_idx = observation_indices(np.asarray(self.observations, dtype=np.float64), bundle)
         else:
-            # Bound to THIS option's own life, not the bundle's full horizon (HIGH-1, code
-            # review): `price_from_bundle` lets several products share one bundle, and a bundle
-            # simulated further out than this option's expiry must not have its extra steps
-            # monitored as if they were part of this contract.
+            # Indices are bound to THIS option's own expiry, not the bundle's full horizon --
+            # `price_from_bundle` lets several products share one bundle, so a bundle simulated
+            # further out than this option's expiry must not have its extra steps monitored (or
+            # read as the terminal spot below) as if they belonged to this contract.
             obs_idx = np.arange(expiry_idx + 1)
 
         survival = barrier_survival(bundle, self.barrier, self.direction, self.monitoring, obs_idx)
         weight = survival if self.knock == "out" else 1.0 - survival
 
-        # Read the terminal spot at THIS option's own expiry index, never at the bundle's last
-        # column (`bundle.S[:, -1]`) -- the same HIGH-1 reasoning as the bridge's obs_idx above.
         s_t = bundle.S[:, expiry_idx]
         if self.option_type == "call":
             intrinsic = np.maximum(s_t - self.strike, 0.0)

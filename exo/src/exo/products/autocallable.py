@@ -57,8 +57,8 @@ class Autocallable:
     expiry: float
 
     def __post_init__(self) -> None:
-        # NaN/Inf bypass every `<=`/`<` guard below under IEEE-754 (HIGH-3, security review) --
-        # checked explicitly alongside each range check, not left to fall out of it.
+        # NaN/Inf bypass every `<=`/`<` guard below under IEEE-754 -- checked explicitly
+        # alongside each range check, not left to fall out of it.
         if not math.isfinite(self.notional) or self.notional <= 0.0:
             raise ValueError(f"notional must be a positive finite number, got {self.notional}")
         if not math.isfinite(self.expiry) or self.expiry <= 0.0:
@@ -117,9 +117,9 @@ class Autocallable:
             called = called | (active & autocall_hit)
 
         # Read the terminal spot at THIS note's own final observation index, never at the
-        # bundle's last column (HIGH-1, code review): `price_from_bundle` lets several products
-        # share one bundle, and a bundle simulated past `expiry` must not have its extra steps
-        # read as the maturity date.
+        # bundle's last column: `price_from_bundle` lets several products share one bundle, and
+        # a bundle simulated past `expiry` must not have its extra steps read as the maturity
+        # date.
         never_called = ~called
         s_t = bundle.S[:, obs_idx[-1]]
         maturity = np.where(
