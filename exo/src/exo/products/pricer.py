@@ -6,11 +6,9 @@ bundle -- which is what P2.M4's portfolio revaluation will need, and what this s
 companion test uses to compare CONTINUOUS_BRIDGE vs DISCRETE monitoring on perfectly-correlated
 paths.
 
-# ponytail (P2-4, P2.M1 slice 2): discounting is FLAT at `params.r` (or the caller-supplied `r`
-# in `price_from_bundle`) -- a single scalar rate applied to every cashflow date, no curve.
-# Ceiling: no term structure, so any product whose cashflow dates span enough of the curve to
-# matter is priced at a slightly wrong forward rate at each leg. Trigger: P4.M1's rates
-# foundation, which is the first milestone that has a curve to discount against.
+# ponytail (P2-4, P2.M1 slice 2): discounting is flat at one scalar rate, no term structure.
+# Ceiling: any product whose cashflow dates span enough of the curve is priced at a slightly
+# wrong forward rate. Trigger: P4.M1 rates foundation. See docs/PONYTAIL-DEBT.md.
 """
 
 from __future__ import annotations
@@ -42,30 +40,18 @@ def price_from_bundle(payoff: Payoff, bundle: PathBundle, *, r: float) -> PriceR
     Requires `bundle.t[-1] == payoff.expiry` EXACTLY, for the same reason `price()` requires
     `engine.expiry == payoff.expiry` exactly (see `price()`'s docstring) -- `bundle.t[-1]` is
     `np.linspace`'s endpoint, set to the exact `expiry` it was simulated with, not a value that
-    could pick up floating-point drift. This is a BELT, not the only fix (HIGH-1, code review,
-    fix round 1): `price_from_bundle` is the function several products SHARE one bundle
-    through, and both `barrier.py` and `autocallable.py` independently bound their own
-    monitoring/terminal-leg indices to the payoff's own expiry rather than the bundle's last
-    column, so a caller that calls `payoff.cashflows(bundle)` directly (bypassing this guard
-    entirely, as this slice's own G4 companion test does) is still priced correctly. This guard
-    exists so the *pricer-mediated* path fails loud instead of silently pricing the wrong
-    contract -- measured, before the fix, at a 13.5 SE silent mispricing on a 2-year bundle
-    against a 1-year down-and-out call.
+    could pick up floating-point drift. This guard exists so the *pricer-mediated* path fails
+    loud instead of silently pricing the wrong contract; `barrier.py`/`autocallable.py`
+    independently bound their own monitoring/terminal-leg indices to the payoff's own expiry
+    (not the bundle's last column), so a caller that calls `payoff.cashflows(bundle)` directly,
+    bypassing this guard, is still priced correctly.
 
-    # ponytail (P2-8, architect review, fix round 3): the exact `bundle.t[-1] != payoff.expiry`
-    # guard above means this function CANNOT price a shorter-dated payoff against a shared
-    # longer bundle -- which is the single use case this docstring's own opening paragraph
-    # advertises for P2.M4's portfolio revaluation. The HIGH-1 fix round (fix round 1) made that
-    # case SAFE -- `barrier.py`/`autocallable.py` independently bound their own monitoring/
-    # terminal-leg indices to the payoff's own expiry, not the bundle's last column -- but this
-    # guard keeps it UNREACHABLE through the public pricer regardless: every current
-    # shorter-dated caller (this slice's own G4 companion test included) must bypass
-    # `price_from_bundle` entirely and call `discount(payoff.cashflows(bundle), r=...)` directly
-    # to get the safe behaviour. Ceiling: shared-bundle pricing through this function is
-    # restricted to one common expiry across every payoff sharing the bundle. Trigger: P2.M4,
-    # whose portfolio revaluation is the actual consumer of the shared-bundle case -- relaxing
-    # this guard (e.g. to `bundle.t[-1] >= payoff.expiry`) is a deliberate P2.M4 decision to make
-    # then, against real portfolio-loop requirements, not an oversight to silently fix here.
+    # ponytail (P2-8, P2.M1 slice 2): the exact `bundle.t[-1] != payoff.expiry` guard means this
+    # function cannot price a shorter-dated payoff against a shared longer bundle -- the use
+    # case this docstring's opening paragraph advertises for P2.M4's portfolio revaluation.
+    # Every current shorter-dated caller must bypass `price_from_bundle` and call
+    # `discount(payoff.cashflows(bundle), r=...)` directly. Trigger: P2.M4, whose portfolio
+    # revaluation decides whether to relax this guard. See docs/PONYTAIL-DEBT.md.
     """
     if bundle.t[-1] != payoff.expiry:
         raise ValueError(
