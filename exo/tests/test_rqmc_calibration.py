@@ -8,8 +8,18 @@ regression -- e.g. computing the SE over pooled draws instead of over replicate 
 which would be catastrophically too small -- fails loudly instead of silently shipping
 an optimistic error bar.
 
-Floor is deliberately loose (0.5, against a measured ~0.85 at R=64 in the brief's own
-spike): this catches gross breakage, not a precise calibration regression.
+Floor is deliberately loose (0.5, against a measured ~0.85 at R=64 in the d=4 smooth
+integrand spike this test reproduces): this catches gross breakage, not a precise
+calibration regression.
+
+That d=4 spike is the PESSIMISTIC regime, not the number the production gates rely
+on: at this package's actual configuration (d ~= 100, Heston barrier/autocallable
+payoffs), `docs/studies/p2m1-qmc-variance-reduction.md` measures RQMC calibration
+factors of 0.835-1.314, indistinguishable from pseudo-random's 0.876-1.331 in the
+same run -- the heavy-tail penalty this test exercises does not reproduce there. See
+`exo.models.estimator.rqmc_estimate`'s docstring for both measurements side by side.
+This test's floor stays tied to the d=4 regime it actually measures; it is not
+evidence for or against the d~=100 regime the gates run in.
 """
 
 from __future__ import annotations

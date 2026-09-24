@@ -80,6 +80,12 @@ class PathBundle:
     pair-mean-vs-naive-SE issue documented in estimator.py's module docstring,
     except RQMC fails in the UNSAFE direction (too-tight, not too-loose), so
     `mc_estimate` raises rather than silently using the wrong formula.
+
+    Required, no default (P2.M1 slice 3 remediation): a fail-open `bool = False` default
+    would let a future construction site -- e.g. a hand-built Sobol-driven bundle for P2.M2's
+    Longstaff-Schwartz engine (ADR-006 Amendment 3) -- silently report a plain sample SE for
+    quasi-random draws instead of raising. This field's entire purpose is to make
+    `mc_estimate` refuse that.
     """
 
     t: NDArray[np.float64]
@@ -88,7 +94,7 @@ class PathBundle:
     antithetic: bool
     n_pairs: int | None
     qe_fallback_count: int | None
-    low_discrepancy: bool = False
+    low_discrepancy: bool
 
 
 def simulate(params: HestonParams, engine: EngineConfig, rng: RandomSource) -> PathBundle:

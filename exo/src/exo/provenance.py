@@ -193,6 +193,15 @@ class EngineSettings:
     bridge_streams: tuple[str, ...] = ()  # stream names bridged, e.g. ("spot",) under QE
 
     def __post_init__(self) -> None:
+        if self.sampler not in ("pseudo", "sobol"):
+            raise ValueError(f"sampler={self.sampler!r} must be one of ('pseudo', 'sobol')")
+        if self.sampler == "sobol" and self.n_replicates is None:
+            raise ValueError(
+                "sampler='sobol' requires n_replicates to be set -- without it, n_paths "
+                "reads back as the total path count instead of paths PER REPLICATE (see "
+                "n_replicates' own docstring), silently under-reporting an RQMC run's real "
+                "path count"
+            )
         if self.n_replicates is not None and self.n_replicates < 1:
             raise ValueError(f"n_replicates {self.n_replicates} must be >= 1 when not None")
 

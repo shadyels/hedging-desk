@@ -165,16 +165,17 @@ def rqmc_estimate(replicate_pvs: Sequence[float], *, n_paths_per_replicate: int)
     for exactly this reason).
 
     R >= 8 is enforced below, but that floor is not generous -- it is the loosest
-    floor this estimator can defend. Measured directly against scipy's Sobol
-    (d=4, n=2**10, smooth integrand, 400 trials): scramble replicates are genuinely
-    independent (mean off-diagonal correlation ~ -0.005), but the replicate-mean
-    distribution has excess kurtosis ~= 65 (Gaussian = 0). With tails that heavy, the
-    *sample* standard deviation at small R badly underestimates the true spread, and
-    the reported SE inherits that bias -- always in the OPTIMISTIC (too-tight)
-    direction, i.e. the unsafe one: it makes every `0 < se < tol_abs` gate easier to
-    pass, not harder.
+    floor this estimator can defend. Measured on a d=4 SMOOTH ANALYTIC integrand
+    (scipy Sobol, n=2**10, 400 trials) -- a LOW-DIMENSIONAL WORST CASE, NOT a general
+    property of the estimator (see the contrary measurement below): scramble
+    replicates are genuinely independent (mean off-diagonal correlation ~ -0.005),
+    but the replicate-mean distribution has excess kurtosis ~= 65 (Gaussian = 0).
+    With tails that heavy, the *sample* standard deviation at small R badly
+    underestimates the true spread, and the reported SE inherits that bias -- always
+    in the OPTIMISTIC (too-tight) direction, i.e. the unsafe one: it makes every
+    `0 < se < tol_abs` gate easier to pass, not harder.
 
-        R     reported SE / true spread
+        R     reported SE / true spread   (d=4 smooth analytic integrand)
         8     0.482
         16    0.623
         32    0.758
@@ -183,23 +184,32 @@ def rqmc_estimate(replicate_pvs: Sequence[float], *, n_paths_per_replicate: int)
         256   0.944
 
     (A pseudo-random control run through the identical harness reads ~1.038, so the
-    harness itself is sound -- this bias is a real property of the RQMC estimator,
-    not a measurement artifact.)
+    harness itself is sound -- this bias is a real property of the RQMC estimator on
+    THIS integrand, not a measurement artifact.)
 
-    Guidance: gates use R >= 64 (~15% optimistic); the convergence study uses
-    R >= 128 (~8% optimistic). R -- the replicate count -- is the only knob that
-    fixes this. Raising `n_paths_per_replicate` (paths *within* a replicate) does
-    NOT: it tightens each replicate's own quasi-Monte-Carlo error, but says nothing
-    about how well 8, 16, or 32 replicate MEANS approximate their own population
-    spread, which is what this bias measures.
+    Contrary measurement, same estimator, this package's actual configuration: at
+    d = 2*n_steps ~= 100 (n=1024, R=32, Heston barrier/autocallable payoffs),
+    `docs/studies/p2m1-qmc-variance-reduction.md` measures RQMC calibration factors
+    of 0.835-1.314 against pseudo-random controls of 0.876-1.331 IN THE SAME RUN --
+    indistinguishable. The heavy-tail penalty measured above does not reproduce on
+    these payoffs. The d=4 table above is retained because it is still the only
+    evidence for `_MIN_RQMC_REPLICATES = 8` and the gates' R=64, not because it
+    describes this package's typical regime.
 
-    ponytail: the between-replicate SE returned here is reported UNCORRECTED for the
-    small-R bias measured above -- optimistic by a factor that depends on both R and
-    the payoff's tail behaviour, and that factor is disclosed, not removed. Ceiling:
-    ~15% optimistic at R=64, ~8% at R=128, per the measured table. Upgrade: a
-    bias-corrected or bootstrap standard error. Trigger: a gate or a published number
-    where an 8% optimistic SE is not acceptable -- P2.M4, the first milestone that
-    publishes `pv_std_err_e9` to the bus.
+    Guidance: gates use R >= 64; the convergence study uses R >= 128. R -- the
+    replicate count -- is the only knob available if the d=4 heavy-tail regime is
+    ever hit. Raising `n_paths_per_replicate` (paths *within* a replicate) does NOT:
+    it tightens each replicate's own quasi-Monte-Carlo error, but says nothing about
+    how well 8, 16, or 32 replicate MEANS approximate their own population spread,
+    which is what this bias measures.
+
+    ponytail: the between-replicate SE returned here is reported UNCORRECTED for
+    possible small-R bias -- optimistic by a factor that depends on both R and the
+    payoff's tail behaviour. Ceiling: calibration measured in two regimes, differing
+    between them (0.48-0.94 at d=4 smooth analytic vs 0.84-1.31 at d~=100 Heston
+    barrier/autocallable), and unquantified outside both. Upgrade: a bias-corrected
+    or bootstrap standard error. Trigger: P2.M4 publishing `pv_std_err_e9`, or any
+    new payoff class whose replicate-mean kurtosis has not been measured.
 
     Raises `ValueError` if `R < 8`: below that floor the reported SE is more than 2x
     optimistic (0.482 vs the ~0.85 "usable" region above), which is not a defensible

@@ -17,7 +17,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from exo.models.control_variate import ControlVariate, apply_control, estimate_beta, vanilla_control
-from exo.models.estimator import PriceResult, mc_estimate, rqmc_estimate
+from exo.models.estimator import _MIN_RQMC_REPLICATES, PriceResult, mc_estimate, rqmc_estimate
 from exo.models.heston import PathBundle, simulate
 from exo.models.params import EngineConfig, HestonParams
 from exo.models.rng import RandomSource, SobolRandomSource
@@ -134,12 +134,27 @@ def price_rqmc(
     n_steps)` then `("spot", n_steps)` (heston.py) -- not from `engine.scheme` itself; see
     `SobolRandomSource.dims`'s own ponytail marker for the ceiling this shares.
 
+    This ordering puts a bridged "spot" stream at global Sobol dimensions `[n_steps,
+    2*n_steps)`, not `[0, n_steps)` -- `bridge.py`'s leading-dimensions claim applies only
+    within a stream's own columns, not across this tuple (see its docstring). Ordering is not
+    currently chosen for bridge effectiveness: reversing it was measured immaterial (rmse
+    0.0370 vs 0.0383, 0.0801 vs 0.0670, 0.0451 vs 0.0442 -- mixed, within +/-15% precision), so
+    it is left as-is rather than churning every study number for no measured gain. A future
+    third stream should not assume ordering here is chosen for bridge effectiveness.
+
     Control variate: when `control_strike` is given and `beta` is not, ONE extra pilot replicate
     is drawn at `replicate=n_replicates` -- disjoint from the `0..n_replicates-1` estimation
     replicates -- fits `beta` there via `estimate_beta`, and discards that replicate's own price.
     The same `beta` is then applied to every estimation replicate (`control_variate.py`: a fixed
     beta is unbiased regardless of source; fitting it on the priced sample is not). Pass `beta`
     explicitly to skip the pilot.
+
+    CAVEAT: `vanilla_control`'s `mean` is the exact continuous-time CF price, not the
+    discretized `simulate()` model's own expectation, so this control variate silently transfers
+    the scheme's discretization bias into the priced result rather than merely reducing variance
+    -- see `estimate_beta`'s docstring and `vanilla_control`'s ponytail marker for the measured
+    gap (e.g. +0.07189, z=+3.22, at euler-ft/n_steps=50, AAPL params). Do not enable
+    `control_strike` under a scheme/step count not validated by ADR-006 Amendment 4 Section 4.
     """
     if engine.antithetic:
         raise ValueError(
@@ -156,6 +171,11 @@ def price_rqmc(
             f"EngineConfig.expiry={engine.expiry} does not match payoff.expiry="
             f"{payoff.expiry} -- these must match exactly, or the payoff would be priced "
             "against the wrong contract horizon."
+        )
+    if n_replicates < _MIN_RQMC_REPLICATES:
+        raise ValueError(
+            f"price_rqmc needs at least {_MIN_RQMC_REPLICATES} replicates (see "
+            f"rqmc_estimate's docstring), got n_replicates={n_replicates}"
         )
     if beta is not None and control_strike is None:
         raise ValueError(

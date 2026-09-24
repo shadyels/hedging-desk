@@ -249,6 +249,8 @@ class SobolRandomSource:
     t: NDArray[np.float64] | None = None
 
     def __post_init__(self) -> None:
+        if self.replicate < 0:
+            raise ValueError(f"SobolRandomSource.replicate must be >= 0, got {self.replicate}")
         if self.n_paths <= 0 or (self.n_paths & (self.n_paths - 1)) != 0:
             raise ValueError(
                 "SobolRandomSource requires n_paths to be a power of two, got "
@@ -280,6 +282,14 @@ class SobolRandomSource:
                     f"SobolRandomSource.bridge names streams not in dims: {sorted(undeclared)} "
                     f"-- declared streams are {names}"
                 )
+            for name, n_dims in self.dims:
+                if name in self.bridge and self.t.shape[0] != n_dims + 1:
+                    raise ValueError(
+                        f"SobolRandomSource.t has shape[0]={self.t.shape[0]} but bridged "
+                        f"stream {name!r} has n_dims={n_dims} -- t must have shape "
+                        f"(n_dims + 1,) = ({n_dims + 1},) so bridge_normals' (n_steps+1,) "
+                        "grid matches the stream it bridges"
+                    )
 
     @cached_property
     def _offsets(self) -> dict[str, tuple[int, int]]:
@@ -297,10 +307,17 @@ class SobolRandomSource:
 
         ponytail: eager materialisation of the full (n_paths, D) matrix, held for the
         whole `simulate()` call, on top of heston.py's five array-equivalents.
-        Ceiling: <MEASURED IN T9> -- a later task fills this in from a real
-        tracemalloc run. Upgrade: generate per-stream blocks on demand instead of one
-        eager (n_paths, D) matrix. Trigger: P2.M2 LSM retention, or a batch that will
-        not fit the study's --max-batch-bytes.
+        Ceiling: tracemalloc-measured peak 7,660,768 bytes against a denominator of
+        n_paths*(n_steps+1)*8 = 417,792 bytes at n_paths=1024, n_steps=50, scheme="qe",
+        bridge={"spot"} -- a peak-array ratio of ~18.34, committed as
+        `_PEAK_ARRAY_RATIO = 19.0` in `studies/qmc_variance_reduction.py` (a ~3.6% margin
+        over the measured value; see that module's comment on the constant for the full
+        breakdown). On the same scale as heston.py's ~5.02-5.08 peak-array ratio (~2.02 GB
+        at 200k paths x 252 steps) and `products/base.py`'s ~10.2 (`_BRIDGE_PEAK_ARRAY_RATIO
+        = 11.0`) -- this module's eager (n_paths, D) point matrix is the largest of the
+        three. Upgrade: generate per-stream blocks on demand instead of one eager
+        (n_paths, D) matrix. Trigger: P2.M2 LSM retention, or a batch that will not fit the
+        study's --max-batch-bytes.
         """
         total_dims = sum(n_dims for _, n_dims in self.dims)
         seed_sequence = np.random.SeedSequence(

@@ -8,7 +8,15 @@ the simulation time grid, which is what makes scrambled-Sobol sequences effectiv
 (Sobol's leading dimensions are the best-equidistributed; the bridge construction
 assigns them to the coarsest, highest-variance features of the path — the
 terminal point first, then successive midpoints — so QMC's advantage concentrates
-where it matters most). See docs/GLOSSARY.md for the disambiguation.
+where it matters most, WITHIN the bridged stream's own columns). This module only
+reorders columns *inside* one (n_paths, n_steps) block; it says nothing about
+which global Sobol dimensions that block occupies -- that is set by where its
+stream sits in the caller's `dims` tuple (`SobolRandomSource`/`price_rqmc`), and a
+stream bridged there does NOT necessarily land on global Sobol dimension 0 (e.g.
+`price_rqmc`'s `dims=(("variance", n_steps), ("spot", n_steps))` puts the bridged
+"spot" block at global dimensions `[n_steps, 2*n_steps)`, not `[0, n_steps)` --
+measured immaterial, see `price_rqmc`'s `dims` paragraph). See docs/GLOSSARY.md
+for the disambiguation.
 
 A later task wires this into the Sobol source; this module is a standalone pure
 function with no dependency on the sampler.

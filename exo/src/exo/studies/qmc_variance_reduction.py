@@ -55,12 +55,11 @@ type just for these tests") rather than inventing a bespoke vanilla `Payoff`.
 
 **No internal batching.** Unlike `scheme_convergence.py`, this study's default path budget per
 repetition (`B = 32_768`) keeps one call's peak memory (~250 MB at defaults, `_PEAK_ARRAY_RATIO`
-below) well under `--max-batch-bytes`'s 800 MB default, and only ONE bundle is ever live at a
-time within a repetition (`price_rqmc`'s own design; the pseudo path allocates one bundle per
-repetition too). `--max-batch-bytes` is therefore a REFUSAL guard, not a batching knob: a
-(cell, configuration) whose estimated peak would exceed it raises rather than silently proceeding
-or splitting itself into sub-batches -- reintroducing `resolve_batch_plan`'s machinery for a
-sweep this small would be solving a problem this study does not have.
+below) well under any reasonable ceiling, and only ONE bundle is ever live at a time within a
+repetition (`price_rqmc`'s own design; the pseudo path allocates one bundle per repetition too).
+`_estimate_peak_bytes` is informational only (Peak memory section of the report) -- this
+sweep's fixed 7-cell grid and fixed `n_steps` never approach a size where batching would matter,
+so there is no refusal guard or `resolve_batch_plan`-style machinery here.
 """
 
 from __future__ import annotations
@@ -81,10 +80,10 @@ from numpy.typing import NDArray
 from exo.models.control_variate import estimate_beta, vanilla_control
 from exo.models.heston import simulate
 from exo.models.params import EngineConfig, HestonParams, Scheme
-from exo.models.rng import PseudoRandomSource
+from exo.models.rng import PseudoRandomSource, SobolRandomSource
 from exo.products.autocallable import Autocallable
 from exo.products.barrier import BarrierOption
-from exo.products.base import Monitoring, Payoff, observation_indices
+from exo.products.base import Monitoring, Payoff
 from exo.products.pricer import discount, price_from_bundle, price_rqmc
 from exo.provenance import EngineSettings, RunManifest, git_sha, params_hash
 
@@ -116,7 +115,6 @@ DEFAULT_PATHS_PER_REPLICATE = 1024  # n (RQMC paths per replicate; power of two,
 # B = DEFAULT_REPLICATES * DEFAULT_PATHS_PER_REPLICATE = 32_768 = 2**15: the identical total
 # path budget every configuration at a cell uses per repetition (module docstring) -- for RQMC
 # that is R replicates x n paths; for pseudo it is one B-path run.
-DEFAULT_MAX_BATCH_BYTES = 800_000_000
 
 _THIS_FILE = Path(__file__).resolve()
 _REPO_ROOT = _THIS_FILE.parents[4]  # .../exo/src/exo/studies/ -> .../hedging-desk
@@ -217,9 +215,10 @@ def _autocallable(underlying: str, params: HestonParams) -> Autocallable:
 
     `coupon_barrier=0.80*s0`, `autocall_trigger=1.00*s0`, `protection_barrier=0.70*s0`, five
     observations (`_AUTOCALL_OBSERVATIONS`) -- early redemption and coupons both fire on a real
-    fraction of simulated paths at these levels (see `_measure_autocall_liveness`, reported in
-    the rendered artifact's Cell results section, and asserted non-degenerate by
-    `test_qmc_variance_reduction_smoke.py`)."""
+    fraction of simulated paths at these levels, asserted non-degenerate by
+    `test_qmc_variance_reduction_smoke.py`'s `test_autocallable_is_genuinely_live_not_degenerate`
+    (reads `Autocallable.cashflows`'s own ledger rather than re-deriving the coupon/autocall
+    state machine -- see that test's own helper)."""
     return Autocallable(
         underlying=underlying,
         notional=1000.0,
@@ -240,60 +239,6 @@ def _payoff_for(cell: Cell, params: HestonParams) -> Payoff:
     if cell.product == "barrier":
         return _down_and_out_call(cell.underlying, params)
     return _autocallable(cell.underlying, params)
-
-
-@dataclass(frozen=True)
-class AutocallLiveness:
-    """Sanity-check that `_autocallable`'s term sheet is genuinely live at `underlying`'s real
-    parameters -- coordinator correction: G3b's own fixture is deliberately degenerate (never
-    calls, never earns a coupon), and swapping in a spot-relative live Phoenix without checking
-    it is actually live would just move the degeneracy risk rather than remove it.
-
-    `redeem_fraction[j]` / `coupon_fraction[j]` are measured over ALL paths (not just paths still
-    active at observation j), so they are directly comparable across observations and sum
-    sensibly: `sum(redeem_fraction) + never_redeemed_fraction == 1.0`.
-    """
-
-    underlying: str
-    observations: tuple[float, ...]
-    redeem_fraction: tuple[float, ...]
-    coupon_fraction: tuple[float, ...]
-    never_redeemed_fraction: float
-
-
-def _measure_autocall_liveness(
-    underlying: str, params: HestonParams, *, n_steps: int, n_paths: int, seed: int
-) -> AutocallLiveness:
-    """Simulate `n_paths` and replay `_autocallable`'s own coupon/autocall boolean logic against
-    `bundle.S` at each observation (mirrors `Autocallable.cashflows`'s loop -- a read-only
-    diagnostic over `_AUTOCALL_OBSERVATIONS` observations, not a per-path loop; exo/CLAUDE.md
-    rule 2 governs loops over PATHS, which stay vectorized here) to report what fraction of
-    paths redeem, and what fraction earn a coupon, at each observation date."""
-    payoff = _autocallable(underlying, params)
-    engine = EngineConfig(
-        scheme="qe", n_steps=n_steps, n_paths=n_paths, expiry=_EXPIRY, antithetic=True
-    )
-    bundle = simulate(params, engine, PseudoRandomSource(seed=seed))
-    obs_idx = observation_indices(np.asarray(payoff.observations, dtype=np.float64), bundle)
-
-    active: NDArray[np.bool_] = np.ones(bundle.S.shape[0], dtype=np.bool_)
-    redeem_fraction: list[float] = []
-    coupon_fraction: list[float] = []
-    for idx in obs_idx:
-        s_j = bundle.S[:, idx]
-        coupon_hit = active & (s_j >= payoff.coupon_barrier)
-        autocall_hit = active & (s_j >= payoff.autocall_trigger)
-        coupon_fraction.append(float(np.mean(coupon_hit)))
-        redeem_fraction.append(float(np.mean(autocall_hit)))
-        active = active & ~autocall_hit
-
-    return AutocallLiveness(
-        underlying=underlying,
-        observations=payoff.observations,
-        redeem_fraction=tuple(redeem_fraction),
-        coupon_fraction=tuple(coupon_fraction),
-        never_redeemed_fraction=float(np.mean(active)),
-    )
 
 
 @dataclass(frozen=True)
@@ -369,6 +314,43 @@ def _fit_pseudo_beta(
     return estimate_beta(discounted, control.payoff)
 
 
+def _fit_rqmc_beta(
+    payoff: Payoff,
+    params: HestonParams,
+    engine: EngineConfig,
+    bridge: frozenset[str],
+    n_replicates: int,
+    pilot_seed: int,
+    control_strike: float,
+) -> float:
+    """Fit a control-variate beta from a single disjoint RQMC pilot replicate, ONCE per cell --
+    mirrors `price_rqmc`'s own internal pilot fit (same `replicate=n_replicates` convention,
+    disjoint from the `0..n_replicates-1` estimation replicates) but run outside the repetition
+    loop, symmetric with `_fit_pseudo_beta`'s config-6 pilot: both fit once per cell on a
+    disjoint sample rather than once per repetition (L10 fix -- refitting inside every
+    repetition, as `price_rqmc(beta=None)` did before, both broke the equal-budget claim by one
+    extra replicate per repetition and let config 5's rmse absorb beta-estimation variance that
+    config 6's did not)."""
+    dims: tuple[tuple[str, int], ...] = (("variance", engine.n_steps), ("spot", engine.n_steps))
+    t: NDArray[np.float64] | None = None
+    if bridge:
+        t = np.linspace(0.0, engine.expiry, engine.n_steps + 1, dtype=np.float64)
+    pilot_rng = SobolRandomSource(
+        seed=pilot_seed,
+        n_paths=engine.n_paths,
+        dims=dims,
+        replicate=n_replicates,
+        bridge=bridge,
+        t=t,
+    )
+    pilot_bundle = simulate(params, engine, pilot_rng)
+    pilot_discounted = discount(payoff.cashflows(pilot_bundle), r=params.r)
+    pilot_control = vanilla_control(
+        pilot_bundle, params, strike=control_strike, expiry=payoff.expiry, r=params.r
+    )
+    return estimate_beta(pilot_discounted, pilot_control.payoff)
+
+
 @dataclass(frozen=True)
 class _RawConfigMeasurement:
     rmse: float
@@ -384,7 +366,6 @@ def _measure_config(
     replicates: int,
     paths_per_replicate: int,
     base_seed: int,
-    max_batch_bytes: int,
     n_steps: int,
 ) -> _RawConfigMeasurement:
     """Run `repetitions` independent repetitions of `config` at cell `cell`, each at the
@@ -400,29 +381,34 @@ def _measure_config(
     n_paths_this_call = (
         replicates * paths_per_replicate if config.sampler == "pseudo" else paths_per_replicate
     )
-    peak_estimate = _estimate_peak_bytes(n_paths_this_call, n_steps)
-    if peak_estimate > max_batch_bytes:
-        raise ValueError(
-            f"{cell.label}/{config.label}: estimated peak {peak_estimate / 1e9:.2f} GB exceeds "
-            f"--max-batch-bytes ({max_batch_bytes / 1e9:.2f} GB) -- this study refuses to run "
-            "rather than batch within a repetition (module docstring); reduce --replicates/"
-            "--paths-per-replicate or raise --max-batch-bytes."
-        )
+    bridge = _BRIDGE_BY_SCHEME[cell.scheme] if config.bridge else frozenset()
 
     beta: float | None = None
-    if config.control_variate and config.sampler == "pseudo":
+    if config.control_variate:
         assert control_strike is not None
         pilot_seed = _sub_seed(base_seed, cell.label, config.label, "pilot")
-        beta = _fit_pseudo_beta(
-            payoff,
-            params,
-            cell.scheme,
-            n_paths_this_call,
-            n_steps,
-            config.antithetic,
-            pilot_seed,
-            control_strike,
-        )
+        if config.sampler == "pseudo":
+            beta = _fit_pseudo_beta(
+                payoff,
+                params,
+                cell.scheme,
+                n_paths_this_call,
+                n_steps,
+                config.antithetic,
+                pilot_seed,
+                control_strike,
+            )
+        else:
+            pilot_engine = EngineConfig(
+                scheme=cell.scheme,
+                n_steps=n_steps,
+                n_paths=paths_per_replicate,
+                expiry=_EXPIRY,
+                antithetic=False,
+            )
+            beta = _fit_rqmc_beta(
+                payoff, params, pilot_engine, bridge, replicates, pilot_seed, control_strike
+            )
 
     pvs: list[float] = []
     ses: list[float] = []
@@ -452,7 +438,6 @@ def _measure_config(
                 expiry=_EXPIRY,
                 antithetic=False,
             )
-            bridge = _BRIDGE_BY_SCHEME[cell.scheme] if config.bridge else frozenset()
             result = price_rqmc(
                 payoff,
                 params,
@@ -461,6 +446,7 @@ def _measure_config(
                 n_replicates=replicates,
                 bridge=bridge,
                 control_strike=control_strike,
+                beta=beta,
             )
         pvs.append(result.pv)
         ses.append(result.std_err)
@@ -493,7 +479,6 @@ def run_cell(
     replicates: int,
     paths_per_replicate: int,
     base_seed: int,
-    max_batch_bytes: int,
     n_steps: int,
 ) -> list[ConfigResult]:
     """Measure every applicable configuration at `cell` and return one `ConfigResult` per
@@ -508,7 +493,6 @@ def run_cell(
             replicates=replicates,
             paths_per_replicate=paths_per_replicate,
             base_seed=base_seed,
-            max_batch_bytes=max_batch_bytes,
             n_steps=n_steps,
         )
         for c in configs
@@ -538,24 +522,45 @@ def run_cell(
 
 
 class InconclusiveVarianceReductionError(ValueError):
-    """Raised by `rank_configs` when a cell's grid cannot support a variance-reduction claim:
-    either no configuration beats the denominator, or every configuration ties within its own
-    measurement precision (module docstring). Carries `rows` so a caller (`run_study`) can still
-    preserve the cell's raw measurements as evidence rather than losing them."""
+    """Raised by `rank_configs` when a cell's grid cannot support a variance-reduction claim.
+    `kind` distinguishes the two genuinely different failures a caller must not collapse
+    together (H2 fix):
 
-    def __init__(self, message: str, rows: Sequence[ConfigResult]) -> None:
+    - `"no_improvement"`: every ratio <= 1 -- nothing beats the denominator, the cell is a real
+      failure.
+    - `"top_tied"`: at least one configuration beats the denominator, but the top-ranked
+      configurations are indistinguishable at this cell's measurement precision -- the
+      variance-reduction claim STANDS, only the "which config wins" claim is unresolved. `tied`
+      carries every configuration within the chained tie at the top (descending ratio order).
+
+    Carries `rows` so a caller (`run_study`) can still preserve the cell's raw measurements as
+    evidence rather than losing them either way."""
+
+    def __init__(
+        self,
+        message: str,
+        rows: Sequence[ConfigResult],
+        *,
+        kind: Literal["no_improvement", "top_tied"],
+        tied: Sequence[ConfigResult] = (),
+    ) -> None:
         super().__init__(message)
         self.rows = rows
+        self.kind = kind
+        self.tied = tuple(tied)
 
 
 def rank_configs(rows: Sequence[ConfigResult]) -> ConfigResult:
     """The best (highest `ratio_to_denominator`) non-denominator configuration among `rows` (one
     cell's configurations). Raises `InconclusiveVarianceReductionError` (never falls back) if:
 
-    1. No configuration improves on the denominator: every ratio <= 1.
-    2. Every configuration ties: the spread between the best and worst ratio is smaller than
-       their combined measurement precision (`ratio_rel_precision`, ~13% at T=32) -- the grid
-       cannot distinguish between them.
+    1. No configuration improves on the denominator: every ratio <= 1 (`kind="no_improvement"`).
+    2. The TOP TWO configurations tie: the spread between the best and the RUNNER-UP ratio is
+       smaller than their combined measurement precision (`ratio_rel_precision`, ~13% at T=32)
+       (`kind="top_tied"`). Comparing best-vs-runner-up, not best-vs-worst, is deliberate (H2
+       fix): a low outlier elsewhere in the grid widens the best-vs-worst spread and disarms a
+       best-vs-worst guard exactly where the top two are inseparable -- the case this guard
+       exists to catch.
     """
     candidates = [r for r in rows if r.config_id != 1]
     if not candidates:
@@ -566,26 +571,40 @@ def rank_configs(rows: Sequence[ConfigResult]) -> ConfigResult:
             "no configuration improves on the denominator: every ratio <= 1 among "
             f"{[c.config_label for c in candidates]}",
             rows,
+            kind="no_improvement",
         )
 
-    best = max(candidates, key=lambda c: c.ratio_to_denominator)
-    worst = min(candidates, key=lambda c: c.ratio_to_denominator)
-    if len(candidates) > 1:
-        spread = best.ratio_to_denominator - worst.ratio_to_denominator
+    ranked = sorted(candidates, key=lambda c: c.ratio_to_denominator, reverse=True)
+    if len(ranked) > 1:
+        best, runner_up = ranked[0], ranked[1]
         tol = (
             best.ratio_to_denominator * best.ratio_rel_precision
-            + worst.ratio_to_denominator * worst.ratio_rel_precision
+            + runner_up.ratio_to_denominator * runner_up.ratio_rel_precision
         )
-        if spread < tol:
+        if (best.ratio_to_denominator - runner_up.ratio_to_denominator) < tol:
+            # Chain the tie past the runner-up too, so a 3-way (or wider) tie at the top is
+            # reported in full rather than truncated at two.
+            tied = [ranked[0]]
+            for c in ranked[1:]:
+                pair_tol = (
+                    tied[-1].ratio_to_denominator * tied[-1].ratio_rel_precision
+                    + c.ratio_to_denominator * c.ratio_rel_precision
+                )
+                if (tied[-1].ratio_to_denominator - c.ratio_to_denominator) < pair_tol:
+                    tied.append(c)
+                else:
+                    break
             raise InconclusiveVarianceReductionError(
-                "every configuration ties: the spread between the best "
-                f"({best.config_label}={best.ratio_to_denominator:.3f}) and worst "
-                f"({worst.config_label}={worst.ratio_to_denominator:.3f}) configuration "
-                f"({spread:.3f}) is smaller than their combined measurement precision "
-                f"({tol:.3f}) -- this cell cannot distinguish between configurations",
+                "top configurations are indistinguishable: "
+                f"{tied[0].config_label}={tied[0].ratio_to_denominator:.3f} vs "
+                f"{tied[-1].config_label}={tied[-1].ratio_to_denominator:.3f} is smaller than "
+                "their combined measurement precision -- the denominator-beating claim stands "
+                "but the winner cannot be named",
                 rows,
+                kind="top_tied",
+                tied=tied,
             )
-    return best
+    return ranked[0]
 
 
 @dataclass(frozen=True)
@@ -594,7 +613,7 @@ class CellReport:
     configs: list[ConfigResult]
     best: ConfigResult | None
     error: str | None
-    liveness: AutocallLiveness | None = None
+    tied: tuple[ConfigResult, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -609,7 +628,6 @@ def run_study(
     replicates: int = DEFAULT_REPLICATES,
     paths_per_replicate: int = DEFAULT_PATHS_PER_REPLICATE,
     base_seed: int = DEFAULT_SEED,
-    max_batch_bytes: int = DEFAULT_MAX_BATCH_BYTES,
     n_steps: int = DEFAULT_N_STEPS,
     cells: Sequence[Cell] | None = None,
     verbose: bool = True,
@@ -629,31 +647,24 @@ def run_study(
             replicates=replicates,
             paths_per_replicate=paths_per_replicate,
             base_seed=base_seed,
-            max_batch_bytes=max_batch_bytes,
             n_steps=n_steps,
         )
         try:
             best: ConfigResult | None = rank_configs(rows)
             error: str | None = None
+            tied: tuple[ConfigResult, ...] = ()
         except InconclusiveVarianceReductionError as exc:
             best = None
-            error = str(exc)
+            if exc.kind == "top_tied":
+                # Denominator-beating claim stands (H2 fix) -- not an error, just an unresolved
+                # winner; preserved separately from a real "nothing improves" failure.
+                tied = exc.tied
+                error = None
+            else:
+                tied = ()
+                error = str(exc)
 
-        liveness: AutocallLiveness | None = None
-        if cell.product == "autocallable":
-            liveness_n_paths = replicates * paths_per_replicate
-            liveness_seed = _sub_seed(base_seed, cell.label, "liveness")
-            liveness = _measure_autocall_liveness(
-                cell.underlying,
-                _PARAMS[cell.underlying],
-                n_steps=n_steps,
-                n_paths=liveness_n_paths,
-                seed=liveness_seed,
-            )
-
-        cell_reports.append(
-            CellReport(cell=cell, configs=rows, best=best, error=error, liveness=liveness)
-        )
+        cell_reports.append(CellReport(cell=cell, configs=rows, best=best, error=error, tied=tied))
         if verbose:
             elapsed = time.perf_counter() - start
             print(
@@ -700,17 +711,24 @@ def render_report(
     """Render the study's markdown artifact (written to
     `docs/studies/p2m1-qmc-variance-reduction.md` by `main()`)."""
     rel_precision = 1.0 / math.sqrt(2.0 * (repetitions - 1))
-    n_inconclusive = sum(1 for cr in cell_reports if cr.error is not None)
-    if n_inconclusive == 0:
+    n_no_improvement = sum(1 for cr in cell_reports if cr.error is not None)
+    n_top_tied = sum(1 for cr in cell_reports if cr.tied)
+    if n_no_improvement == 0:
         headline = (
-            "**Every swept cell found a configuration that measurably beats the pseudo-random "
-            "denominator.** See Variance reduction achieved for the per-cell winners."
+            "**Every swept cell found a configuration that measurably beats the "
+            "pseudo-random denominator.**"
         )
+        if n_top_tied:
+            headline += (
+                f" {n_top_tied} cell(s) could not resolve a single winner among the top "
+                "configurations (tied within measurement precision) -- the improvement claim "
+                "stands regardless; see Cell results."
+            )
     else:
         headline = (
-            f"**{n_inconclusive}/{len(cell_reports)} cell(s) INCONCLUSIVE** (see Cell results "
-            "for the raw evidence each preserved) -- `rank_configs` raised rather than falling "
-            "back to a wall-time or best-effort pick."
+            f"**{n_no_improvement}/{len(cell_reports)} cell(s) INCONCLUSIVE** (nothing beat the "
+            "denominator; see Cell results for the raw evidence each preserved) -- "
+            "`rank_configs` raised rather than falling back to a wall-time or best-effort pick."
         )
 
     lines: list[str] = [
@@ -724,12 +742,15 @@ def render_report(
         "",
         f"- base seed: `{manifest.seed}`",
         f"- paths per replicate: `{manifest.n_paths}`",
+        f"- repetitions (T): `{repetitions}`",
         f"- git_sha: `{manifest.git_sha}`",
         f"- params_hash: `{manifest.params_hash}`",
         f"- run_id: `{manifest.run_id}`",
         "- NOTE: `manifest.engine` reflects configuration 4 (RQMC+bridge, QE) only -- the "
         "manifest schema has one `[engine]` table; this study sweeps six configurations per "
-        "cell (see Configurations compared / Cell results below).",
+        "cell (see Configurations compared / Cell results below). `repetitions` is recorded "
+        "here rather than in `manifest.params` (typed `Mapping[str, Mapping[str, float]]` of "
+        "per-underlying Heston params in `provenance.py`, which this study does not modify).",
         "",
         "## Measurement method",
         "",
@@ -739,8 +760,12 @@ def render_report(
         "each (cell, configuration) runs `T` independent repetitions at the identical total "
         "path budget `B`, and `rmse = std(repetition pvs, ddof=1)` -- free of that bias -- is "
         "the error measure this study actually ranks on. The headline ratio is "
-        "`rmse_denominator / rmse_config`; `mean_formula_se / rmse` (SE calibration) reports "
-        "the bias actually measured on this run's own configuration.",
+        "`rmse_denominator / rmse_config`; `mean_formula_se / rmse` (SE calibration, a column "
+        "below) reports the bias actually measured on this run's own configuration. "
+        "`rank_configs` requires the TOP TWO ratios (not best-vs-worst) to separate by more "
+        "than their combined measurement precision before naming a single winner; a cell that "
+        "beats the denominator but cannot separate its top configurations is reported as "
+        "TOP-TIED, not as a failure.",
         "",
         "## Configurations compared",
         "",
@@ -753,122 +778,82 @@ def render_report(
     lines.append("")
 
     lines += [
-        "## Variance reduction achieved",
+        "## Cell results",
         "",
-        f"Headline ratio `rmse_denominator / rmse_config` per cell/config, at T={repetitions} "
-        f"repetitions (relative precision +/-{rel_precision * 100:.0f}%, `1/sqrt(2*(T-1))`). "
-        "The autocallable is the highest-dimensional, most discontinuous payoff swept here "
-        "(early redemption truncates the path, unlike the barrier's smoother survival weight) "
-        "-- RQMC's advantage is EXPECTED to be smaller on that cell than on vanilla, and that is "
-        "reported as a finding, not adjusted toward a larger number.",
+        f"Every (cell, config) measured at T={repetitions} repetitions (ratio relative "
+        f"precision +/-{rel_precision * 100:.0f}%, `1/sqrt(2*(T-1))`). `ratio` is "
+        "`rmse_denominator / rmse_config`; `calib` is `mean_formula_se / rmse` (1.0 = honest "
+        "formula SE, below 1.0 = optimistic). The autocallable is the highest-dimensional, "
+        "most discontinuous payoff swept here -- RQMC's advantage is EXPECTED to be smaller on "
+        "that cell than on vanilla, reported as a finding, not adjusted toward a larger number.",
         "",
-        "| cell | config | ratio | best? |",
-        "|---|---|---|---|",
+        "| cell | config | ratio | calib | rmse | mean_formula_se | T | outcome |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for cr in cell_reports:
+        tied_ids = {c.config_id for c in cr.tied}
         for cfg in cr.configs:
-            marker = "<- BEST" if cr.best is not None and cfg.config_id == cr.best.config_id else ""
+            if cr.best is not None and cfg.config_id == cr.best.config_id:
+                outcome = "<- BEST"
+            elif cfg.config_id in tied_ids:
+                outcome = "<- TOP-TIED"
+            else:
+                outcome = ""
             lines.append(
                 f"| {cr.cell.label} | {cfg.config_label} | "
                 f"{cfg.ratio_to_denominator:.2f}x +/- {cfg.ratio_rel_precision * 100:.0f}% | "
-                f"{marker} |"
+                f"{cfg.calibration_factor:.3f} | {cfg.rmse:.5f} | {cfg.mean_formula_se:.5f} | "
+                f"{cfg.repetitions} | {outcome} |"
             )
         if cr.error is not None:
-            lines.append(f"| {cr.cell.label} | **INCONCLUSIVE** | {cr.error} | |")
+            lines.append(f"| {cr.cell.label} | **INCONCLUSIVE** | {cr.error} | | | | | |")
+        elif cr.tied:
+            tied_labels = ", ".join(c.config_label for c in cr.tied)
+            lines.append(
+                f"| {cr.cell.label} | **TOP-TIED** | top configurations indistinguishable at "
+                f"T={repetitions}: {tied_labels} | | | | | |"
+            )
     lines.append("")
 
     lines += [
-        "## Bridge contribution",
+        "## Mechanism ratios",
         "",
-        "`rmse(config 3) / rmse(config 4)`: isolates the Brownian bridge's own contribution to "
-        "RQMC's variance reduction (both configurations are RQMC, no control variate).",
+        "Both isolate one mechanism's own contribution, divided from the ratios above: bridge "
+        "contribution is `rmse(3)/rmse(4)` (both RQMC, no control variate); control-variate "
+        "contribution (barrier cells only) is `rmse(4)/rmse(5)` under RQMC and `rmse(2)/rmse(6)` "
+        "without RQMC.",
         "",
-        "| cell | ratio |",
-        "|---|---|",
+        "| cell | bridge (3 vs 4) | cv under RQMC (4 vs 5) | cv without RQMC (2 vs 6) |",
+        "|---|---|---|---|",
     ]
     for cr in cell_reports:
         by_id = {c.config_id: c for c in cr.configs}
-        if 3 in by_id and 4 in by_id and by_id[4].rmse > 0.0:
-            ratio = by_id[3].rmse / by_id[4].rmse
-            lines.append(f"| {cr.cell.label} | {ratio:.2f}x +/- {rel_precision * 100:.0f}% |")
-    lines.append("")
-
-    lines += [
-        "## Control-variate contribution",
-        "",
-        "Barrier cells only. `rmse(4)/rmse(5)` isolates the control variate's effect UNDER "
-        "RQMC; `rmse(2)/rmse(6)` isolates it WITHOUT RQMC (pseudo-random antithetic baseline).",
-        "",
-        "| cell | cv under RQMC (4 vs 5) | cv without RQMC (2 vs 6) |",
-        "|---|---|---|",
-    ]
-    for cr in cell_reports:
-        if cr.cell.product != "barrier":
-            continue
-        by_id = {c.config_id: c for c in cr.configs}
-        r45 = by_id[4].rmse / by_id[5].rmse if by_id[5].rmse > 0.0 else math.inf
-        r26 = by_id[2].rmse / by_id[6].rmse if by_id[6].rmse > 0.0 else math.inf
-        lines.append(
-            f"| {cr.cell.label} | {r45:.2f}x +/- {rel_precision * 100:.0f}% | "
-            f"{r26:.2f}x +/- {rel_precision * 100:.0f}% |"
+        bridge_ratio = (
+            f"{by_id[3].rmse / by_id[4].rmse:.2f}x +/- {rel_precision * 100:.0f}%"
+            if 3 in by_id and 4 in by_id and by_id[4].rmse > 0.0
+            else "--"
         )
+        if cr.cell.product == "barrier":
+            r45 = by_id[4].rmse / by_id[5].rmse if by_id[5].rmse > 0.0 else math.inf
+            r26 = by_id[2].rmse / by_id[6].rmse if by_id[6].rmse > 0.0 else math.inf
+            cv_rqmc = f"{r45:.2f}x +/- {rel_precision * 100:.0f}%"
+            cv_no_rqmc = f"{r26:.2f}x +/- {rel_precision * 100:.0f}%"
+        else:
+            cv_rqmc = cv_no_rqmc = "--"
+        lines.append(f"| {cr.cell.label} | {bridge_ratio} | {cv_rqmc} | {cv_no_rqmc} |")
     lines.append("")
 
-    lines += [
-        "## SE calibration",
-        "",
-        "`mean_formula_se / rmse` per (cell, config) -- the calibration factor measured on this "
-        "run's own configuration, replacing the borrowed spike table in `rqmc_estimate`'s "
-        "docstring. 1.0 means the formula SE is honest; below 1.0 means it is optimistic.",
-        "",
-        "| cell | config | calibration factor |",
-        "|---|---|---|",
-    ]
-    for cr in cell_reports:
-        for cfg in cr.configs:
-            lines.append(f"| {cr.cell.label} | {cfg.config_label} | {cfg.calibration_factor:.3f} |")
-    lines.append("")
-
+    peak_estimate = _estimate_peak_bytes(manifest.n_paths, manifest.engine.n_steps)
     lines += [
         "## Peak memory",
         "",
         f"`_PEAK_ARRAY_RATIO = {_PEAK_ARRAY_RATIO}` (tracemalloc-measured, see "
         "`exo/tests/test_qmc_memory.py` and this module's own comment on the constant): peak "
         "bytes for one `price_rqmc`/`simulate()` call is bounded by `_PEAK_ARRAY_RATIO * "
-        "n_paths * (n_steps + 1) * 8`. This study refuses to run any (cell, configuration) "
-        "whose estimated peak exceeds `--max-batch-bytes` rather than batching within a "
-        "repetition -- at this study's defaults, estimated peak per call stays under 300 MB, "
-        "far below the 800 MB default ceiling.",
+        "n_paths * (n_steps + 1) * 8` -- "
+        f"{peak_estimate / 1e6:.0f} MB at this run's `n_paths`/`n_steps`.",
         "",
-        "## Cell results",
-        "",
-        "Raw per-(cell, config) measurements: `rmse` is the honest empirical spread over `T` "
-        "repetitions; `mean_formula_se` is the mean of each repetition's own reported standard "
-        "error.",
-        "",
-        "| cell | config | rmse | mean_formula_se | ratio | repetitions |",
-        "|---|---|---|---|---|---|",
     ]
-    for cr in cell_reports:
-        if cr.liveness is not None:
-            lv = cr.liveness
-            obs_str = ", ".join(f"t={t:g}" for t in lv.observations)
-            redeem_str = ", ".join(f"{x:.3f}" for x in lv.redeem_fraction)
-            coupon_str = ", ".join(f"{x:.3f}" for x in lv.coupon_fraction)
-            lines.append(
-                f"_{cr.cell.label} liveness check (product must be genuinely live, not "
-                f"G3b's degenerate identity fixture -- see `_autocallable`'s docstring): "
-                f"observations = [{obs_str}]; redeem-at-obs fraction = [{redeem_str}]; "
-                f"coupon-at-obs fraction = [{coupon_str}]; never-redeemed fraction = "
-                f"{lv.never_redeemed_fraction:.3f}_",
-            )
-        for cfg in cr.configs:
-            lines.append(
-                f"| {cr.cell.label} | {cfg.config_label} | {cfg.rmse:.5f} | "
-                f"{cfg.mean_formula_se:.5f} | {cfg.ratio_to_denominator:.3f} | "
-                f"{cfg.repetitions} |"
-            )
-    lines.append("")
     return "\n".join(lines)
 
 
@@ -889,7 +874,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="base seed")
     parser.add_argument("--out", type=Path, default=DEFAULT_REPORT_PATH)
     parser.add_argument("--manifest-dir", type=Path, default=DEFAULT_MANIFEST_DIR)
-    parser.add_argument("--max-batch-bytes", type=int, default=DEFAULT_MAX_BATCH_BYTES)
     args = parser.parse_args(argv)
 
     result = run_study(
@@ -897,7 +881,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         replicates=args.replicates,
         paths_per_replicate=args.paths_per_replicate,
         base_seed=args.seed,
-        max_batch_bytes=args.max_batch_bytes,
     )
     report = render_report(result.cell_reports, result.manifest, repetitions=args.repetitions)
 
