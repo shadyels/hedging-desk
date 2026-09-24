@@ -26,12 +26,15 @@ package relies on for correctness.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
 
 from exo.models.heston import PathBundle
+
+_MIN_RQMC_REPLICATES = 8
 
 
 @dataclass(frozen=True)
@@ -148,3 +151,73 @@ def mc_estimate(bundle: PathBundle, discounted_payoff: NDArray[np.float64]) -> P
         std_err = float(discounted_payoff.std(ddof=1) / math.sqrt(n_total))
 
     return PriceResult(pv=pv, std_err=std_err, n_paths=n_total)
+
+
+def rqmc_estimate(replicate_pvs: Sequence[float], *, n_paths_per_replicate: int) -> PriceResult:
+    """Estimate a price and standard error from `R` independent RQMC scramble replicates.
+
+    Each element of `replicate_pvs` is one scramble's own price (a scalar mean over
+    `n_paths_per_replicate` low-discrepancy paths, e.g. one `price_rqmc` replicate).
+    `pv` is the mean of the replicate means; `std_err` is the between-replicate sample
+    standard error, `std(replicate_pvs, ddof=1) / sqrt(R)` -- the RQMC analogue of
+    `mc_estimate`'s pair-mean SE: each *replicate* is treated as one independent draw,
+    never the paths within it (`mc_estimate` already refuses a low-discrepancy bundle
+    for exactly this reason).
+
+    R >= 8 is enforced below, but that floor is not generous -- it is the loosest
+    floor this estimator can defend. Measured directly against scipy's Sobol
+    (d=4, n=2**10, smooth integrand, 400 trials): scramble replicates are genuinely
+    independent (mean off-diagonal correlation ~ -0.005), but the replicate-mean
+    distribution has excess kurtosis ~= 65 (Gaussian = 0). With tails that heavy, the
+    *sample* standard deviation at small R badly underestimates the true spread, and
+    the reported SE inherits that bias -- always in the OPTIMISTIC (too-tight)
+    direction, i.e. the unsafe one: it makes every `0 < se < tol_abs` gate easier to
+    pass, not harder.
+
+        R     reported SE / true spread
+        8     0.482
+        16    0.623
+        32    0.758
+        64    0.849
+        128   0.916
+        256   0.944
+
+    (A pseudo-random control run through the identical harness reads ~1.038, so the
+    harness itself is sound -- this bias is a real property of the RQMC estimator,
+    not a measurement artifact.)
+
+    Guidance: gates use R >= 64 (~15% optimistic); the convergence study uses
+    R >= 128 (~8% optimistic). R -- the replicate count -- is the only knob that
+    fixes this. Raising `n_paths_per_replicate` (paths *within* a replicate) does
+    NOT: it tightens each replicate's own quasi-Monte-Carlo error, but says nothing
+    about how well 8, 16, or 32 replicate MEANS approximate their own population
+    spread, which is what this bias measures.
+
+    ponytail: the between-replicate SE returned here is reported UNCORRECTED for the
+    small-R bias measured above -- optimistic by a factor that depends on both R and
+    the payoff's tail behaviour, and that factor is disclosed, not removed. Ceiling:
+    ~15% optimistic at R=64, ~8% at R=128, per the measured table. Upgrade: a
+    bias-corrected or bootstrap standard error. Trigger: a gate or a published number
+    where an 8% optimistic SE is not acceptable -- P2.M4, the first milestone that
+    publishes `pv_std_err_e9` to the bus.
+
+    Raises `ValueError` if `R < 8`: below that floor the reported SE is more than 2x
+    optimistic (0.482 vs the ~0.85 "usable" region above), which is not a defensible
+    error bar at any tolerance.
+    """
+    n_replicates = len(replicate_pvs)
+    if n_replicates < _MIN_RQMC_REPLICATES:
+        raise ValueError(
+            f"rqmc_estimate needs at least {_MIN_RQMC_REPLICATES} replicates to report a "
+            f"usable standard error (measured: R=8 SE is ~2x optimistic vs. true spread; "
+            f"see this function's docstring), got R={n_replicates}"
+        )
+    values = np.asarray(replicate_pvs, dtype=np.float64)
+    pv = float(values.mean())
+    std_err = float(values.std(ddof=1) / math.sqrt(n_replicates))
+    return PriceResult(
+        pv=pv,
+        std_err=std_err,
+        n_paths=n_paths_per_replicate * n_replicates,
+        n_replicates=n_replicates,
+    )

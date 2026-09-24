@@ -15,7 +15,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from exo.models.estimator import PriceResult, mc_estimate
+from exo.models.estimator import PriceResult, mc_estimate, rqmc_estimate
 from exo.models.heston import PathBundle, simulate
 from exo.models.params import EngineConfig, HestonParams
 from exo.models.rng import PseudoRandomSource
@@ -239,3 +239,27 @@ def test_combine_still_works_for_two_plain_results() -> None:
     assert combined.pv == pytest.approx(11.0)
     assert combined.std_err == pytest.approx(0.5 / math.sqrt(2))
     assert combined.n_paths == 2000
+
+
+def test_rqmc_estimate_basic() -> None:
+    values = [1.0, 3.0, 5.0, 3.0, 1.0, 3.0, 5.0, 3.0]
+    result = rqmc_estimate(values, n_paths_per_replicate=100)
+    assert result.pv == pytest.approx(3.0)
+    assert result.n_paths == 800
+    assert result.n_replicates == 8
+    expected_se = float(np.std(values, ddof=1) / math.sqrt(8))
+    assert result.std_err == pytest.approx(expected_se)
+
+
+def test_rqmc_estimate_raises_below_replicate_floor() -> None:
+    values = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+    with pytest.raises(ValueError, match="8"):
+        rqmc_estimate(values, n_paths_per_replicate=100)
+
+
+def test_rqmc_estimate_result_cannot_be_combined() -> None:
+    values = [1.0, 3.0, 5.0, 3.0, 1.0, 3.0, 5.0, 3.0]
+    result = rqmc_estimate(values, n_paths_per_replicate=100)
+    other = PriceResult(pv=2.0, std_err=0.1, n_paths=10)
+    with pytest.raises(ValueError, match="n_replicates"):
+        result.combine(other)
