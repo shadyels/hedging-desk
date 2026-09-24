@@ -41,6 +41,11 @@ class PriceResult:
     pv: float
     std_err: float
     n_paths: int
+    n_replicates: int | None = None
+    """`None` means this result was produced by `mc_estimate` from independent draws.
+    An int means it was produced by `rqmc_estimate` from that many scramble
+    replicates (Slice 3 T4) -- see `combine`'s guard below for why the two must
+    never be pooled by the same formula."""
 
     def combine(self, other: PriceResult) -> PriceResult:
         """Pool two independent PriceResults — NOT a re-simulation.
@@ -67,7 +72,21 @@ class PriceResult:
         have EQUAL std_err (the common case of equal-size batches from the same engine config),
         it reduces exactly to the plain average of the two means and `std_err / sqrt(2)` -- the
         one case where the two weighting schemes coincide.
+
+        Raises `ValueError` if either operand has `n_replicates is not None` (Slice 3 T1):
+        this pools by RAW PATH COUNT, which assumes the pooled units are independent samples
+        of the same distribution -- precisely the assumption RQMC violates. Pooling replicate
+        results this way would silently reconstruct the optimistic standard error this task
+        exists to outlaw. Batching under RQMC is done by accumulating more replicate means and
+        calling `rqmc_estimate` once, not by `combine()`.
         """
+        if self.n_replicates is not None or other.n_replicates is not None:
+            raise ValueError(
+                "PriceResult.combine cannot pool RQMC replicate results (n_replicates is not "
+                "None): combine() weights by raw path count, which assumes independent samples "
+                "of the same distribution -- an assumption RQMC draws violate. Accumulate more "
+                "replicate means and call rqmc_estimate once instead."
+            )
         n = self.n_paths + other.n_paths
         w_self = self.n_paths / n
         w_other = other.n_paths / n
@@ -83,7 +102,21 @@ def mc_estimate(bundle: PathBundle, discounted_payoff: NDArray[np.float64]) -> P
     (one value per simulated path). Under antithetics, the estimate collapses to
     pair means first (see module docstring); otherwise it is the plain sample
     mean/SE.
+
+    Raises `ValueError` if `bundle.low_discrepancy` is true (Slice 3 T1): low-discrepancy
+    (RQMC) draws are not independent samples, so the plain sample standard error computed
+    here is invalid for them -- the structural twin of this module's antithetic pair-mean-vs-
+    naive-SE issue, except RQMC fails in the UNSAFE direction (the naive SE is optimistic, not
+    conservative), so this is a hard guard rather than a warning. Use `rqmc_estimate` instead.
     """
+    if bundle.low_discrepancy:
+        raise ValueError(
+            "mc_estimate cannot be used on a low-discrepancy (RQMC) PathBundle: the plain "
+            "sample standard error assumes independent draws, which RQMC violates -- it would "
+            "silently report an optimistic (too-tight) error bar, making every 3-SE gate "
+            "falsely easier to pass. Use rqmc_estimate instead."
+        )
+
     n_total = discounted_payoff.shape[0]
     if n_total != bundle.S.shape[0]:
         raise ValueError(

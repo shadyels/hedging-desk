@@ -16,6 +16,7 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
+from exo.models.control_variate import ControlVariate, apply_control
 from exo.models.estimator import PriceResult, mc_estimate
 from exo.models.heston import PathBundle, simulate
 from exo.models.params import EngineConfig, HestonParams
@@ -29,13 +30,28 @@ def discount(ledger: CashflowLedger, *, r: float) -> NDArray[np.float64]:
     return result
 
 
-def price_from_bundle(payoff: Payoff, bundle: PathBundle, *, r: float) -> PriceResult:
+def price_from_bundle(
+    payoff: Payoff,
+    bundle: PathBundle,
+    *,
+    r: float,
+    control: ControlVariate | None = None,
+    beta: float | None = None,
+) -> PriceResult:
     """Price `payoff` against an already-simulated `bundle`, discounting at flat rate `r`.
 
     Row order is preserved end to end: `payoff.cashflows` returns a ledger indexed by
     `bundle`'s own path order, `discount` reduces it to one `(n_paths,)` array without
     reordering, and that array is handed to `mc_estimate(bundle, ...)` unchanged -- the
     antithetic pair-mean standard error is positional and would silently mispair otherwise.
+    `control` is applied to this already-discounted vector, elementwise, before
+    `mc_estimate`, so that contract is untouched.
+
+    # ponytail: `beta` is supplied from outside, never fitted on the priced sample, and
+    # carries no degrees-of-freedom correction (none is valid under RQMC -- see
+    # `estimate_beta`'s docstring). Ceiling: beta is only as good as whatever produced it --
+    # a poor beta costs variance, never bias. Upgrade: a larger pilot sample. Trigger: the
+    # study showing a CV ratio below ~1.2 at a cell with high payoff/control correlation.
 
     Requires `bundle.t[-1] == payoff.expiry` EXACTLY, for the same reason `price()` requires
     `engine.expiry == payoff.expiry` exactly (see `price()`'s docstring) -- `bundle.t[-1]` is
@@ -59,8 +75,17 @@ def price_from_bundle(payoff: Payoff, bundle: PathBundle, *, r: float) -> PriceR
             "payoff against a bundle simulated to a different horizon would silently price "
             "the wrong contract."
         )
+    if control is not None and beta is None:
+        raise ValueError(
+            "price_from_bundle: beta is required when control is supplied -- beta must come "
+            "from a disjoint pilot sample (estimate_beta), never fitted on the sample being "
+            "priced. See estimate_beta's docstring."
+        )
     ledger = payoff.cashflows(bundle)
     discounted = discount(ledger, r=r)
+    if control is not None:
+        assert beta is not None  # guarded above; narrows for mypy
+        discounted = apply_control(discounted, control, beta)
     return mc_estimate(bundle, discounted)
 
 

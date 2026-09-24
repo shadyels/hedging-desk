@@ -71,6 +71,15 @@ class PathBundle:
     cells where the correction was inadmissible and fell back to the uncorrected
     K0. It is `None` for "euler-ft", which has no such correction to fall back
     from.
+
+    `low_discrepancy` (Slice 3 T1) travels with the paths for the same reason
+    `antithetic` does: it is stamped from `rng.low_discrepancy` and tells
+    `mc_estimate` whether the plain sample standard error is even valid for this
+    bundle. Quasi-random (Sobol) draws are not independent samples, so the naive
+    SE is optimistic for them -- the RQMC structural twin of the antithetic
+    pair-mean-vs-naive-SE issue documented in estimator.py's module docstring,
+    except RQMC fails in the UNSAFE direction (too-tight, not too-loose), so
+    `mc_estimate` raises rather than silently using the wrong formula.
     """
 
     t: NDArray[np.float64]
@@ -79,6 +88,7 @@ class PathBundle:
     antithetic: bool
     n_pairs: int | None
     qe_fallback_count: int | None
+    low_discrepancy: bool = False
 
 
 def simulate(params: HestonParams, engine: EngineConfig, rng: RandomSource) -> PathBundle:
@@ -155,6 +165,7 @@ def simulate(params: HestonParams, engine: EngineConfig, rng: RandomSource) -> P
         antithetic=engine.antithetic,
         n_pairs=n_pairs,
         qe_fallback_count=qe_fallback_count,
+        low_discrepancy=rng.low_discrepancy,
     )
 
 

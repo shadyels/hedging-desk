@@ -165,11 +165,36 @@ def params_hash(obj: Mapping[str, object]) -> str:
 
 @dataclass(frozen=True)
 class EngineSettings:
-    """The `[engine]` subtable of a run manifest."""
+    """The `[engine]` subtable of a run manifest.
+
+    `sampler`, `n_replicates`, `bridge_streams` are additive (schema_version 2, T7): a randomized
+    QMC run (scrambled Sobol, Brownian-bridge dimension ordering) is not reproducible from
+    `{scheme, n_steps, antithetic}` alone -- it also needs the sampler choice, the scramble
+    replicate count, and which streams were bridged. All three default to their v1-equivalent
+    ("pseudo" Monte Carlo, no replicates, no bridging), so a v1 manifest read under this schema is
+    unchanged.
+    """
 
     scheme: str
     n_steps: int
     antithetic: bool
+    sampler: str = "pseudo"  # "pseudo" | "sobol"
+    n_replicates: int | None = None
+    """Scramble replicate count under RQMC (`sampler="sobol"`); `None` for `pseudo`.
+
+    Deliberately NOT a list of per-replicate scramble seeds: the scramble for replicate `i` is
+    derived from `(seed, i)` alone, so `seed` + `n_replicates` + `sampler` reproduce the run
+    exactly. Do not add a redundant seed list -- it can silently disagree with that derivation.
+
+    Also fixes what `n_paths` means under RQMC: `n_paths` is paths PER REPLICATE, and the total
+    path count is `n_paths * n_replicates`. With `n_replicates is None`, the two coincide, so a
+    v1 manifest's existing meaning of `n_paths` is unchanged.
+    """
+    bridge_streams: tuple[str, ...] = ()  # stream names bridged, e.g. ("spot",) under QE
+
+    def __post_init__(self) -> None:
+        if self.n_replicates is not None and self.n_replicates < 1:
+            raise ValueError(f"n_replicates {self.n_replicates} must be >= 1 when not None")
 
 
 @dataclass(frozen=True)
@@ -179,7 +204,7 @@ class RunManifest:
     Seeds are READ FROM the manifest, never derived from time (exo/CLAUDE.md rule 1). TOML shape
     (written under `exo/run-manifests/`, matching `exo.toml`'s `seed_manifest` setting)::
 
-        schema_version = 1
+        schema_version = 2
         run_id      = "2026-09-05T12-00-00Z-a1b2c3d4"
         created_ns  = 1757068800000000000
         git_sha     = "abc...def-dirty"
@@ -192,13 +217,19 @@ class RunManifest:
         scheme = "qe"
         n_steps = 252
         antithetic = true
+        sampler = "pseudo"
+        bridge_streams = []
+        # n_replicates omitted when null (TOML has no null; absent key == None)
 
         [params.AAPL]
         s0 = 187.5
         # ... the eight Heston parameters echoed so params_hash is auditable
+
+    `schema_version=1` (no `sampler`/`n_replicates`/`bridge_streams` in `[engine]`) still reads;
+    `RunManifest.read` fills the three fields with their v1-equivalent defaults. Newly
+    constructed/written manifests default to `schema_version=2`.
     """
 
-    schema_version: int
     run_id: str
     created_ns: int
     git_sha: str
@@ -208,15 +239,18 @@ class RunManifest:
     n_paths: int
     engine: EngineSettings
     params: Mapping[str, Mapping[str, float]]
+    schema_version: int = 2
 
     def __post_init__(self) -> None:
         # P2 (code review 2026-09-06): reject an unknown schema_version at construction time --
         # applies to RunManifest.read() too, since it constructs through this same dataclass --
-        # rather than silently reading a future v2 manifest's fields as if they were v1's.
-        if self.schema_version != 1:
+        # rather than silently reading a future version's fields as if they belonged to a version
+        # this reader understands. T7 (schema_version 2): adds sampler/n_replicates/bridge_streams
+        # to EngineSettings; version 1 (those three absent/defaulted) still reads.
+        if self.schema_version not in (1, 2):
             raise ValueError(
                 f"unsupported schema_version={self.schema_version}: this reader only "
-                "understands schema_version=1"
+                "understands schema_version 1 or 2"
             )
         # Amendment A4: `seed`/`n_paths` are `uint64`/`uint32` in the proto (common.proto). Reject
         # values that would not fit at manifest construction time, not silently at P2.M4's bus
@@ -240,6 +274,11 @@ class RunManifest:
             scheme=engine_raw["scheme"],
             n_steps=engine_raw["n_steps"],
             antithetic=engine_raw["antithetic"],
+            # Additive (T7, schema_version 2): absent on a v1 file, so `.get` falls back to the
+            # v1-equivalent default rather than requiring every old manifest to be rewritten.
+            sampler=engine_raw.get("sampler", "pseudo"),
+            n_replicates=engine_raw.get("n_replicates"),
+            bridge_streams=tuple(engine_raw.get("bridge_streams", ())),
         )
         params_raw = raw.get("params", {})
         params = {symbol: dict(values) for symbol, values in params_raw.items()}
@@ -257,6 +296,17 @@ class RunManifest:
         )
 
     def write(self, path: Path) -> None:
+        engine_doc: dict[str, object] = {
+            "scheme": self.engine.scheme,
+            "n_steps": self.engine.n_steps,
+            "antithetic": self.engine.antithetic,
+            "sampler": self.engine.sampler,
+            "bridge_streams": list(self.engine.bridge_streams),
+        }
+        # TOML has no null; a `None` n_replicates (pseudo/no-replicates runs) is an absent key,
+        # which `read()`'s `.get("n_replicates")` maps back to `None`.
+        if self.engine.n_replicates is not None:
+            engine_doc["n_replicates"] = self.engine.n_replicates
         doc: dict[str, object] = {
             "schema_version": self.schema_version,
             "run_id": self.run_id,
@@ -266,11 +316,7 @@ class RunManifest:
             "params_hash": self.params_hash,
             "seed": self.seed,
             "n_paths": self.n_paths,
-            "engine": {
-                "scheme": self.engine.scheme,
-                "n_steps": self.engine.n_steps,
-                "antithetic": self.engine.antithetic,
-            },
+            "engine": engine_doc,
             "params": {symbol: dict(values) for symbol, values in self.params.items()},
         }
         path.write_text(tomli_w.dumps(doc))
