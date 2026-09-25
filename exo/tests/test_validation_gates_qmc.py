@@ -17,20 +17,24 @@ it touches more paths." R=64 specifically because `rqmc_estimate`'s own SE-calib
 (models/estimator.py docstring) puts the reported SE at ~0.85 of the true between-replicate spread
 at R=64; below that the error bar is materially optimistic (~0.62 of true spread at R=16).
 
-Gates deliberately NOT re-run here, with reasons (unchanged from slice 1/2, sampler-irrelevant):
+Gates deliberately NOT re-run here, with reasons (unchanged from slice 1/2, sampler-irrelevant),
+classified by the PROPERTY each one asserts rather than by any variance worry -- scrambled RQMC is
+unbiased, so a poor variance ratio cannot redden any 3-SE bias conjunct on its own:
 
-- G3a (certain call at first observation, se == 0 exactly) -- an exact identity. Under RQMC every
-  replicate mean is equal too, so it would pass trivially. Zero information.
-- G5 (KO + KI == vanilla per path) -- a per-path algebraic identity, sampler-irrelevant.
-- G4 companion (CONTINUOUS_BRIDGE vs DISCRETE paired difference) -- tests a monitoring
-  approximation, not a sampler.
-- X (QE vs Euler on a fine grid, n_steps=500) -- scheme agreement is sampler-independent, and it
-  is the most expensive gate in the suite. The slice-3 study covers both schemes instead.
-- G3b (autocallable short-put decomposition) -- MEASURED IN THE STUDY, NOT GATED HERE. The
-  autocallable is the highest-dimensional, most discontinuous payoff in the slice and is exactly
-  where RQMC's advantage is expected to degrade; a poor ratio there is a finding to report, not a
-  red CI. Its correctness is already gated under pseudo-random (G3b itself); the RQMC ledger/row-
-  order plumbing is covered by G4-Q here.
+- G3a (certain call at first observation, se == 0 exactly) -- asserts an EXACT PER-PATH IDENTITY.
+  Under RQMC every replicate mean is equal too, so it would pass trivially. Zero information.
+- G5 (KO + KI == vanilla per path) -- asserts an EXACT PER-PATH IDENTITY, sampler-irrelevant.
+- G4 companion (CONTINUOUS_BRIDGE vs DISCRETE paired difference) -- asserts a MONITORING
+  APPROXIMATION agreement, not a sampler property.
+- X (QE vs Euler on a fine grid, n_steps=500) -- asserts SCHEME AGREEMENT, which is
+  sampler-independent, and it is the most expensive gate in the suite. The slice-3 study covers
+  both schemes instead.
+
+G3b (autocallable short-put decomposition) is NOT in this exclusion list: it is gated here as
+G3b-Q, below. `products/autocallable.py`'s ledger is `(n_paths, n_obs)` -- `discount()` applies a
+different factor per column -- while `products/barrier.py`'s is `(n_paths, 1)`, one column at
+expiry; G4-Q above only ever exercises that single-column path. G3b-Q is therefore what covers the
+multi-column RQMC ledger, not G4-Q.
 
 FINDING, and why G1-Q parametrizes n_steps alongside scheme instead of mirroring G1's n_steps=50
 for both arms: full-truncation Euler at n_steps=50 in the Feller-violating regime
@@ -63,11 +67,14 @@ predates RQMC's tighter SE making the gap load-bearing. At n_steps=104 euler-ft 
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from exo.models.analytic import bs_barrier_price, bs_call_price
 from exo.models.heston_cf import heston_vanilla_price
 from exo.models.params import EngineConfig, HestonParams, Scheme
+from exo.products.autocallable import Autocallable
 from exo.products.barrier import BarrierOption
 from exo.products.base import Monitoring
 from exo.products.pricer import price_rqmc
@@ -305,4 +312,56 @@ def test_g4_q_cv_down_and_out_call_matches_bs_barrier_within_3se() -> None:
     assert abs(result.pv - reference) < 3.0 * result.std_err, (
         f"pv={result.pv}, bs_ref={reference}, off by "
         f"{(result.pv - reference) / result.std_err:.2f} SE"
+    )
+
+
+_G3B_AAPL = HestonParams(
+    s0=187.50, r=0.0425, q=0.0050, v0=0.0400, kappa=1.50, theta=0.0400, xi=0.60, rho=-0.70
+)
+
+
+def test_g3b_q_autocallable_degenerate_short_put_within_3se() -> None:
+    """G3b-Q. RQMC counterpart of G3b (test_validation_gates_products.py): same degenerate
+    fixture (autocall_trigger/coupon_barrier unreachably high at 1e7, protection_barrier ==
+    initial_level == s0), which collapses the terminal leg exactly to a short put struck at s0
+    -- the degenerate fixture is the point here, not a shortcoming to fix, since it is what
+    makes the identity closed-form-exact. This is what exercises the multi-column
+    `(n_paths, n_obs)` ledger under RQMC (`autocallable.py`'s `discount()` applies a different
+    factor per column); G4-Q above only ever exercises `barrier.py`'s single-column
+    `(n_paths, 1)` ledger. No control variate (mirrors G1-Q/G2-Q).
+
+    Measured (R=64, n_paths=1024, n_steps=50, bridge={"spot"}, seed=202):
+        pv=904.763122  se=0.156489  ref=904.864877  z=-0.650
+    """
+    notional = 1000.0
+    s0 = _G3B_AAPL.s0
+    note = Autocallable(
+        underlying="AAPL",
+        notional=notional,
+        observations=(0.5, 1.0),
+        autocall_trigger=1.0e7,
+        coupon_barrier=1.0e7,
+        coupon_rate=0.05,
+        memory=True,
+        protection_barrier=s0,
+        initial_level=s0,
+        expiry=1.0,
+    )
+    engine = EngineConfig(
+        scheme="qe", n_steps=_N_STEPS, n_paths=_N_PATHS, expiry=_EXPIRY, antithetic=False
+    )
+    result = price_rqmc(
+        note, _G3B_AAPL, engine, seed=202, n_replicates=_R, bridge=frozenset({"spot"})
+    )
+    reference = notional * math.exp(-_G3B_AAPL.r * 1.0) - (notional / s0) * heston_vanilla_price(
+        _G3B_AAPL, strike=s0, expiry=1.0, is_call=False
+    )
+
+    tol_abs = 0.8  # same tol_abs as G3b in test_validation_gates_products.py; copied, never
+    # re-measured for the sampler.
+    assert 0.0 < result.std_err < tol_abs, (
+        f"se={result.std_err} is not tight enough to be a meaningful gate (tol_abs={tol_abs})"
+    )
+    assert abs(result.pv - reference) < 3.0 * result.std_err, (
+        f"pv={result.pv}, ref={reference}, off by {(result.pv - reference) / result.std_err:.2f} SE"
     )

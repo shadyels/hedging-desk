@@ -56,7 +56,10 @@ def _discounted_call_payoff(r: float, expiry: float, strike: float, s_t: np.ndar
         # systematic +1 SE offset (measured: 20 seeds x 20,000 antithetic paths, mean z=+1.02,
         # max|z|=2.73, 0/20 failures -- it passes today only because it is 0.27 SE from going
         # red on a seed change), which G1 would then be certifying as converged. Mirrors
-        # `test_validation_gates_qmc.py`'s G1-Q, which already parametrizes this way.
+        # `test_validation_gates_qmc.py`'s G1-Q, which already parametrizes this way. Post-fix,
+        # at n_steps=104 (same 20-seed sweep, 20,000 antithetic paths): mean z=+0.193,
+        # max|z|=1.970, 20/20 -- matches ADR-006 Amendment 6 SS7's reported figures (mean
+        # z=+0.19, max|z|=1.97, 20/20).
         ("euler-ft", 104),
     ],
 )

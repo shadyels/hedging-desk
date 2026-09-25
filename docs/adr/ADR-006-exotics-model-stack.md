@@ -538,6 +538,38 @@ step count a CRN boundary for bump-and-revalue.
 `EngineConfig` and `exo.toml` gain **no sampler knob** in this slice, deliberately — adding one now
 would pre-commit that decision. `extra="forbid"` means a later optional field is purely additive.
 
+### 9. The RQMC gate set, and what each excluded gate was excluded FOR
+
+Recorded because the first cut of this slice got it wrong, and the reason it was wrong generalises.
+
+Slices 1–2 left eight gate functions. Four now have RQMC counterparts — **G1-Q, G2-Q, G4-Q** (plus
+**G4-Q-CV**) and **G3b-Q** — at `R = 64` replicates × 1024 paths, every `tol_abs` copied verbatim from
+its pseudo-random twin. Four are deliberately not re-run, and the justification is now stated as
+*which property each asserts*, not as a guess about how RQMC would fare:
+
+| Excluded | Asserts | Why a sampler cannot change it |
+|---|---|---|
+| G3a, G5 | an exact per-path identity | holds for any point set, by construction |
+| G4 companion | a monitoring approximation (bridge vs discrete) | tests the approximation, not the draws |
+| X | scheme agreement (QE vs Euler) | sampler-independent; and `n_steps=500` means `D = 1000` |
+
+**G3b was initially excluded too, on two premises this ADR's own diff refutes.** The first was that
+its identity was "measured in the study" — it was not: the study deliberately sweeps a *live* Phoenix
+(§5), and its fixture docstring is titled "NOT G3b", precisely because reusing G3b's degenerate
+term sheet would have reduced that cell to a European payoff on `S_T`. The second was that the RQMC
+ledger path was "covered by G4-Q" — but `products/barrier.py` emits a `(n_paths, 1)` ledger while
+`products/autocallable.py` emits `(n_paths, n_obs)`, and `discount()` applies a different factor per
+column. **The multi-column ledger had no RQMC gate at all.** G3b-Q now covers it: measured
+`pv = 904.763`, `se = 0.156`, reference `904.865`, z = −0.65, 20/20 across seeds, comfortably inside
+the copied `tol_abs = 0.8`.
+
+The exclusion reasoning was also a category error worth naming: it worried that "a poor variance
+ratio is a finding, not a red CI". But **G3b gates bias**, and scrambled RQMC is unbiased — a poor
+variance ratio cannot redden a 3-SE bias conjunct at all. It could only have reddened the
+`se < tol_abs` conjunct, and the arithmetic was never close. The general rule: **when a file states a
+strict self-binding rule and then carves out an exception, check whether the carve-out is the case
+most likely to have violated the rule.** Here it was.
+
 ## Consequences (Amendment 6)
 
 - **No new dependency, no wire-format change, no component touched.** `scipy.stats.qmc` and
