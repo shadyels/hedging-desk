@@ -34,7 +34,10 @@ G3b (autocallable short-put decomposition) is NOT in this exclusion list: it is 
 G3b-Q, below. `products/autocallable.py`'s ledger is `(n_paths, n_obs)` -- `discount()` applies a
 different factor per column -- while `products/barrier.py`'s is `(n_paths, 1)`, one column at
 expiry; G4-Q above only ever exercises that single-column path. G3b-Q is therefore what covers the
-multi-column RQMC ledger, not G4-Q.
+multi-column RQMC ledger, not G4-Q -- but only its SHAPE, traversal, and the terminal column's
+discount factor, not per-column factor DIFFERENTIATION: the fixture is degenerate (column 0 is
+identically zero, asserted below), so a wrong factor on column 0 multiplies zero and is invisible
+to this gate.
 
 FINDING, and why G1-Q parametrizes n_steps alongside scheme instead of mirroring G1's n_steps=50
 for both arms: full-truncation Euler at n_steps=50 in the Feller-violating regime
@@ -69,11 +72,14 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import pytest
 
 from exo.models.analytic import bs_barrier_price, bs_call_price
+from exo.models.heston import simulate
 from exo.models.heston_cf import heston_vanilla_price
 from exo.models.params import EngineConfig, HestonParams, Scheme
+from exo.models.rng import PseudoRandomSource
 from exo.products.autocallable import Autocallable
 from exo.products.barrier import BarrierOption
 from exo.products.base import Monitoring
@@ -350,6 +356,16 @@ def test_g3b_q_autocallable_degenerate_short_put_within_3se() -> None:
     engine = EngineConfig(
         scheme="qe", n_steps=_N_STEPS, n_paths=_N_PATHS, expiry=_EXPIRY, antithetic=False
     )
+
+    # Precondition for the closed-form reference below: it is only exact because no path calls or
+    # earns a coupon under this fixture. A cheap pilot bundle (one PseudoRandomSource draw, not a
+    # second RQMC pricing run) checks that directly, so a future fixture drift fails HERE -- not
+    # on the 3-SE conjunct below, where it would look like a pricing/sampler regression instead.
+    pilot_bundle = simulate(_G3B_AAPL, engine, PseudoRandomSource(seed=202, antithetic=False))
+    assert np.all(note.cashflows(pilot_bundle).amounts[:, 0] == 0.0), (
+        "no path may call or earn a coupon"
+    )
+
     result = price_rqmc(
         note, _G3B_AAPL, engine, seed=202, n_replicates=_R, bridge=frozenset({"spot"})
     )

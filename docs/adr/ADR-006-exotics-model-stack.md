@@ -563,6 +563,23 @@ column. **The multi-column ledger had no RQMC gate at all.** G3b-Q now covers it
 `pv = 904.763`, `se = 0.156`, reference `904.865`, z = −0.65, 20/20 across seeds, comfortably inside
 the copied `tol_abs = 0.8`.
 
+**Precisely what G3b-Q covers, since the first statement of this overreached.** The fixture is
+degenerate by design — no path autocalls — so with `n_obs = 2` **column 0 is identically zero** and
+only the terminal column carries value. G3b-Q therefore pins multi-column *shape*, *traversal*, and
+the *terminal* column's discount factor (a wrong factor there, or a `t`→column off-by-one, goes red
+against `notional·exp(−r·1.0)`). It does **not** pin per-column factor *differentiation*: a wrong
+factor on column 0 multiplies zero and is invisible.
+
+That residual gap is **inherited, not introduced by this slice, and no RQMC gate could have closed
+it.** No gate in the suite exercises two *simultaneously non-zero* columns at different dates — G3a
+pins column 0 (every path calls at observation 1), G3b pins the last, G4 and G5 are single-column by
+construction — and `discount()` is sampler-independent shared code, so a new sampler's mirror of an
+existing test structurally cannot cover more than its twin. Inventing a richer autocallable gate
+would need a closed form that does not exist, which is exactly why §5's study measures a live Phoenix
+instead. **Owner: P2.M2/P2.M3** — the mini future's daily financing accrual and TARF's periodic
+fixings are the first payoffs that routinely produce simultaneously-dated non-zero columns, and the
+first for which this stops being harmless.
+
 The exclusion reasoning was also a category error worth naming: it worried that "a poor variance
 ratio is a finding, not a red CI". But **G3b gates bias**, and scrambled RQMC is unbiased — a poor
 variance ratio cannot redden a 3-SE bias conjunct at all. It could only have reddened the
