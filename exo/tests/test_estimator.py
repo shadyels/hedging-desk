@@ -10,11 +10,12 @@ measured numbers from the spec's planning spike (naive 0.021084 vs pair-mean
 """
 
 import math
+from dataclasses import replace
 
 import numpy as np
 import pytest
 
-from exo.models.estimator import PriceResult, mc_estimate
+from exo.models.estimator import PriceResult, mc_estimate, rqmc_estimate
 from exo.models.heston import PathBundle, simulate
 from exo.models.params import EngineConfig, HestonParams
 from exo.models.rng import PseudoRandomSource
@@ -184,3 +185,81 @@ def test_mc_estimate_raises_on_single_path_non_antithetic() -> None:
     payoff = np.array([1.0])
     with pytest.raises(ValueError, match="at least 2"):
         mc_estimate(bundle, payoff)
+
+
+def test_mc_estimate_raises_on_low_discrepancy_bundle() -> None:
+    """Slice 3 T1: RQMC draws are not independent, so the plain sample SE (what
+    mc_estimate computes) is invalid for them -- and optimistic, which would make
+    every 3-SE gate falsely easier to pass. mc_estimate must refuse such a bundle
+    and point callers at rqmc_estimate (T4) instead."""
+    bundle = _antithetic_bundle(n_paths=4, n_steps=3, seed=1)
+    low_discrepancy_bundle = replace(bundle, low_discrepancy=True)
+    payoff = np.array([1.0, 2.0, 3.0, 4.0])
+    with pytest.raises(ValueError, match="rqmc_estimate"):
+        mc_estimate(low_discrepancy_bundle, payoff)
+
+
+def test_mc_estimate_unchanged_on_normal_bundle() -> None:
+    """Regression guard: a bundle with low_discrepancy=False (the default) must still
+    return exactly what it did before this task's guard was added."""
+    params = HestonParams(
+        s0=100.0, r=0.02, q=0.01, v0=0.04, kappa=1.5, theta=0.04, xi=0.6, rho=-0.7
+    )
+    engine = EngineConfig(scheme="qe", n_steps=5, n_paths=100, expiry=1.0, antithetic=False)
+    bundle = simulate(params, engine, PseudoRandomSource(seed=5, antithetic=False))
+    assert bundle.low_discrepancy is False
+    payoff = np.maximum(bundle.S[:, -1] - 100.0, 0.0)
+
+    result = mc_estimate(bundle, payoff)
+    expected_se = float(payoff.std(ddof=1) / math.sqrt(payoff.shape[0]))
+    assert result.std_err == pytest.approx(expected_se)
+    assert result.pv == pytest.approx(float(payoff.mean()))
+
+
+def test_combine_raises_when_left_operand_has_replicates() -> None:
+    replicate_result = PriceResult(pv=1.0, std_err=0.1, n_paths=10, n_replicates=4)
+    plain_result = PriceResult(pv=2.0, std_err=0.1, n_paths=10)
+    with pytest.raises(ValueError, match="n_replicates"):
+        replicate_result.combine(plain_result)
+
+
+def test_combine_raises_when_right_operand_has_replicates() -> None:
+    plain_result = PriceResult(pv=2.0, std_err=0.1, n_paths=10)
+    replicate_result = PriceResult(pv=1.0, std_err=0.1, n_paths=10, n_replicates=4)
+    with pytest.raises(ValueError, match="n_replicates"):
+        plain_result.combine(replicate_result)
+
+
+def test_combine_still_works_for_two_plain_results() -> None:
+    """Regression guard: n_replicates=None (the default) on both operands must not
+    change combine()'s existing behavior."""
+    a = PriceResult(pv=10.0, std_err=0.5, n_paths=1000)
+    b = PriceResult(pv=12.0, std_err=0.5, n_paths=1000)
+    combined = a.combine(b)
+    assert combined.pv == pytest.approx(11.0)
+    assert combined.std_err == pytest.approx(0.5 / math.sqrt(2))
+    assert combined.n_paths == 2000
+
+
+def test_rqmc_estimate_basic() -> None:
+    values = [1.0, 3.0, 5.0, 3.0, 1.0, 3.0, 5.0, 3.0]
+    result = rqmc_estimate(values, n_paths_per_replicate=100)
+    assert result.pv == pytest.approx(3.0)
+    assert result.n_paths == 800
+    assert result.n_replicates == 8
+    expected_se = float(np.std(values, ddof=1) / math.sqrt(8))
+    assert result.std_err == pytest.approx(expected_se)
+
+
+def test_rqmc_estimate_raises_below_replicate_floor() -> None:
+    values = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+    with pytest.raises(ValueError, match="8"):
+        rqmc_estimate(values, n_paths_per_replicate=100)
+
+
+def test_rqmc_estimate_result_cannot_be_combined() -> None:
+    values = [1.0, 3.0, 5.0, 3.0, 1.0, 3.0, 5.0, 3.0]
+    result = rqmc_estimate(values, n_paths_per_replicate=100)
+    other = PriceResult(pv=2.0, std_err=0.1, n_paths=10)
+    with pytest.raises(ValueError, match="n_replicates"):
+        result.combine(other)

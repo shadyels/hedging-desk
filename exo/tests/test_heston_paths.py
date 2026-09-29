@@ -230,3 +230,16 @@ def test_engine_config_rejects_unknown_scheme() -> None:
 def test_engine_config_rejects_odd_n_paths_when_antithetic() -> None:
     with pytest.raises(ValidationError):
         EngineConfig(scheme="qe", n_steps=10, n_paths=101, expiry=1.0, antithetic=True)
+
+
+def test_simulate_stamps_low_discrepancy_false_for_pseudo_random_source() -> None:
+    """Slice 3 T1: PathBundle.low_discrepancy must mirror rng.low_discrepancy, the
+    same way it already mirrors rng.antithetic."""
+    engine = _engine("qe", n_steps=4, n_paths=200)
+    rng = PseudoRandomSource(seed=1)
+    bundle = simulate(FELLER_VIOLATING, engine, rng)
+    assert bundle.low_discrepancy is False
+
+
+def test_pseudo_random_source_low_discrepancy_is_false() -> None:
+    assert PseudoRandomSource(seed=1).low_discrepancy is False

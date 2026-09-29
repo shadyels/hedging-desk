@@ -64,7 +64,7 @@ risks) and ADR-006 Amendment 4.
 
 ## Tooling & style
 
-- Python 3.12+, `uv` for env/deps, `ruff` (lint+format), `mypy --strict`.
+- Python 3.13+, `uv` for env/deps, `ruff` (lint+format), `mypy --strict`.
 - Everything typed. Payoffs are frozen `dataclass`es; model params are `pydantic` models validated at load.
 - `pytest`; numerical tests use fixed seeds and assert within tolerances that include the MC standard error — never exact float equality, never `==` on arrays.
 - No pandas on the pricing path (fine in notebooks/analysis).

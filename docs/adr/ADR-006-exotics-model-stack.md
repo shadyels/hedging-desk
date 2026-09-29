@@ -326,3 +326,285 @@ which Amendment 4 already names as the trigger for that carried risk.
 - **The abstraction's known ceiling is `P2-6` (path-independent payment dates), owned by P2.M2.**
   Both escape hatches — wider grid for mini futures, new payoff protocol method for LSM — are
   `products/`-only changes that do not breach the M2 rule. No other component is touched.
+
+## Amendment 6 (2026-09-24) — P2.M1 Slice 3: QMC, the antithetics reconciliation, and control variates
+
+Slice 3 ships scrambled-Sobol quasi-Monte Carlo with Brownian-bridge dimension ordering, a
+Heston-vanilla control variate for barriers, RQMC validation gates, and the variance-reduction
+study in `docs/studies/p2m1-qmc-variance-reduction.md`. Amendment 4's Consequences required that
+the QMC/antithetics reconciliation be recorded here "rather than left to whichever code lands
+last". §1 below is that record; §2–§6 are the decisions that came with it.
+
+### 1. QMC and antithetics do not compose. Sobol REPLACES antithetics; it is not layered on them
+
+**Decision: under the Sobol sampler, antithetic pairing is off and cannot be turned on.**
+
+Three reasons, in descending order of how much they bind:
+
+1. A digitally scrambled Sobol net is *already* balanced — every elementary interval in base 2
+   holds its proportional share of points. Appending the mirror `1 − u` of half the net adds no
+   balance the net does not have, while in general destroying the `(t, m, s)`-net property that
+   motivated Sobol. Antithetics buys its reduction from a symmetry the net has already exploited.
+2. **The two error estimators are incompatible objects.** The antithetic estimator is a pair-mean
+   SE over `n_pairs` independent pairs (`models/estimator.py`); the RQMC estimator is a
+   between-replicate SE over `R` independent scrambles. Composing them means nesting pair means
+   inside replicates — more machinery, and *two* ways to select the wrong formula instead of one.
+3. Under inverse transform the antithetic mirror of a scrambled net point frequently lands near an
+   existing net point, so half the path budget re-samples regions the net already covers.
+
+**Enforcement is structural, in three layers, two of which were free.** `SobolRandomSource.antithetic`
+is a `@property` returning `False`, not a field — it cannot be constructed otherwise. `simulate()`'s
+**pre-existing** `engine.antithetic != rng.antithetic` guard then forces `EngineConfig(antithetic=False)`
+for every QMC run. `price_rqmc` re-validates at its entry point so the caller gets the message there
+rather than from inside scipy.
+
+Rejected: "antithetic Sobol" (pair the first `n/2` net points with their mirrors), and exposing the
+two as orthogonal flags on `EngineConfig` for the caller to combine. The second is precisely what
+Amendment 4 meant by "two designs requiring reconciliation... left to whichever code lands last".
+
+### 2. One Sobol point set, partitioned into per-stream column blocks by a declared layout
+
+`RandomSource` is stateless and keyed only by stream *name* — that is what makes P2.M4's
+common-random-number seam safe. Copying that design for Sobol (hashing the stream name into a
+per-stream scramble) would give the `"variance"` and `"spot"` streams **identical or rank-correlated
+point sets**: deterministically coupled draws, every price quietly wrong, and nothing raising.
+
+`SobolRandomSource` therefore holds **one** point set of total dimension `D` and an explicit ordered
+`dims` layout assigning each stream a disjoint contiguous column block. Measured cross-stream
+correlation at n=4096: max |r| = 0.0007 (a layout bug makes this 1.0).
+
+Consequences worth stating because they constrain later work: `n_paths` must be a power of two
+(`random_base2` is the balanced API; `random(n)` at other counts silently surrenders equidistribution),
+`D = 2·n_steps ≤ 21201` caps `n_steps` at 10600, and **the dimension count is a CRN boundary** — a
+revaluation at a different `n_steps` gets a different net, so a multi-expiry P2.M4 portfolio needs one
+point set per expiry.
+
+**The CRN property survives the move to Sobol**, which is what `exo/CLAUDE.md` engine constraint #2
+requires. The scramble derives from `(seed, replicate)` alone and from **no model parameter**, so a
+bump-and-revalue pair sharing `(seed, replicate, dims, n_paths)` receives a bitwise-identical point
+set. Beta is likewise passable explicitly so it can be frozen across a bump pair.
+
+### 3. Brownian bridge: applied per stream, per scheme
+
+| Scheme | Stream | Content | Bridged? |
+|---|---|---|---|
+| `euler-ft` | `variance` | Brownian increment | yes |
+| `euler-ft` | `spot` | perpendicular Brownian increment | yes |
+| `qe` | `variance` | *uniforms* feeding a branch selector and two inverse CDFs | **no** |
+| `qe` | `spot` | normal driver scaled by a per-step, per-path diffusion coefficient | yes |
+
+QE's variance stream is not a Brownian increment at all — there is no additive Gaussian structure to
+reorder. QE's spot stream is bridged, but the construction is *approximate* there because the
+diffusion coefficient varies by step and path, so the bridge's variance concentration is not exact.
+That approximation was not asserted to be beneficial; it was measured (§5).
+
+The bridge lives in `models/bridge.py` as a pure orthogonal reparametrization, verified by
+`‖M·Mᵀ − I‖ ≈ 2.2e-16` on the identity input rather than by sampling, and `models/heston.py` is
+**unmodified** by it. Note the bridge's "leading Sobol dimensions" rationale holds only *within* a
+bridged stream's own columns — under `dims = (("variance", n), ("spot", n))` the bridged block starts
+at global dimension `n_steps`. Reordering was measured immaterial at `n_steps=50` and deliberately
+not done.
+
+### 4. The between-replicate SE is the only valid RQMC error bar
+
+RQMC points are **not** independent, so the plain sample standard error over a single scrambled net
+is invalid — and optimistic, which is the unsafe direction: it makes the `0 < se < tol_abs` conjunct
+of every gate in this package easier to pass. This is the structural twin of the pair-mean lesson
+already recorded in `models/estimator.py`, except that one failed safe and this one does not.
+
+**`mc_estimate` therefore raises on a low-discrepancy bundle**, and `PriceResult.combine` raises
+across replicate results (pooling by raw path count would reconstruct exactly the outlawed formula).
+There is no code path that produces a plain sample SE from a Sobol bundle. `rqmc_estimate` reports
+`pv = mean(replicate means)` and `se = std(replicate means, ddof=1)/√R`, and raises below `R = 8`.
+
+**A calibration finding that corrects this amendment's own first draft.** The replicate-mean
+distribution is heavy-tailed where QMC works best, so the sample SD under-reads σ at small `R`.
+Measured on a **d=4 smooth analytic integrand**: reported/true 0.48 at R=8, 0.76 at R=32, 0.92 at
+R=128, with excess kurtosis rising from 12 to 418 as the net grows. **That regime is not this
+package's.** At the real configuration (`d = 2·n_steps ≈ 100`, discontinuous payoffs) the study
+measures RQMC calibration at **0.835–1.314** against pseudo-random controls at **0.876–1.331** in the
+same run — indistinguishable. The formula SE is honest here. The low-dimensional table is retained
+in `rqmc_estimate`'s docstring as a measured worst case, explicitly scoped, because it is the only
+evidence for the `R ≥ 8` floor and the gates' `R = 64`. Outside both regimes the calibration is
+unquantified; **P2.M4 is the trigger**, being the first milestone to publish `pv_std_err_e9`.
+
+### 5. Measured results, and what they do NOT support
+
+`T = 32` independent repetitions per (cell, configuration) at an identical `B = 32,768` paths, so
+`2²⁰` paths per configuration-cell. The study ranks on the **empirically measured spread**
+(`rmse = std(repetition pvs)`), never on formula SEs — comparing an honest pseudo-random SE against
+an RQMC SE of unproven calibration would have inflated every ratio.
+
+Ratio `rmse_pseudo / rmse_config`, ±13% (T−1 = 31 df):
+
+| cell | pseudo+antithetic | rqmc | rqmc+bridge | +cv | outcome |
+|---|---|---|---|---|---|
+| vanilla/AAPL/qe | 1.41× | 2.96× | 2.83× | — | top-tied |
+| vanilla/MSFT/qe | 1.55× | 2.87× | **5.53×** | — | ranked |
+| barrier/AAPL/qe | 1.70× | 1.62× | 2.11× | 2.42× | top-tied (5-way) |
+| barrier/MSFT/qe | 1.41× | 2.40× | 3.24× | 2.89× | top-tied |
+| autocallable/AAPL/qe | 1.52× | 1.64× | 1.84× | — | top-tied |
+| autocallable/MSFT/qe | 0.90× | 1.27× | 1.39× | — | top-tied |
+| vanilla/AAPL/euler-ft | 1.43× | 1.83× | **2.56×** | — | ranked |
+
+**What is established:** every RQMC configuration beats the plain pseudo-random denominator, 1.27×
+to 5.53×. `rqmc+bridge` is best-or-tied-for-best in all seven cells and is never worse than the
+antithetic baseline.
+
+**What is NOT established, and must not be read into the table:** a best variant on five of seven
+cells. Those are genuine ties at T=32 — resolving a 0.13 gap on a ~2.9 ratio needs T in the
+thousands. `barrier/AAPL` is a five-way tie that **includes `pseudo+antithetic`**, so RQMC is not
+demonstrably better than the antithetics already in the engine at that cell.
+
+**The denominator matters for reading this table.** Every ratio is against *plain* pseudo-random,
+but `EngineConfig.antithetic` already defaults to `True`, so the baseline a production caller would
+switch away from is `pseudo+antithetic`. Dividing those out, `rqmc+bridge` is **1.21× to 3.57×**
+better than the real baseline — and on the tied cells that margin is not resolvable at this T.
+
+Two independent cross-checks passed. The antithetic baseline reproduces Amendment 4's separately
+measured 1.3937 (QE) / 1.3715 (Euler) at **1.41× / 1.43×**. And the honest-direction results were
+reported rather than adjusted: `pseudo+antithetic` at **0.90×** on autocallable/MSFT (antithetics
+actively hurting) and bridge contribution at **0.96×** on vanilla/AAPL (a wash).
+
+**Bridge contribution** (`rmse(rqmc)/rmse(rqmc+bridge)`) ranges 0.96× to 1.92×, positive on six of
+seven cells. It earns its place, but not uniformly.
+
+### 6. Control variates: Heston vanilla, for barriers only, with beta supplied from outside
+
+Amendment 4 named the Heston characteristic-function vanilla as the natural control for a barrier
+under Heston, and directed it be built as a reusable pricer for exactly this. It is.
+
+**Beta is never fitted on the sample it then prices.** `price_from_bundle(control=...)` *requires* an
+explicit `beta`; `price_rqmc` fits it on one disjoint pilot replicate whose own price is discarded.
+Same-sample OLS beta was rejected for the reason `PriceResult.combine`'s docstring already records
+for a different mechanism — weights estimated from the data they weight — and, worse, the textbook
+`n−2` degrees-of-freedom correction assumes independent samples and is simply **not valid under
+RQMC**, so there is no correct small-sample fix available. A control variate with any *fixed* beta
+costs variance when the beta is poor, never bias.
+
+**A correctness caveat that survives into P2.M2/M4, and is not fixed here.** `vanilla_control` draws
+its sample from the **discretized** model but takes its mean from the **exact-model** characteristic
+function, so the estimator transfers `β·(E_disc − E_exact)`. Measured at 400k antithetic paths (AAPL
+params, K = s0 = 187.50, T = 1): `−0.014` under QE/50, `−0.003` under QE/400, and **`+0.072` under
+euler-ft/50 (z = +3.22)**. Under a mis-specified step count the control variate therefore **silently
+repairs discretization bias rather than reporting it** — it would mask the exact euler-ft/50 defect
+§7 records below. Documented at the call site with a ponytail marker; a discretized control mean is a
+design change, not a remediation.
+
+**Scope: barrier calls only.** No put control, no parity conversion, and **no autocallable control** —
+its coupon and early-redemption structure has no closed form, and the roadmap's wording is "control
+variates where a closed form exists".
+
+**The measured contribution is weak under RQMC, and this fires the marker's own trigger.** CV under
+RQMC: **1.15×** (barrier/AAPL) and **0.89×** (barrier/MSFT — it slightly hurt). Without RQMC: 1.26×
+and 1.34×. QMC and the control variate remove overlapping variance, so stacking them returns much
+less than either suggests alone. Both cells sit inside the five-way and four-way ties above, so even
+these numbers are not individually resolved at T=32.
+
+### 7. A defect in an existing gate, found by this slice and fixed in it
+
+RQMC's tighter error bar made a pre-existing problem resolvable: **G1's `euler-ft` arm ran at
+`n_steps=50`, which §4 of Amendment 4 already records as below full-truncation Euler's first-passing
+step count of 104 at this Feller ratio (0.333).** Two independent measurements: at 200k pseudo paths
+the bias against the characteristic function is `+0.058` (z = +3.68); across 20 seeds at 20,000
+antithetic paths it passed 20/20 but at mean z = +1.02, max |z| = 2.73 — roughly 0.27σ from going red
+on a seed change. G1 was returning PASS for a configuration that violates `exo/CLAUDE.md`'s own
+blocking acceptance test.
+
+G1's euler-ft arm now runs at `n_steps=104` (mean z = +0.19, max |z| = 1.97, 20/20), and `tol_abs`
+was **not** touched. The general lesson is recorded because it will recur: **a more precise estimator
+can turn a green gate red without anything having broken**, since "within 3 SE" is a claim about bias
+relative to your error bar. This is also why the RQMC gates copy their tolerance literals verbatim
+from their pseudo-random twins and let only the path budget float — a tolerance re-measured to fit a
+new sampler is a weaker gate, and in a diff it is indistinguishable from a legitimate retune.
+
+### 8. Sampler default: recommended, not yet switched
+
+The question deferred to this study was whether Sobol becomes the production default the way QE
+became the production default *scheme* in Amendment 4 §4. **It is not the same kind of decision.**
+QE vs Euler is a *bias* question — the wrong choice yields wrong prices. Sobol vs pseudo-random is a
+*variance* question — scrambled RQMC is unbiased either way, so the wrong choice yields correct
+prices more slowly.
+
+**Decision: `rqmc+bridge` is the recommended sampler on the evidence above, and pseudo-random with
+antithetics is retained as an independently-tested cross-check — but the default is not switched in
+this milestone, because P2.M1 has no production caller.** Nothing outside tests and studies invokes
+the pricer; term sheets are fixtures and no number reaches the bus until P2.M4. The switch is
+therefore P2.M4's to make, against its own portfolio-revaluation requirements, with two facts it must
+weigh that this study supplies: `rqmc+bridge` is never worse than the antithetic baseline and up to
+3.57× better, but on two cells that advantage is not resolvable at T=32; and `D = 2·n_steps` makes the
+step count a CRN boundary for bump-and-revalue.
+
+`EngineConfig` and `exo.toml` gain **no sampler knob** in this slice, deliberately — adding one now
+would pre-commit that decision. `extra="forbid"` means a later optional field is purely additive.
+
+### 9. The RQMC gate set, and what each excluded gate was excluded FOR
+
+Recorded because the first cut of this slice got it wrong, and the reason it was wrong generalises.
+
+Slices 1–2 left eight gate functions. Four now have RQMC counterparts — **G1-Q, G2-Q, G4-Q** (plus
+**G4-Q-CV**) and **G3b-Q** — at `R = 64` replicates × 1024 paths, every `tol_abs` copied verbatim from
+its pseudo-random twin. Four are deliberately not re-run, and the justification is now stated as
+*which property each asserts*, not as a guess about how RQMC would fare:
+
+| Excluded | Asserts | Why a sampler cannot change it |
+|---|---|---|
+| G3a, G5 | an exact per-path identity | holds for any point set, by construction |
+| G4 companion | a monitoring approximation (bridge vs discrete) | tests the approximation, not the draws |
+| X | scheme agreement (QE vs Euler) | sampler-independent; and `n_steps=500` means `D = 1000` |
+
+**G3b was initially excluded too, on two premises this ADR's own diff refutes.** The first was that
+its identity was "measured in the study" — it was not: the study deliberately sweeps a *live* Phoenix
+(§5), and its fixture docstring is titled "NOT G3b", precisely because reusing G3b's degenerate
+term sheet would have reduced that cell to a European payoff on `S_T`. The second was that the RQMC
+ledger path was "covered by G4-Q" — but `products/barrier.py` emits a `(n_paths, 1)` ledger while
+`products/autocallable.py` emits `(n_paths, n_obs)`, and `discount()` applies a different factor per
+column. **The multi-column ledger had no RQMC gate at all.** G3b-Q now covers it: measured
+`pv = 904.763`, `se = 0.156`, reference `904.865`, z = −0.65, 20/20 across seeds, comfortably inside
+the copied `tol_abs = 0.8`.
+
+**Precisely what G3b-Q covers, since the first statement of this overreached.** The fixture is
+degenerate by design — no path autocalls — so with `n_obs = 2` **column 0 is identically zero** and
+only the terminal column carries value. G3b-Q therefore pins multi-column *shape*, *traversal*, and
+the *terminal* column's discount factor (a wrong factor there, or a `t`→column off-by-one, goes red
+against `notional·exp(−r·1.0)`). It does **not** pin per-column factor *differentiation*: a wrong
+factor on column 0 multiplies zero and is invisible.
+
+That residual gap is **inherited, not introduced by this slice, and no RQMC gate could have closed
+it.** No gate in the suite exercises two *simultaneously non-zero* columns at different dates — G3a
+pins column 0 (every path calls at observation 1), G3b pins the last, G4 and G5 are single-column by
+construction — and `discount()` is sampler-independent shared code, so a new sampler's mirror of an
+existing test structurally cannot cover more than its twin. Inventing a richer autocallable gate
+would need a closed form that does not exist, which is exactly why §5's study measures a live Phoenix
+instead. **Owner: P2.M2/P2.M3** — the mini future's daily financing accrual and TARF's periodic
+fixings are the first payoffs that routinely produce simultaneously-dated non-zero columns, and the
+first for which this stops being harmless.
+
+The exclusion reasoning was also a category error worth naming: it worried that "a poor variance
+ratio is a finding, not a red CI". But **G3b gates bias**, and scrambled RQMC is unbiased — a poor
+variance ratio cannot redden a 3-SE bias conjunct at all. It could only have reddened the
+`se < tol_abs` conjunct, and the arithmetic was never close. The general rule: **when a file states a
+strict self-binding rule and then carves out an exception, check whether the carve-out is the case
+most likely to have violated the rule.** Here it was.
+
+## Consequences (Amendment 6)
+
+- **No new dependency, no wire-format change, no component touched.** `scipy.stats.qmc` and
+  `scipy.special.ndtri` were already inside the `scipy==1.15.*` pin, holding Amendment 4's
+  "P2.M1 requires no new dependency". `protocol/` is untouched.
+- **`RunManifest` schema goes to v2** (`sampler`, `n_replicates`, `bridge_streams`), reading v1 and
+  v2. An RQMC run is not reproducible from `{scheme, n_steps, antithetic}` alone. No scramble-seed
+  list is stored: replicate `i`'s scramble derives from `(seed, i)`, so `seed` + `n_replicates` +
+  `sampler` reproduce the run exactly. Under RQMC `n_paths` means paths **per replicate**.
+- **A gap this slice does not close:** `ValuationSnapshot.ProductLine` carries no sampler field, so a
+  published RQMC price would be indistinguishable from a pseudo-random one on the live plane. No
+  proto change is made here (it needs its own ADR, codegen and compat check, and nothing publishes
+  yet). Owner: **P2.M4 / P3**, when EXO first publishes.
+- **P2.M2 constraints.** Longstaff–Schwartz regresses across paths, so under RQMC the regression must
+  run **inside each replicate** and paths must never be pooled across replicates — pooling would both
+  invalidate the between-replicate SE and bias the continuation value, and no existing guard catches
+  it. `PathBundle.low_discrepancy` is a required field precisely so an LSM bundle cannot be
+  constructed fail-open.
+- **The SPX carried risk is unchanged and keeps its existing owner.** This study swept AAPL (Feller
+  0.333) and MSFT (1.633) only, per Amendment 5. `exo.toml [models.SPX]` at 0.231 remains **P2.M2's
+  warrant gate's** trigger. This amendment does not re-assign it.

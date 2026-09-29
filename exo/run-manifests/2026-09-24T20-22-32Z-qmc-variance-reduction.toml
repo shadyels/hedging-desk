@@ -1,0 +1,38 @@
+schema_version = 2
+run_id = "2026-09-24T20-22-32Z-qmc-variance-reduction"
+created_ns = 1790281352232775000
+git_sha = "841ad351dbfdc90c7fe72e74c3451d874052474d"
+model_id = "heston-qmc-variance-reduction-v1"
+params_hash = "26f5271c72ad778955c05a4582ac644e58459dad5c0cee6961aed1a4622c1261"
+seed = 20260924
+n_paths = 1024
+
+[engine]
+scheme = "qe"
+n_steps = 50
+antithetic = false
+sampler = "sobol"
+bridge_streams = [
+    "spot",
+]
+n_replicates = 32
+
+[params.AAPL]
+s0 = 187.5
+r = 0.0425
+q = 0.005
+v0 = 0.04
+kappa = 1.5
+theta = 0.04
+xi = 0.6
+rho = -0.7
+
+[params.MSFT]
+s0 = 420.0
+r = 0.0425
+q = 0.008
+v0 = 0.05
+kappa = 2.0
+theta = 0.05
+xi = 0.35
+rho = -0.55

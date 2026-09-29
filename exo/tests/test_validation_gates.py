@@ -45,12 +45,31 @@ def _discounted_call_payoff(r: float, expiry: float, strike: float, s_t: np.ndar
     return np.exp(-r * expiry) * np.maximum(s_t - strike, 0.0)
 
 
-@pytest.mark.parametrize("scheme", ["qe", "euler-ft"])
-def test_g1_mc_matches_heston_cf_within_3se(scheme: Scheme) -> None:
-    """G1. Measured at n_steps=50, n_paths=20_000, seed=42: SE ~= 0.047 (qe) / 0.049 (euler-ft),
-    |mc - ref|/se ~= 0.43 (qe) / 0.42 (euler-ft). tol_abs=0.06 sits just above both measured SEs."""
+@pytest.mark.parametrize(
+    ("scheme", "n_steps"),
+    [
+        ("qe", 50),
+        # euler-ft runs at n_steps=104, NOT n_steps=50 (do not "simplify" the two arms back to
+        # one step count): ADR-006 Amendment 4 SS4's own convergence study at this Feller ratio
+        # (0.333) found "QE first satisfies this at n_steps=12 ... full-truncation Euler first
+        # satisfies at n_steps=104." At n_steps=50, euler-ft's discretization bias is a
+        # systematic +1 SE offset (measured: 20 seeds x 20,000 antithetic paths, mean z=+1.02,
+        # max|z|=2.73, 0/20 failures -- it passes today only because it is 0.27 SE from going
+        # red on a seed change), which G1 would then be certifying as converged. Mirrors
+        # `test_validation_gates_qmc.py`'s G1-Q, which already parametrizes this way. Post-fix,
+        # at n_steps=104 (same 20-seed sweep, 20,000 antithetic paths): mean z=+0.193,
+        # max|z|=1.970, 20/20 -- matches ADR-006 Amendment 6 SS7's reported figures (mean
+        # z=+0.19, max|z|=1.97, 20/20).
+        ("euler-ft", 104),
+    ],
+)
+def test_g1_mc_matches_heston_cf_within_3se(scheme: Scheme, n_steps: int) -> None:
+    """G1. Measured at n_paths=20_000, seed=42: SE ~= 0.047 (qe/50) / 0.049 (euler-ft/104),
+    |mc - ref|/se ~= 0.43 (qe/50) / small (euler-ft/104, near-zero bias at its converged step
+    count). tol_abs=0.06 sits just above both measured SEs -- verified to still hold at
+    euler-ft/104 across a 20-seed sweep (SE range ~0.048-0.051)."""
     engine = EngineConfig(
-        scheme=scheme, n_steps=50, n_paths=20_000, expiry=_EXPIRY, antithetic=True
+        scheme=scheme, n_steps=n_steps, n_paths=20_000, expiry=_EXPIRY, antithetic=True
     )
     bundle = simulate(_FELLER_VIOLATING, engine, PseudoRandomSource(seed=42))
     payoff = _discounted_call_payoff(_FELLER_VIOLATING.r, _EXPIRY, _STRIKE, bundle.S[:, -1])

@@ -23,8 +23,16 @@ It also keeps schemes independent of each other: QE draws `uniforms("variance")`
 `normals("spot")`; full-truncation Euler draws `normals("variance")` +
 `normals("spot")`. Neither scheme's draws perturb the other's stream.
 
-Slice 3 will add a Sobol-sequence `RandomSource` implementing this same Protocol;
-nothing here is QMC-specific and nothing should be added in anticipation of it.
+Slice 3 adds `SobolRandomSource`, a scrambled-Sobol QMC `RandomSource`. It does NOT
+reuse `_stream_generator`'s per-name-hash design: hashing the stream name into a
+per-stream `qmc.Sobol` instance (as `PseudoRandomSource` does for its PCG64
+generator) would give "variance" and "spot" independently-scrambled — and thus
+rank-correlated or identical — low-discrepancy point sets, silently coupling QE's
+variance uniforms to its spot normals. Instead `SobolRandomSource` draws ONE Sobol
+point set of total dimension `D = sum(n_dims for _, n_dims in dims)` and partitions
+it into per-stream column blocks by the caller-declared `dims` layout — column
+independence across streams is a property of one Sobol net's own dimensions, not of
+scrambling separately per stream.
 
 STATELESS BY DESIGN, undocumented until now (P1-5, code review 2026-09-06): `_draw` builds a
 fresh `Generator` from `(seed, stream)` on every call and does not mutate `self`. A SECOND CALL
@@ -48,10 +56,17 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Protocol
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.special import ndtri  # type: ignore[import-untyped]
+from scipy.stats import qmc  # type: ignore[import-untyped]
+
+from exo.models.bridge import bridge_normals
+
+_SOBOL_MAX_DIMS = 21201
 
 
 def _stream_spawn_key(stream: str) -> int:
@@ -96,6 +111,16 @@ class RandomSource(Protocol):
         """
         ...
 
+    @property
+    def low_discrepancy(self) -> bool:
+        """Whether this source produces a low-discrepancy (quasi-random) point set.
+
+        True means the draws are NOT independent samples, so the plain sample standard
+        error is invalid — `mc_estimate` raises on such a bundle and `rqmc_estimate`
+        (a between-replicate SE over independent scrambles) must be used instead.
+        """
+        ...
+
 
 @dataclass(frozen=True)
 class PseudoRandomSource:
@@ -110,6 +135,11 @@ class PseudoRandomSource:
 
     seed: int
     antithetic: bool = True
+
+    @property
+    def low_discrepancy(self) -> bool:
+        """Always False: PCG64 draws are pseudo-random, not a low-discrepancy sequence."""
+        return False
 
     def _draw(
         self,
@@ -176,3 +206,176 @@ def _mirror(sampler: str, base: NDArray[np.float64]) -> NDArray[np.float64]:
     if sampler == "normal":
         return -base
     return 1.0 - base
+
+
+@dataclass(frozen=True, eq=False)
+class SobolRandomSource:
+    """`RandomSource` backed by a single scrambled-Sobol low-discrepancy point set,
+    partitioned into per-stream column blocks by `dims` (ADR-006 Amendment 6).
+
+    ONE Sobol point set, not one per stream (see module docstring): scrambling per
+    stream name would rank-correlate independently-scrambled nets across streams --
+    each is individually low-discrepancy, but nothing makes two SEPARATELY scrambled
+    nets jointly independent. Column independence across streams instead comes from
+    disjoint dimensions of the SAME net, which is what the `dims` column-block
+    partition gives.
+
+    `antithetic` is hardwired False as a property, not a field (ADR-006 Amendment
+    6): antithetic pairing (Z -> -Z) of a scrambled Sobol net destroys the
+    (t, m, s)-net equidistribution that motivated using Sobol in the first place, and
+    the two error estimators are incompatible objects -- `PseudoRandomSource`'s
+    pair-mean SE over antithetic pairs vs RQMC's between-replicate SE over
+    independent scrambles (see `low_discrepancy`). `simulate()`'s existing
+    `engine.antithetic != rng.antithetic` guard (heston.py) then forces
+    `EngineConfig(antithetic=False)` for every QMC run for free.
+
+    The scramble is derived from `(seed, replicate)` ONLY -- never any model
+    parameter -- mirroring `_stream_generator`'s name-hash mechanism but keyed by a
+    fixed literal ("sobol-scramble") plus `replicate`. This is the P2.M4
+    common-random-numbers property: a bump-and-revalue pair sharing
+    `(seed, replicate, dims, n_paths)` gets a bitwise identical point set.
+    """
+
+    seed: int
+    n_paths: int
+    # ponytail: layout is caller-declared and only validated against the requested
+    # draw shape, not derived from the scheme. Ceiling: the two streams simulate()
+    # draws today ("variance", "spot"). Upgrade: derive the layout from
+    # EngineConfig. Trigger: a scheme or product drawing a third stream (P2.M2 LSM
+    # exercise dates).
+    dims: tuple[tuple[str, int], ...]
+    replicate: int = 0
+    bridge: frozenset[str] = frozenset()
+    t: NDArray[np.float64] | None = None
+
+    def __post_init__(self) -> None:
+        if self.replicate < 0:
+            raise ValueError(f"SobolRandomSource.replicate must be >= 0, got {self.replicate}")
+        if self.n_paths <= 0 or (self.n_paths & (self.n_paths - 1)) != 0:
+            raise ValueError(
+                "SobolRandomSource requires n_paths to be a power of two, got "
+                f"n_paths={self.n_paths}"
+            )
+        names = [name for name, _ in self.dims]
+        if len(names) != len(set(names)):
+            raise ValueError(f"SobolRandomSource.dims has duplicate stream names: {names}")
+        for name, n_dims in self.dims:
+            if n_dims < 1:
+                raise ValueError(
+                    f"SobolRandomSource.dims stream {name!r} has n_dims={n_dims}, must be >= 1"
+                )
+        total_dims = sum(n_dims for _, n_dims in self.dims)
+        if total_dims > _SOBOL_MAX_DIMS:
+            raise ValueError(
+                f"SobolRandomSource total dims={total_dims} exceeds scipy Sobol's cap of "
+                f"{_SOBOL_MAX_DIMS}"
+            )
+        if self.bridge:
+            if self.t is None:
+                raise ValueError(
+                    "SobolRandomSource.bridge is non-empty but t is None -- t is required "
+                    "when any stream is bridged"
+                )
+            undeclared = self.bridge - set(names)
+            if undeclared:
+                raise ValueError(
+                    f"SobolRandomSource.bridge names streams not in dims: {sorted(undeclared)} "
+                    f"-- declared streams are {names}"
+                )
+            for name, n_dims in self.dims:
+                if name in self.bridge and self.t.shape[0] != n_dims + 1:
+                    raise ValueError(
+                        f"SobolRandomSource.t has shape[0]={self.t.shape[0]} but bridged "
+                        f"stream {name!r} has n_dims={n_dims} -- t must have shape "
+                        f"(n_dims + 1,) = ({n_dims + 1},) so bridge_normals' (n_steps+1,) "
+                        "grid matches the stream it bridges"
+                    )
+
+    @cached_property
+    def _offsets(self) -> dict[str, tuple[int, int]]:
+        """stream name -> (column offset, n_dims); offsets accumulate in `dims` order."""
+        offsets: dict[str, tuple[int, int]] = {}
+        offset = 0
+        for name, n_dims in self.dims:
+            offsets[name] = (offset, n_dims)
+            offset += n_dims
+        return offsets
+
+    @cached_property
+    def _points(self) -> NDArray[np.float64]:
+        """The full (n_paths, D) scrambled-Sobol uniform point matrix, built once.
+
+        ponytail: eager materialisation of the full (n_paths, D) matrix, held for the
+        whole `simulate()` call, on top of heston.py's five array-equivalents.
+        Ceiling: tracemalloc-measured peak 7,660,768 bytes against a denominator of
+        n_paths*(n_steps+1)*8 = 417,792 bytes at n_paths=1024, n_steps=50, scheme="qe",
+        bridge={"spot"} -- a peak-array ratio of ~18.34, committed as
+        `_PEAK_ARRAY_RATIO = 19.0` in `studies/qmc_variance_reduction.py` (a ~3.6% margin
+        over the measured value; see that module's comment on the constant for the full
+        breakdown). On the same scale as heston.py's ~5.02-5.08 peak-array ratio (~2.02 GB
+        at 200k paths x 252 steps) and `products/base.py`'s ~10.2 (`_BRIDGE_PEAK_ARRAY_RATIO
+        = 11.0`) -- this module's eager (n_paths, D) point matrix is the largest of the
+        three. Upgrade: generate per-stream blocks on demand instead of one eager
+        (n_paths, D) matrix. Trigger: P2.M2 LSM retention, or a batch that will not fit the
+        study's --max-batch-bytes.
+        """
+        total_dims = sum(n_dims for _, n_dims in self.dims)
+        seed_sequence = np.random.SeedSequence(
+            entropy=self.seed, spawn_key=(_stream_spawn_key("sobol-scramble"), self.replicate)
+        )
+        generator = np.random.Generator(np.random.PCG64(seed_sequence))
+        sampler = qmc.Sobol(d=total_dims, scramble=True, rng=generator)
+        # ponytail: random_base2 only -- non-power-of-two n_paths raises rather than
+        # padding or truncating (enforced in __post_init__). Ceiling: RQMC path
+        # budgets are restricted to 2**m, so an RQMC gate cannot match a pseudo
+        # gate's exact path count. Upgrade: pad to the next power of two and discard
+        # the excess, accepting the balance loss. Trigger: a gate needing a
+        # non-power-of-two budget.
+        m = self.n_paths.bit_length() - 1
+        points: NDArray[np.float64] = sampler.random_base2(m)
+        return points
+
+    def _block(self, shape: tuple[int, ...], stream: str) -> NDArray[np.float64]:
+        if stream not in self._offsets:
+            raise ValueError(
+                f"SobolRandomSource stream={stream!r} is not declared in dims -- declared "
+                f"streams are {[name for name, _ in self.dims]}"
+            )
+        if len(shape) != 2:
+            raise ValueError(f"SobolRandomSource draws require a 2-D shape, got shape={shape}")
+        if shape[0] != self.n_paths:
+            raise ValueError(
+                f"SobolRandomSource shape[0]={shape[0]} does not match n_paths={self.n_paths}"
+            )
+        offset, n_dims = self._offsets[stream]
+        if shape[1] != n_dims:
+            raise ValueError(
+                f"SobolRandomSource stream={stream!r} shape[1]={shape[1]} does not match "
+                f"declared n_dims={n_dims}"
+            )
+        return self._points[:, offset : offset + n_dims]
+
+    def normals(self, shape: tuple[int, ...], *, stream: str) -> NDArray[np.float64]:
+        u = _clamp_open_unit_interval(self._block(shape, stream))
+        z: NDArray[np.float64] = ndtri(u)
+        if stream in self.bridge:
+            if self.t is None:  # pragma: no cover - enforced in __post_init__
+                raise ValueError("SobolRandomSource.t is None despite a declared bridge stream")
+            z = bridge_normals(z, self.t)
+        return z
+
+    def uniforms(self, shape: tuple[int, ...], *, stream: str) -> NDArray[np.float64]:
+        if stream in self.bridge:
+            raise ValueError(
+                f"SobolRandomSource stream={stream!r} is bridged -- bridging applies to "
+                "normals only, not uniforms"
+            )
+        return _clamp_open_unit_interval(self._block(shape, stream))
+
+    @property
+    def antithetic(self) -> bool:
+        return False
+
+    @property
+    def low_discrepancy(self) -> bool:
+        return True

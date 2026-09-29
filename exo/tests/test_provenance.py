@@ -9,6 +9,7 @@ stays P2.M4's).
 import dataclasses
 import math
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -139,8 +140,6 @@ def test_manifest_toml_round_trip(tmp_path: Path) -> None:
 
 
 def test_manifest_toml_round_trip_is_actual_toml(tmp_path: Path) -> None:
-    import tomllib
-
     manifest = _sample_manifest()
     path = tmp_path / "run.toml"
     manifest.write(path)
@@ -205,10 +204,84 @@ def test_manifest_read_rejects_unknown_schema_version(tmp_path: Path) -> None:
     manifest = _sample_manifest()
     path = tmp_path / "run.toml"
     manifest.write(path)
-    raw = path.read_text().replace("schema_version = 1", "schema_version = 2")
+    raw = path.read_text().replace("schema_version = 1", "schema_version = 3")
     path.write_text(raw)
-    with pytest.raises(ValueError, match="schema_version"):
+    with pytest.raises(ValueError, match="1 or 2"):
         RunManifest.read(path)
+
+
+# --- T7: schema_version 2 (RQMC provenance) ------------------------------------------------------
+
+
+def test_committed_v1_manifest_still_reads() -> None:
+    """The committed real manifest `exo/run-manifests/2026-09-07T21-10-10Z-scheme-convergence.toml`
+    is a regression fixture: it must keep reading after T7 adds schema_version 2, with the three
+    new EngineSettings fields filled from their v1-equivalent defaults."""
+    path = (
+        Path(__file__).resolve().parent.parent
+        / "run-manifests"
+        / "2026-09-07T21-10-10Z-scheme-convergence.toml"
+    )
+    manifest = RunManifest.read(path)
+    assert manifest.schema_version == 1
+    assert manifest.engine.sampler == "pseudo"
+    assert manifest.engine.n_replicates is None
+    assert manifest.engine.bridge_streams == ()
+
+
+def test_manifest_round_trip_rqmc_fields_survive(tmp_path: Path) -> None:
+    manifest = RunManifest(
+        run_id="2026-09-10T00-00-00Z-rqmc",
+        created_ns=1,
+        git_sha="a" * 40,
+        model_id="heston-qe-v1",
+        params_hash="b" * 64,
+        seed=1,
+        n_paths=4096,
+        engine=EngineSettings(
+            scheme="qe",
+            n_steps=252,
+            antithetic=False,
+            sampler="sobol",
+            n_replicates=32,
+            bridge_streams=("spot",),
+        ),
+        params={},
+    )
+    path = tmp_path / "run.toml"
+    manifest.write(path)
+    loaded = RunManifest.read(path)
+    assert loaded == manifest
+    assert loaded.engine.sampler == "sobol"
+    assert loaded.engine.n_replicates == 32
+    assert loaded.engine.bridge_streams == ("spot",)
+    assert tomllib.loads(path.read_text())["schema_version"] == 2
+
+
+def test_manifest_round_trip_pseudo_still_works_and_writes_schema_version_2(
+    tmp_path: Path,
+) -> None:
+    manifest = RunManifest(
+        run_id="2026-09-10T00-00-00Z-pseudo",
+        created_ns=1,
+        git_sha="a" * 40,
+        model_id="heston-qe-v1",
+        params_hash="b" * 64,
+        seed=1,
+        n_paths=4096,
+        engine=EngineSettings(scheme="qe", n_steps=252, antithetic=True),
+        params={},
+    )
+    path = tmp_path / "run.toml"
+    manifest.write(path)
+    loaded = RunManifest.read(path)
+    assert loaded == manifest
+    assert tomllib.loads(path.read_text())["schema_version"] == 2
+
+
+def test_engine_settings_rejects_n_replicates_below_one() -> None:
+    with pytest.raises(ValueError):
+        EngineSettings(scheme="qe", n_steps=1, antithetic=False, sampler="sobol", n_replicates=0)
 
 
 # --- to_valuation_meta / A3 proto structural parity ---------------------------------------------
