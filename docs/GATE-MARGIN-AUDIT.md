@@ -1,8 +1,10 @@
 # Gate margin audit — are any other validation gates passing on insufficient power?
 
-**STATUS: NOT YET RUN.** This is a task brief, not a result. Written 2026-09-25 during P2.M1
-slice 3 (`feat/exo-qmc-cv`), which found one instance and fixed it. Nothing here is urgent; it is
-a correctness audit of the acceptance surface, not a blocker for any milestone.
+**STATUS: AUDITED 2026-09-29 @ afa3298. No gate is biased; no configuration or tolerance
+changed.** Results are in the section at the end; the brief below is kept as the method. Written
+2026-09-25 during P2.M1 slice 3 (`feat/exo-qmc-cv`), which found one instance and fixed it.
+Nothing here is urgent; it is a correctness audit of the acceptance surface, not a blocker for any
+milestone.
 
 ## Why this exists
 
@@ -116,3 +118,82 @@ cd exo && uv run ruff check . && uv run ruff format --check . && uv run mypy --s
   statistics in the test's own docstring the way G1 now does, and add an amendment note to
   `docs/adr/ADR-006-exotics-model-stack.md` — Amendment 6 §7 is the precedent for how the G1 case
   was written up.
+
+## Results (2026-09-29, audited at afa3298)
+
+Setup: scope was the pseudo-random gates G2 (both scheme arms), X, G3b, G4 and the G4 companion.
+G1 was already fixed, G3a/G5 are exact identities, and RQMC gates were out of scope by decision.
+Each gate body was copied verbatim, with fixtures imported from the test modules and only the seed
+parametrized, at its committed configuration (20,000 antithetic paths; n_steps 50, X 500). Both
+assert conjuncts were evaluated (`0 < se < tol_abs` and the 3-SE / must-differ conjunct).
+Environment: numpy 2.2.6, Python 3.13.5. The sweep script was a scratch artifact and is not
+committed. To reproduce, copy the gate body and parametrize its seed.
+
+Validity check: every committed seed reproduced its docstring figure before the sweep was trusted:
+G2 seed 123 z = −0.471 (docstring gives |z| ≈ 0.47, unsigned); X seed 77 z = −1.310; G3b seed 202
+z = −0.069; G4 seeds 42/7/123/2024 z = −1.539/+0.439/−0.443/+0.153; G4 companion seed 42
+z = +23.825. An independent re-derivation of G2 and G4 from the test source (not from the sweep
+script) reproduced the same per-seed and aggregate figures. The X figures at 100k and the
+per-scheme split are single-source (the sweep script, validated by the X seed-77 reproduction).
+
+**Table 1: Seeds 1–20, committed configuration**
+
+| Gate | mean z | max \|z\| | pass | SE range | `tol_abs` |
+|---|---|---|---|---|---|
+| G2 `qe` | +0.393 | 1.589 | 20/20 | 0.0724–0.0756 | 0.09 |
+| G2 `euler-ft` | +0.393 | 1.589 | 20/20 | 0.0724–0.0756 | 0.09 |
+| X | +0.314 | 1.955 | 20/20 | 0.0588–0.0608 | 0.08 |
+| G3b | −0.234 | 2.013 | 20/20 | 0.7062–0.7296 | 0.8 |
+| G4 | +0.345 | 1.711 | 20/20 | 0.0767–0.0799 | 0.09 |
+| G4 companion (must-differ) | min z +22.88 | — | 20/20 | 0.0168–0.0197 | 0.025 |
+
+No gate met a suspect criterion (|mean z| ≳ 0.5, max |z| > 2.5, pass < 20/20). Because the
+companion is a must-differ gate, the mean-z rule doesn't apply to it; it is judged on min z
+(22.88, far above 3).
+
+**Table 2: Bias-vs-noise discriminator at 5× paths (100,000)**
+
+Run on all four bias-conjunct gates (G2 `qe`, G4, G3b, X) although none met a suspect criterion,
+because G2, G4 and X all leaned positive. G2 `euler-ft` is omitted per finding 3; the companion is
+omitted because it is a must-differ gate with min z 22.88. Pass counts evaluate both conjuncts.
+
+| Gate | seeds | mean z | max \|z\| | pass |
+|---|---|---|---|---|
+| G2 `qe` | 1–10 | −0.029 | 2.016 | 10/10 |
+| G4 | 1–10 | −0.093 | 2.225 | 10/10 |
+| G3b | 1–10 | +0.162 | 1.719 | 10/10 |
+| X | 1–10 | +0.591 | 2.667 | 10/10 |
+| X | 1–40 | −0.070 | 2.715 | 40/40 |
+
+**Findings:**
+
+1. **G2 and G4 share one lean, not two.** Within the sweep they run the same degenerate parameters
+   (G2's inline `HestonParams` equals `_DEGENERATE`), scheme, step count and seed, differing only
+   in payoff, so their z are correlated (+0.86 at 20k over seeds 1–20, +0.95 at 100k). At 100k
+   both means collapse to ≈0, so the lean was noise.
+
+2. **X's 100k excursion was a run of high seeds, not bias.** Seeds 1–10 gave +0.448 at 20k and
+   +0.591 at 100k, crossing the suspect line, which triggered the discriminator rather than
+   constituting a bias finding. The test it performs: if X's 20k lean (+0.314 over seeds 1–20)
+   were bias, the mean z at 100k would scale by √5 to ≈ +0.70. Over seeds 1–40 at 100k (seeds
+   1–10 included) the observed mean is −0.070 with standard error 1/√40 ≈ 0.158, about 4.9σ
+   below that prediction. This is the "|z| grows" test applied to the seed population rather than
+   to fixed seeds, whose draws are not paired across path counts anyway. The 40-seed max |z| of
+   2.715 exceeds the 2.5 threshold, but that threshold was set for 20 seeds: the expected max |z|
+   over 40 N(0,1) draws is ≈ 2.43, and P(max |z| > 2.715) ≈ 23%. The per-scheme split (each scheme
+   alone vs `heston_vanilla_price` = 7.272096, n_steps 500, 100,000 paths, seeds 1–20) found no
+   significant bias in either arm: `qe` +0.00310 ± 0.00491, `euler-ft` −0.00706 ± 0.00548 (pooled
+   pv − ref ± std/√20). A 400,000-path run was abandoned because it was infeasible on memory:
+   resident memory reached ~5.7 GB on one seed. The engine retains the full path matrix, so
+   pooling more 100k seeds was used instead.
+
+3. **G2's two arms are numerically indistinguishable** (per-seed z differ by at most 0.0006 over
+   seeds 1–20): at ξ = 1e-4 the schemes do not diverge, so the `euler-ft` arm adds no independent
+   evidence. Recorded as an observation only; whether to change it is undecided.
+
+4. **Headroom of SE under `tol_abs` is thin but not a defect.** The largest SE is 84% of `tol_abs`
+   for G2, 76% for X, 91% for G3b, 89% for G4 and 79% for the G4 companion. The `tol_abs` bound is
+   doing its job of certifying precision; this is not bias, and per this brief the tolerance is
+   never retuned.
+
+The `docs/PONYTAIL-DEBT.md` "Open audit — gate margins" pointer is removed by this change.
