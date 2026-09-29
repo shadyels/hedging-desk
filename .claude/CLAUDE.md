@@ -50,7 +50,7 @@ Define the per-project stack in the PROJECT's CLAUDE.md using this template, and
 
 ```markdown
 ## Stack Profile
-- Language(s): Rust (delta-one), Python 3.12 (exo), TypeScript (ui)
+- Language(s): Rust (delta-one), Python 3.13 (exo), TypeScript (ui)
 - Backend: Rust (tokio) + Python (FastAPI) — conventions: see component CLAUDE.md files
 - Frontend: TypeScript + React — conventions: see ui/CLAUDE.md
 - Tests: Rust (cargo test), Python (pytest), TS (vitest) — run with: `just test`

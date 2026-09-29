@@ -2,7 +2,7 @@
 name = "exo"
 version = "0.1.0"
 description = "Exotics pricing and rehedging service (Phase 2). See exo/CLAUDE.md."
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 dependencies = [
   "numpy==2.2.*",
   "scipy==1.15.*",          # Heston characteristic-function vanilla cross-check
@@ -24,7 +24,7 @@ dev = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py313"
 extend-exclude = ["src/exo/bus/gen"]  # protoc-generated (committed, see scripts/gen-proto.sh)
 
 [tool.ruff.lint]
@@ -32,7 +32,7 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF", "ANN"]
 
 [tool.mypy]
 strict = true
-python_version = "3.12"
+python_version = "3.13"
 exclude = ["_pb2\\.py$"]
 
 [[tool.mypy.overrides]]
