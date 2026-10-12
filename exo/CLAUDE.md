@@ -45,13 +45,18 @@ risks) and ADR-006 Amendment 4.
    fill the message. Do not add error bars later.
 4. **QMC and antithetics do not compose naïvely.** Antithetic pairing of a Sobol sequence destroys
    the low-discrepancy property Sobol was chosen for; the Brownian bridge is what makes Sobol
-   effective, by concentrating variance in the leading dimensions. "QMC + variance reduction" is two
-   designs to reconcile, not two flags to enable — state which combination is used and why.
+   effective, by concentrating variance in the leading dimensions. **Decided (ADR-006 Amendment 6
+   §1): Sobol REPLACES antithetics.** `SobolRandomSource.antithetic` is a property fixed at `False`,
+   so `simulate()`'s antithetic-mismatch guard rejects the combination. Under RQMC the only valid
+   error bar is the between-replicate SE (Amendment 6 §4): `mc_estimate` raises on a
+   `low_discrepancy` bundle and `PriceResult.combine` raises across replicates — price through
+   `price_rqmc` / `rqmc_estimate`, never by pooling paths. `rqmc+bridge` is the recommended
+   sampler but is not yet a default — no sampler knob exists; P2.M4 makes the switch (Amendment 6 §8).
 5. **Build the characteristic-function vanilla as a reusable pricer, not a test helper.** There is no
    closed form for a barrier under Heston, so the natural control variate *is* the Heston vanilla —
    the same analytics as M1's blocking validation gate. Burying it in a test module means writing it
    twice.
-6. **The reproducibility triple is implemented and live.** `exo/src/exo/provenance.py` (305 lines) implements the full capture: `git_sha()` returns the current commit sha (suffixed `-dirty` if the tree has changes), `params_hash(obj)` returns the sha256 hexdigest of a canonical JSON serialization (`sort_keys=True, separators=(",", ":"), allow_nan=False`), and `RunManifest` is a frozen dataclass holding the complete reproducibility record (`schema_version`, `run_id`, `created_ns`, `git_sha`, `model_id`, `params_hash`, `seed`, `n_paths`, `engine`, `params`); it reads from / writes to TOML at `exo/run-manifests/<run_id>.toml`. A real manifest exists at `exo/run-manifests/2026-09-07T21-10-10Z-scheme-convergence.toml`. Root `CLAUDE.md` invariant #7 makes a number without this metadata **invalid**.
+6. **The reproducibility triple is implemented and live.** `exo/src/exo/provenance.py` (360 lines) implements the full capture: `git_sha()` returns the current commit sha (suffixed `-dirty` if the tree has changes), `params_hash(obj)` returns the sha256 hexdigest of a canonical JSON serialization (`sort_keys=True, separators=(",", ":"), allow_nan=False`), and `RunManifest` is a frozen dataclass holding the complete reproducibility record (`schema_version`, `run_id`, `created_ns`, `git_sha`, `model_id`, `params_hash`, `seed`, `n_paths`, `engine`, `params`); it reads from / writes to TOML at `exo/run-manifests/<run_id>.toml`. Schema v2 (P2.M1 slice 3) adds `[engine]` keys `sampler`, `n_replicates` and `bridge_streams` — an RQMC run is not reproducible without them; v1 files still read. Real manifests: `exo/run-manifests/2026-09-07T21-10-10Z-scheme-convergence.toml` (v1) and `exo/run-manifests/2026-09-24T20-22-32Z-qmc-variance-reduction.toml` (v2). **A manifest's `git_sha` must stay reachable:** squash-merging the branch it ran on orphans that commit, so tag it (`provenance/<study>`, e.g. `provenance/qmc-variance-reduction`) before merging. Root `CLAUDE.md` invariant #7 makes a number without this metadata **invalid**.
 
 ## Non-negotiable rules
 

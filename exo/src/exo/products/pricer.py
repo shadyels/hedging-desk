@@ -125,8 +125,14 @@ def price_rqmc(
 ) -> PriceResult:
     """Price `payoff` under RQMC (scrambled-Sobol) with `n_replicates` independent scrambles.
 
-    Builds one `SobolRandomSource`/`PathBundle` per replicate, prices it, and discards it before
-    building the next -- ONE bundle is ever live at a time, never a list of them (Slice 3 T4).
+    Builds one `SobolRandomSource`/`PathBundle` per replicate and keeps only its scalar price --
+    never a list of bundles (Slice 3 T4). Memory is bounded but NOT one bundle: the previous
+    iteration's `bundle` (and its per-path `discounted`/`control` vectors) stays bound while the
+    next `simulate()` runs (`rng` is rebound first and its point matrix is lazy, so the previous
+    one is already freed); when beta is fitted here, `pilot_rng` (with its materialised
+    `(n_paths, 2*n_steps)` point matrix) and `pilot_bundle` stay bound until return -- up to three
+    bundles and two point matrices at peak.
+    `studies.qmc_variance_reduction._PEAK_ARRAY_RATIO` was measured against this actual pattern.
     Each replicate's scalar price is handed to `rqmc_estimate`, which reports the between-
     replicate standard error (see its docstring for the calibration this implies).
 
