@@ -26,5 +26,6 @@ End every report with a `LESSONS:` block: 0-3 short, GENERALIZABLE lessons that 
 
 <!-- BEGIN learned-lessons (written ONLY by the orchestrator; install.sh preserves this section across updates) -->
 ## Learned lessons
-_(none yet)_
+- Before reporting something as MISSING from a doc, grep for the concept inside neighbouring entries, not just for a heading of that name — a glossary "control variate" defined inside the "Variance reduction" entry was reported absent.
+- Without a git tool, claims about history ("file X was left untouched", "commit is on main") are UNVERIFIABLE, not true or false; say so and name the git command that would settle it. A reflog entry proves a commit existed, not that it is reachable from any branch.
 <!-- END learned-lessons -->
