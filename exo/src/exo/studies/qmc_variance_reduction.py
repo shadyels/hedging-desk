@@ -55,8 +55,9 @@ type just for these tests") rather than inventing a bespoke vanilla `Payoff`.
 
 **No internal batching.** Unlike `scheme_convergence.py`, this study's default path budget per
 repetition (`B = 32_768`) keeps one call's peak memory (~250 MB at defaults, `_PEAK_ARRAY_RATIO`
-below) well under any reasonable ceiling, and only ONE bundle is ever live at a time within a
-repetition (`price_rqmc`'s own design; the pseudo path allocates one bundle per repetition too).
+below) well under any reasonable ceiling, and a bounded number of bundles is live within a
+repetition -- up to three at peak, never a list (see `price_rqmc`'s docstring; the pseudo path
+allocates one bundle per repetition).
 `_estimate_peak_bytes` is informational only (Peak memory section of the report) -- this
 sweep's fixed 7-cell grid and fixed `n_steps` never approach a size where batching would matter,
 so there is no refusal guard or `resolve_batch_plan`-style machinery here.
@@ -122,16 +123,16 @@ _EXO_ROOT = _THIS_FILE.parents[3]  # .../hedging-desk/exo
 DEFAULT_REPORT_PATH = _REPO_ROOT / "docs" / "studies" / "p2m1-qmc-variance-reduction.md"
 DEFAULT_MANIFEST_DIR = _EXO_ROOT / "run-manifests"
 
-# Peak bytes per (path, step) for one `price_rqmc` call (ONE replicate/bundle live at a time --
-# price_rqmc's own design), MEASURED with tracemalloc (not hand-counted -- see
-# `test_qmc_memory.py`) at the worst-case config this study actually runs: n_paths=1024,
-# n_steps=50, scheme="qe", bridge={"spot"}, control_strike set (config 5's shape). Measured peak
-# 7_660_768 bytes against a denominator of n_paths*(n_steps+1)*8 = 417_792 bytes -> ratio ~18.34
-# (two repeated measurements agreed to 4 significant figures after a warmup call to exclude
-# scipy's one-time lazy-import cost from the trace). Committed at 19.0, a ~3.6% margin over the
-# measured value -- covers heston.py's own ~5x array footprint PLUS SobolRandomSource's
-# (n_paths, 2*n_steps) point matrix PLUS bridge_normals' transient W array PLUS the control
-# variate's own payoff/control arrays.
+# Peak bytes per (path, step) for one `price_rqmc` call (up to three bundles and two point matrices
+# live at peak -- the pilot plus the previous and current replicate; see price_rqmc's docstring),
+# MEASURED with tracemalloc (not hand-counted -- see `test_qmc_memory.py`) at the worst-case config
+# this study actually runs: n_paths=1024, n_steps=50, scheme="qe", bridge={"spot"}, control_strike
+# set (config 5's shape). Measured peak 7_660_768 bytes against a denominator of
+# n_paths*(n_steps+1)*8 = 417_792 bytes -> ratio ~18.34 (two repeated measurements agreed to 4
+# significant figures after a warmup call to exclude scipy's one-time lazy-import cost from the
+# trace). Committed at 19.0, a ~3.6% margin over the measured value -- covers heston.py's own ~5x
+# array footprint PLUS SobolRandomSource's (n_paths, 2*n_steps) point matrices (pilot + current)
+# PLUS bridge_normals' transient W array PLUS the control variate's own payoff/control arrays.
 _PEAK_ARRAY_RATIO = 19.0
 
 
