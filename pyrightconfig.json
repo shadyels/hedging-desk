@@ -1,0 +1,7 @@
+{
+  "include": ["exo"],
+  "venvPath": "exo",
+  "venv": ".venv",
+  "extraPaths": ["exo/src"],
+  "typeCheckingMode": "standard"
+}
