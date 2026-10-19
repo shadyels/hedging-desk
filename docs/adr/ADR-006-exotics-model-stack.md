@@ -608,3 +608,67 @@ most likely to have violated the rule.** Here it was.
 - **The SPX carried risk is unchanged and keeps its existing owner.** This study swept AAPL (Feller
   0.333) and MSFT (1.633) only, per Amendment 5. `exo.toml [models.SPX]` at 0.231 remains **P2.M2's
   warrant gate's** trigger. This amendment does not re-assign it.
+
+## Amendment 7 (2026-10-19) — P2.M2: equity product set, American exercise, and gate-reference pricers
+
+P2.M2 adds the equity product set: reverse convertible, barrier reverse convertible, bonus certificate, warrants (call and put, European and American exercise), and mini futures (long and short). It adds one engine to `models/`, Longstaff–Schwartz (LSM), and the reference pricers its gates need. Status: Accepted, approved by the desk lead on 2026-10-19. §1 places the gate-reference analytics in `models/`. §2 records the LSM design and supersedes one sentence of Amendment 6. §3 tags the LSM low bias in the return type. §4 records the mini future. §5 closes the SPX carried risk. §6 upgrades the evidence for the Reiner–Rubinstein cells.
+
+### 1. Gate-reference analytics and memory constants live in `models/`
+
+Amendment 3 narrowed the `models/` rule: "Adding LSM does not license any other `models/` change in M2." That narrowing targets the dynamics and the engine. The three items below are gate-reference analytics and measured constants, and they are not "other `models/` changes" in that sense:
+
+- `bs_barrier_rebate_at_hit` in `models/analytic.py`, the PV of 1 paid at first hit before expiry (the Haug rebate term).
+- `models/binomial.py`, a vectorized Cox–Ross–Rubinstein tree (`crr_price`) that prices Bermudan exercise on the LSM exercise dates.
+- `models/memory.py`, which holds the measured peak-memory constants: `RQMC_PEAK_ARRAY_RATIO`, moved from `studies/qmc_variance_reduction.py`, and `LSM_PEAK_ARRAY_RATIO`.
+
+Amendment 5's Consequences already placed `bs_barrier_price` in `models/analytic.py` on the same basis. The alternative, test-only modules, was rejected because it breaks the reusable-reference-pricer precedent set by Amendments 4 and 5.
+
+### 2. LSM: a fixed policy fitted out of sample, on an (S, v) basis, exercising on the simulation grid
+
+The LSM engine lives in `models/lsm.py`. Its design:
+
+- **Policy.** The exercise policy is fitted on a pilot bundle and then applied, without refitting, to an independent valuation bundle. The two bundles are disjoint. Because the policy is fixed before the valuation paths are drawn, the estimator is a lower bound in expectation, and the antithetic pair-mean SE remains valid.
+- **Basis.** Quadratic in (S, v): `[1, x, x², v, v², x·v]` with `x = S/s_scale`, where `s_scale` is the pilot's initial spot.
+- **Regression.** ITM paths only, solved with `np.linalg.lstsq`.
+- **Exercise dates.** Bermudan on the simulation grid: every grid step in (0, expiry). The gap between this and continuous American exercise is part of the reported low bias.
+- **Jensen continuation floor.** The continuation value used in the exercise test is `max(Ĉ, e^{−rΔ}·g(S·e^{(r−q)Δ}))`, where Ĉ is the regressed continuation value and `g` is the convex intrinsic. Exercise occurs when the intrinsic value is strictly greater than this continuation value.
+
+Without the floor, a correct out-of-sample LSM exercises a zero-dividend call early: 5,657 of 50,000 paths, z = −4.9. With the floor, the roadmap's "American call on zero-dividend == European twin" identity is exact, with 0 early exercises measured. The identity gate (G-W2) therefore pins the floor and the terminal plumbing, not the regression. Regression quality is pinned by G-W3 (a Bermudan binomial reference, one-sided) and G-W4 (an (S, v) basis beats an S-only basis under Heston), plus a deterministic discounting unit test.
+
+**Supersession.** Amendment 6's Consequences, under "P2.M2 constraints", reads (lines 603–606 of this file): "Longstaff–Schwartz regresses across paths, so under RQMC the regression must run **inside each replicate** and paths must never be pooled across replicates — pooling would both invalidate the between-replicate SE and bias the continuation value, and no existing guard catches it."
+
+This amendment supersedes the in-replicate regression requirement in that sentence, for when RQMC American pricing is built (P2.M4). With a fixed external policy, each replicate is an unbiased estimate of the same policy's value. In-replicate regression would add a foresight bias whose size depends on the replicate size. The prohibition on pooling paths across replicates is a separate clause of the sentence and is not superseded here.
+
+### 3. `LowerBoundPriceResult`: the LSM low bias is tagged in the return type
+
+`price_american` returns `LowerBoundPriceResult`, which carries a `PriceResult` and the early-exercise count. It is deliberately not a `PriceResult`: the low bias is carried by the type.
+
+The gate has two parts. The first is a one-sided upper bound, `pv − ref < 3·se`, valid at any path count. The second is a declared low-bias budget, `ref − pv < 3·se + 0.05`. The measured bias is reported with the gate. A two-sided 3·se gate is forbidden. The measured bias (put −0.0166, call −0.0256) did not shrink from a 50k to a 200k pilot. It is basis-limited, so a two-sided gate would go red as N grows.
+
+### 4. Mini future: expected residual on the full grid, a carry horizon, and financing from `r`
+
+- **Residual.** The residual is a Rao-Blackwellized expected residual on full-grid ledger columns, the first of the two sharpenings of the Amendment 5 §1 ceiling. Each column carries the incremental knock-out probability multiplied by the residual value. It needs no off-grid payment date.
+- **Horizon.** `horizon` is a carry horizon, not a contract maturity. With spread 0 and q 0, the long PV is `ratio·(S0−F0)` for any horizon; the short PV is `ratio·(F0−S0)`.
+- **Financing.** The base rate is the discount rate `r`, threaded through `Payoff.cashflows(bundle, *, r)`. It never comes from a term-sheet field. A base rate stored on the term sheet is a rate that P2.M4's rho bump must also move. If the bump missed it, the spurious rho would be about `ratio·F0·E[τ∧T]` per unit rate, and that rho flows into the RATES-IR transfer under ADR-008/009.
+- **Stated omissions.** There is no dividend pass-through into the financing level and no settlement lag. The stop-out is dated at the end of the step, so the dating bias is bounded by `ratio·|level|·r·dt/2·P_hit`.
+
+### 5. SPX carried risk: closed by G-W1
+
+The Feller 0.231 carried risk recorded in Amendment 4 §4 is closed by gate G-W1. G-W1 prices European warrants on `[models.SPX]` against the Heston characteristic function at K ∈ {0.9, 1.0, 1.1}·S0, for both call and put. QE holds at Feller 0.231 on G-W1's six cells (`qe`, `n_steps=50`, 20k paths, ratio 0.01). Over a 20-seed sweep (seeds 500–519) the per-cell mean z lies in [−0.24, +0.05] and max |z| is 2.36 (call, K = 1.1·S0); pooled over strikes, calls give mean z −0.07 and puts −0.04. The characteristic-function reference reports `abserr` ≤ 9e-13 at every strike. The full table is in the G-W1 docstring (`exo/tests/test_validation_gates_equity.py`).
+
+### 6. Evidence for the Reiner–Rubinstein down-call and up-put cells
+
+The down-call (K < H) and up-put (K > H) cells of the Reiner–Rubinstein reference are now pinned by optional-stopping identities. Here `UOP` is the up-and-out put, `DOC` is the down-and-out call, and `P_hit` is the PV of 1 paid at first hit before expiry (`bs_barrier_rebate_at_hit`). `F` and `B` are the financing and stop-loss levels of the mini future, so K = F and H = B. At r = q = 0, `P_hit` is the plain hit probability, and:
+
+- `UOP(K=F, H=B) + (F−B)·P_hit = F−S0`, holding to 1.1e-14.
+- `DOC(K=F, H=B) + (B−F)·P_hit = S0−F`, holding to 3.6e-15.
+
+At q = 0 and r ∈ {0.02, 0.05}, the discounted form of both identities holds to about 3e-13.
+
+## Consequences (Amendment 7)
+
+- **No new dependency.** `numpy` and `scipy` are already pinned in `exo/pyproject.toml`.
+- **The `models/` additions are `models/lsm.py`, `models/binomial.py`, `models/memory.py`, and `bs_barrier_rebate_at_hit` in `models/analytic.py`.** `models/` still imports nothing from `products/`; the LSM intrinsic is passed in as a callable.
+- **RQMC American pricing is not built.** `price_american` raises `NotImplementedError` for a low-discrepancy pilot or valuation source. RQMC American pricing is owned by P2.M4.
+- **The wire representation of the low-bias tag is deferred to P2.M4/P3.**
+- **Andersen–Broadie upper bounds remain out of scope,** as Amendment 3 records.

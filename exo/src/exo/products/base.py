@@ -289,3 +289,27 @@ def barrier_survival(
     survive_product = np.prod(1.0 - p_cross, axis=1)
     survival = np.where(endpoint_breach, 0.0, survive_product)
     return np.clip(survival, 0.0, 1.0)
+
+
+def expiry_survival(
+    bundle: PathBundle,
+    level: float,
+    direction: Literal["down", "up"],
+    monitoring: Monitoring,
+    observations: tuple[float, ...] | None,
+    expiry: float,
+) -> tuple[NDArray[np.float64], int]:
+    """`barrier_survival` bound to a product's OWN expiry: returns `(survival, expiry_idx)`.
+
+    CONTINUOUS_BRIDGE monitors `[0, expiry_idx]` (a strict prefix of the grid when the bundle
+    runs past `expiry`); DISCRETE monitors `observations`. Shared by the certificate payoffs
+    (`reverse_convertible.py`, `bonus.py`), which all need "survival up to my expiry, and the
+    grid index to read S_T at" -- `barrier.py` carries the same logic inline.
+    """
+    expiry_idx = int(observation_indices(np.array([expiry]), bundle)[0])
+    if monitoring == Monitoring.DISCRETE:
+        assert observations is not None  # each product's __post_init__ guarantees this
+        obs_idx = observation_indices(np.asarray(observations, dtype=np.float64), bundle)
+    else:
+        obs_idx = np.arange(expiry_idx + 1)
+    return barrier_survival(bundle, level, direction, monitoring, obs_idx), expiry_idx
