@@ -138,7 +138,7 @@ def test_control_variate_reduces_variance_on_barrier_gate_config() -> None:
     )
 
     pilot_bundle = _bundle(seed=999, n_paths=n_paths, n_steps=n_steps, expiry=expiry)
-    pilot_ledger = option.cashflows(pilot_bundle)
+    pilot_ledger = option.cashflows(pilot_bundle, r=r)
     from exo.products.pricer import discount
 
     pilot_payoff = discount(pilot_ledger, r=r)

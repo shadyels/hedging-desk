@@ -19,9 +19,18 @@ finiteness/categorical validation tests.
 
 from __future__ import annotations
 
-import pytest
+import math
+from typing import Literal
 
-from exo.models.analytic import bs_barrier_price, bs_call_price, bs_put_price
+import pytest
+from scipy.special import ndtr  # type: ignore[import-untyped]
+
+from exo.models.analytic import (
+    bs_barrier_price,
+    bs_barrier_rebate_at_hit,
+    bs_call_price,
+    bs_put_price,
+)
 
 _S0 = 100.0
 _STRIKE = 100.0
@@ -259,3 +268,115 @@ def test_bs_barrier_price_rejects_case_typo_in_categorical_fields(field: str) ->
     kwargs[field] = str(kwargs[field]).capitalize()
     with pytest.raises(ValueError):
         bs_barrier_price(**kwargs)  # type: ignore[arg-type]
+
+
+# --- P2.M2 slice 2: bs_barrier_rebate_at_hit, pinned by optional-stopping identities ---
+
+
+def _p_survive(
+    *, s0: float, r: float, sigma: float, expiry: float, barrier: float, direction: str
+) -> float:
+    """Closed-form P(no hit before `expiry`) under GBM with q=0 -- independent of the rebate
+    formula under test (reflection principle, not the Haug rebate term)."""
+    nu = r - 0.5 * sigma**2
+    x = math.log(barrier / s0)
+    sd = sigma * math.sqrt(expiry)
+    scale = (barrier / s0) ** (2.0 * nu / sigma**2)
+    if direction == "down":
+        return float(ndtr((-x + nu * expiry) / sd) - scale * ndtr((x + nu * expiry) / sd))
+    return float(ndtr((x - nu * expiry) / sd) - scale * ndtr((-x - nu * expiry) / sd))
+
+
+@pytest.mark.parametrize(
+    ("direction", "r"),
+    [("down", 0.0), ("up", 0.0), ("down", 0.02), ("up", 0.05)],
+)
+def test_rebate_at_hit_matches_optional_stopping_identity(
+    direction: Literal["down", "up"], r: float
+) -> None:
+    """q=0 martingale identity: a long mini future with CONSTANT financing level F (F<B<S0,
+    stop at the down barrier B, residual B-F paid at the hit) is worth
+    `S0 - F * (e^{-rT} P_surv + rebate)`, and the survivors' leg is exactly a down-and-out call
+    struck at F<B. Mirror image for the short (S0<B<F, up barrier, residual F-B):
+    `F * (e^{-rT} P_surv + rebate) - S0` = up-and-out put + (F-B) * rebate. At r=0 the rebate
+    IS P(hit) and both collapse to the bare `S0 - F` / `F - S0`. 4 cells, abs 1e-10 (measured
+    <= 1.1e-14). This is what upgrades the down-call K<H and up-put K>H Reiner-Rubinstein cells
+    from "self-referential" to pinned."""
+    s0, sigma, expiry = 100.0, 0.2, 1.0
+    if direction == "down":
+        f, b = 80.0, 85.0
+    else:
+        f, b = 120.0, 115.0
+    reb = bs_barrier_rebate_at_hit(
+        s0=s0, r=r, q=0.0, sigma=sigma, expiry=expiry, barrier=b, direction=direction
+    )
+    surv = _p_survive(s0=s0, r=r, sigma=sigma, expiry=expiry, barrier=b, direction=direction)
+    digital = math.exp(-r * expiry) * surv + reb
+
+    knocked_out = bs_barrier_price(
+        s0=s0,
+        strike=f,
+        r=r,
+        q=0.0,
+        sigma=sigma,
+        expiry=expiry,
+        barrier=b,
+        direction=direction,
+        knock="out",
+        option_type="call" if direction == "down" else "put",
+    )
+    if direction == "down":
+        lhs, rhs = knocked_out + (b - f) * reb, s0 - f * digital
+    else:
+        lhs, rhs = knocked_out + (f - b) * reb, f * digital - s0
+    assert abs(lhs - rhs) <= 1e-10, f"lhs={lhs}, rhs={rhs}"
+
+
+def test_rebate_at_hit_is_a_probability_like_quantity() -> None:
+    """r=q=0 gives P(hit) in (0, 1); it grows as the barrier nears spot and with expiry."""
+    kw = dict(s0=100.0, r=0.0, q=0.0, sigma=0.2, direction="down")
+    far = bs_barrier_rebate_at_hit(**kw, expiry=1.0, barrier=70.0)  # type: ignore[arg-type]
+    near = bs_barrier_rebate_at_hit(**kw, expiry=1.0, barrier=95.0)  # type: ignore[arg-type]
+    longer = bs_barrier_rebate_at_hit(**kw, expiry=4.0, barrier=70.0)  # type: ignore[arg-type]
+    assert 0.0 < far < near < 1.0
+    assert far < longer < 1.0
+
+
+def _rebate_kwargs(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = dict(
+        s0=100.0, r=0.02, q=0.01, sigma=0.2, expiry=1.0, barrier=90.0, direction="down"
+    )
+    base.update(overrides)
+    return base
+
+
+@pytest.mark.parametrize("field", ["s0", "r", "q", "sigma", "expiry", "barrier"])
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_rebate_at_hit_rejects_non_finite_fields(field: str, bad: float) -> None:
+    with pytest.raises(ValueError):
+        bs_barrier_rebate_at_hit(**_rebate_kwargs(**{field: bad}))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("field", ["s0", "sigma", "expiry", "barrier"])
+def test_rebate_at_hit_rejects_non_positive_fields(field: str) -> None:
+    with pytest.raises(ValueError):
+        bs_barrier_rebate_at_hit(**_rebate_kwargs(**{field: 0.0}))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("direction", "barrier"), [("down", 100.0), ("down", 110.0), ("up", 100.0), ("up", 90.0)]
+)
+def test_rebate_at_hit_raises_on_inception_breach(direction: str, barrier: float) -> None:
+    with pytest.raises(ValueError, match="already breached"):
+        bs_barrier_rebate_at_hit(**_rebate_kwargs(direction=direction, barrier=barrier))  # type: ignore[arg-type]
+
+
+def test_rebate_at_hit_rejects_direction_typo() -> None:
+    with pytest.raises(ValueError):
+        bs_barrier_rebate_at_hit(**_rebate_kwargs(direction="Down"))  # type: ignore[arg-type]
+
+
+def test_rebate_at_hit_raises_on_negative_lambda_squared() -> None:
+    """r=-0.04, q=-0.04 (b=0): mu^2 = 0.25 but 2r/sigma^2 = -2, so lambda^2 = -1.75 < 0."""
+    with pytest.raises(ValueError, match="lambda"):
+        bs_barrier_rebate_at_hit(**_rebate_kwargs(r=-0.04, q=-0.04))  # type: ignore[arg-type]

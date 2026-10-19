@@ -86,7 +86,7 @@ class ReverseConvertible:
                 f"{self.observations}"
             )
 
-    def cashflows(self, bundle: PathBundle) -> CashflowLedger:
+    def cashflows(self, bundle: PathBundle, *, r: float) -> CashflowLedger:
         coupon_idx = observation_indices(np.asarray(self.coupon_times, dtype=np.float64), bundle)
         n_paths = bundle.S.shape[0]
         amounts = np.full(

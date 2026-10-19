@@ -32,7 +32,7 @@ def test_call_and_put_intrinsic_scaled_by_ratio() -> None:
 def test_european_ledger_reads_own_expiry_on_a_longer_bundle() -> None:
     # grid t = [0, .5, 1, 1.5, 2]; the warrant expires at 1.0 -> index 2, not the last column
     bundle = forced_bundle([[100.0, 100.0, 130.0, 500.0, 900.0]], expiry=2.0)
-    ledger = _warrant().cashflows(bundle)
+    ledger = _warrant().cashflows(bundle, r=0.0)
     np.testing.assert_array_equal(ledger.t, [1.0])
     np.testing.assert_allclose(ledger.amounts, [[3.0]])
 
@@ -40,7 +40,7 @@ def test_european_ledger_reads_own_expiry_on_a_longer_bundle() -> None:
 def test_american_cashflows_raise_pointing_to_price_american() -> None:
     bundle = forced_bundle([[100.0, 100.0, 130.0]])
     with pytest.raises(ValueError, match="price_american"):
-        _warrant(exercise="american").cashflows(bundle)
+        _warrant(exercise="american").cashflows(bundle, r=0.0)
 
 
 @pytest.mark.parametrize("field", ["strike", "expiry", "ratio"])

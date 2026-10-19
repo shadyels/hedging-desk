@@ -11,6 +11,13 @@ acceptance test").
   per-path identity BRC - RC == (N/K) * down-and-out put, both monitoring modes.
 - G-BON / G-BON-par: bonus certificate vs ratio * (S0 e^{-qT} + down-and-out put), and the
   per-path identity bonus - ratio * S_T == ratio * down-and-out put, both monitoring modes.
+- G-MF1 / G-MF2 (P2.M2 slice 2): mini future, long and short. G-MF1 prices the knock-out +
+  residual decomposition against `bs_barrier_price` + `bs_barrier_rebate_at_hit`; G-MF2 pins the
+  financing accrual, reset schedule and reset-jump stop price via the martingale identity
+  `PV = ratio * (S0 - F0)`. COVERAGE CAVEAT: both are BLIND to per-column discount
+  differentiation -- a "discount every column at T" mutant moves the 20-seed mean z only
+  -0.12 -> -0.68 (SE of the mean ~0.22) because `e^{-rt} F_t` cancels -- G-RC1 is the gate
+  that pins discounting.
 - G-W1: European warrant, call and put, three strikes, on `[models.SPX]` (Feller ratio
   0.231) vs `ratio * heston_vanilla_price`; closes the SPX Feller-violating carried risk.
 
@@ -29,7 +36,7 @@ from typing import Literal
 import numpy as np
 import pytest
 
-from exo.models.analytic import bs_barrier_price
+from exo.models.analytic import bs_barrier_price, bs_barrier_rebate_at_hit
 from exo.models.heston import simulate
 from exo.models.heston_cf import heston_call_price_and_error, heston_vanilla_price
 from exo.models.params import EngineConfig, HestonParams, load_models_section
@@ -37,6 +44,7 @@ from exo.models.rng import PseudoRandomSource
 from exo.products.barrier import BarrierOption
 from exo.products.base import Monitoring
 from exo.products.bonus import BonusCertificate
+from exo.products.mini_future import MiniFuture
 from exo.products.pricer import price_from_bundle
 from exo.products.reverse_convertible import ReverseConvertible
 from exo.products.warrant import Warrant
@@ -208,7 +216,7 @@ def test_g_brc_par_brc_minus_rc_equals_down_and_out_put_per_path(
     call, so this is exact to machine precision under BOTH monitoring modes. Sharp against a
     `surv` vs `1 - surv` swap and DISCRETE schedule bugs."""
     bundle = simulate(_DEGENERATE, _engine(_N_STEPS), PseudoRandomSource(seed=42))
-    brc = _brc(monitoring, observations).cashflows(bundle).amounts
+    brc = _brc(monitoring, observations).cashflows(bundle, r=_DEGENERATE.r).amounts
     rc = (
         ReverseConvertible(
             underlying="SYN",
@@ -218,7 +226,7 @@ def test_g_brc_par_brc_minus_rc_equals_down_and_out_put_per_path(
             coupon_times=_BRC_COUPON_TIMES,
             expiry=1.0,
         )
-        .cashflows(bundle)
+        .cashflows(bundle, r=_DEGENERATE.r)
         .amounts
     )
     dop = (
@@ -233,7 +241,7 @@ def test_g_brc_par_brc_minus_rc_equals_down_and_out_put_per_path(
             monitoring=monitoring,
             observations=observations,
         )
-        .cashflows(bundle)
+        .cashflows(bundle, r=_DEGENERATE.r)
         .amounts
     )
 
@@ -305,7 +313,7 @@ def test_g_bon_par_bonus_minus_underlying_equals_down_and_out_put_per_path(
     """G-BON-par. `bonus - ratio * S_T == ratio * DOP(L, B)` per path, machine precision,
     both monitoring modes (one shared `barrier_survival`)."""
     bundle = simulate(_DEGENERATE, _engine(_N_STEPS), PseudoRandomSource(seed=42))
-    bonus = _bonus(monitoring, observations).cashflows(bundle).amounts[:, 0]
+    bonus = _bonus(monitoring, observations).cashflows(bundle, r=_DEGENERATE.r).amounts[:, 0]
     dop = (
         BarrierOption(
             underlying="SYN",
@@ -318,7 +326,7 @@ def test_g_bon_par_bonus_minus_underlying_equals_down_and_out_put_per_path(
             monitoring=monitoring,
             observations=observations,
         )
-        .cashflows(bundle)
+        .cashflows(bundle, r=_DEGENERATE.r)
         .amounts[:, 0]
     )
 
@@ -375,5 +383,157 @@ def test_g_w1_european_warrant_matches_heston_vanilla_within_3se(
     )
     assert abs(result.pv - reference) < 3.0 * result.std_err, (
         f"{option_type} {moneyness}: pv={result.pv}, ref={reference}, off by "
+        f"{(result.pv - reference) / result.std_err:.2f} SE"
+    )
+
+
+_MF_R = 0.0425
+_MF_RATIO = 0.1
+
+
+def _mf_params(q: float) -> HestonParams:
+    """BS-degenerate model (G4's degeneration) at r=0.0425 and the given dividend yield."""
+    return HestonParams(
+        s0=100.0,
+        r=_MF_R,
+        q=q,
+        v0=_SIGMA_DEGENERATE**2,
+        kappa=1.5,
+        theta=_SIGMA_DEGENERATE**2,
+        xi=1e-4,
+        rho=0.0,
+    )
+
+
+def _mf_term_sheet(
+    side: Literal["long", "short"], *, spread: float, reset_times: tuple[float, ...]
+) -> MiniFuture:
+    """Long: F0=80, B0=85 (stop on a fall); short: F0=120, B0=115 (stop on a rise)."""
+    long = side == "long"
+    return MiniFuture(
+        underlying="SYN",
+        side=side,
+        ratio=_MF_RATIO,
+        financing_level=80.0 if long else 120.0,
+        financing_spread=spread,
+        stop_loss_level=85.0 if long else 115.0,
+        stop_loss_buffer=0.05,
+        reset_times=reset_times,
+        horizon=1.0,
+    )
+
+
+@pytest.mark.parametrize("seed", [42, 7, 123, 2024])
+@pytest.mark.parametrize("q", [0.0, 0.01])
+@pytest.mark.parametrize("side", ["long", "short"])
+def test_g_mf1_mini_future_without_resets_matches_knock_out_plus_rebate_within_3se(
+    side: Literal["long", "short"], q: float, seed: int
+) -> None:
+    """G-MF1. Financing held CONSTANT (spread = -r long / +r short, so rate_F = 0), no resets,
+    horizon 1, ratio 0.1. A long mini future (F0=80, stop B0=85, S0=100) is a down-and-out call
+    struck at F0 (< B0, so survivors pay exactly `S_T - F0`) plus a residual `B0 - F0` paid AT
+    the hit: `ratio * [DOC(80, 85) + 5 * rebate_at_hit(down, 85)]`. Short (F0=120, B0=115):
+    `ratio * [UOP(120, 115) + 5 * rebate_at_hit(up, 115)]`. Sharp against the knock-out leg
+    and the residual leg, both sides; exercises the down-call K<H and up-put K>H
+    Reiner-Rubinstein cells and the rebate formula, which are pinned independently by
+    `test_analytic_barrier.py`'s optional-stopping identities.
+
+    Measured at n_steps=50, n_paths=20_000 (se in ratio-0.1 units; ratio 1 gives ~0.074 long /
+    ~0.062 short):
+        long  q=0.00: seed 42/7/123/2024 z=-1.53/-0.08/-0.75/-0.28, se=0.00737-0.00757
+        long  q=0.01: z=-1.58/-0.06/-0.67/-0.33, se=0.00742-0.00762
+        short q=0.00: z=-1.73/-0.17/-0.80/+0.13, se=0.00618-0.00627
+        short q=0.01: z=-1.62/-0.41/-0.78/-0.00, se=0.00607-0.00617
+    A separate 20-seed sweep (seeds 1000-1019): mean z -0.12 / -0.20 / -0.12 (long q=0, short
+    q=0, long q=0.01), max |z| 2.17, 1.70, 2.13 -- unbiased within noise. tol_abs sits just above
+    every measured SE (long 0.009, short 0.0075).
+
+    COVERAGE CAVEAT: this gate is BLIND to per-column discount differentiation. A mutant that
+    discounts every column at T instead of its own date moves the long q=0 20-seed mean z only
+    from -0.12 to -0.68 (SE of the mean ~0.22; max |z| 2.13, so no single seed fails), because
+    `e^{-rt} F_t` cancels when the financing level accrues at the discount rate. G-RC1 is the
+    gate that pins discounting.
+    """
+    params = _mf_params(q)
+    spread = -_MF_R if side == "long" else _MF_R
+    note = _mf_term_sheet(side, spread=spread, reset_times=())
+    bundle = simulate(params, _engine(_N_STEPS), PseudoRandomSource(seed=seed))
+    result = price_from_bundle(note, bundle, r=_MF_R)
+
+    barrier, f0 = note.stop_loss_level, note.financing_level
+    rebate = bs_barrier_rebate_at_hit(
+        s0=params.s0,
+        r=_MF_R,
+        q=q,
+        sigma=_SIGMA_DEGENERATE,
+        expiry=1.0,
+        barrier=barrier,
+        direction="down" if side == "long" else "up",
+    )
+    knocked_out = bs_barrier_price(
+        s0=params.s0,
+        strike=f0,
+        r=_MF_R,
+        q=q,
+        sigma=_SIGMA_DEGENERATE,
+        expiry=1.0,
+        barrier=barrier,
+        direction="down" if side == "long" else "up",
+        knock="out",
+        option_type="call" if side == "long" else "put",
+    )
+    reference = _MF_RATIO * (knocked_out + abs(barrier - f0) * rebate)
+
+    tol_abs = 0.009 if side == "long" else 0.0075
+    assert 0.0 < result.std_err < tol_abs, (
+        f"{side} q={q} seed={seed}: se={result.std_err} is not tight enough to be a meaningful "
+        f"gate (tol_abs={tol_abs})"
+    )
+    assert abs(result.pv - reference) < 3.0 * result.std_err, (
+        f"{side} q={q} seed={seed}: pv={result.pv}, ref={reference}, off by "
+        f"{(result.pv - reference) / result.std_err:.2f} SE"
+    )
+
+
+@pytest.mark.parametrize("seed", [42, 7, 123, 2024])
+@pytest.mark.parametrize("side", ["long", "short"])
+def test_g_mf2_mini_future_with_resets_is_worth_spot_minus_financing_within_3se(
+    side: Literal["long", "short"], seed: int
+) -> None:
+    """G-MF2. q=0 and financing spread 0 (rate_F = r), buffer 0.05, stop-loss reset at
+    t = 0.08 k, k=1..12 (on the n_steps=50 grid), else G-MF1's fixture. Then the discounted
+    financing level `e^{-rt} F_t = F0` is constant and the discounted spot is a martingale, so
+    the PV is `ratio * (S0 - F0)` (long) / `ratio * (F0 - S0)` (short) for ANY stopping rule --
+    including resets: `E[e^{-r tau} (S_tau - F_tau)] = S0 - F0`. Sharp against a wrong financing
+    accrual, reset schedule or reset-jump stop price (each leaves a stopping-rule-dependent
+    residual).
+
+    Measured at n_steps=50, n_paths=20_000 (ref = +2.0 long, +2.0 short):
+        long  seed 42/7/123/2024: z=-1.88/-0.22/-0.84/-0.63, se=0.00754-0.00773
+        short seed 42/7/123/2024: z=-1.22/-0.28/-0.44/+0.19, se=0.00621-0.00632
+    A 20-seed sweep (seeds 1000-1019): mean z long -0.30 (max |z| 1.89), short +0.21 (max |z|
+    2.32). The stop-out is dated at the END of its grid step (bias bound `ratio * |level| * r *
+    dt / 2 * P(hit)`, <= ~0.24 SE at 20k paths -- why the path count is fixed here).
+    tol_abs: long 0.009, short 0.0075.
+
+    COVERAGE CAVEAT: blind to per-column discount differentiation, exactly as G-MF1 (the
+    discount-all-at-T mutant moves the mean z only -0.12 -> -0.68) -- G-RC1 pins discounting.
+    """
+    params = _mf_params(0.0)
+    reset_times = tuple(0.08 * k for k in range(1, 13))
+    note = _mf_term_sheet(side, spread=0.0, reset_times=reset_times)
+    bundle = simulate(params, _engine(_N_STEPS), PseudoRandomSource(seed=seed))
+    result = price_from_bundle(note, bundle, r=_MF_R)
+
+    sign = 1.0 if side == "long" else -1.0
+    reference = _MF_RATIO * sign * (params.s0 - note.financing_level)
+
+    tol_abs = 0.009 if side == "long" else 0.0075
+    assert 0.0 < result.std_err < tol_abs, (
+        f"{side} seed={seed}: se={result.std_err} is not tight enough to be a meaningful gate "
+        f"(tol_abs={tol_abs})"
+    )
+    assert abs(result.pv - reference) < 3.0 * result.std_err, (
+        f"{side} seed={seed}: pv={result.pv}, ref={reference}, off by "
         f"{(result.pv - reference) / result.std_err:.2f} SE"
     )

@@ -236,7 +236,8 @@ def test_autocallable_observations_align_with_production_grid() -> None:
         scheme="qe", n_steps=DEFAULT_N_STEPS, n_paths=2, expiry=1.0, antithetic=True
     )
     bundle = simulate(params, engine, PseudoRandomSource(seed=1))
-    payoff.cashflows(bundle)  # raises ScheduleAlignmentError if misaligned -- must not raise
+    # raises ScheduleAlignmentError if misaligned -- must not raise
+    payoff.cashflows(bundle, r=params.r)
 
 
 @pytest.mark.parametrize("underlying", ["AAPL", "MSFT"])
@@ -254,7 +255,7 @@ def test_autocallable_is_genuinely_live_not_degenerate(underlying: str) -> None:
         scheme="qe", n_steps=DEFAULT_N_STEPS, n_paths=2048, expiry=1.0, antithetic=True
     )
     bundle = simulate(params, engine, PseudoRandomSource(seed=7))
-    ledger = payoff.cashflows(bundle)
+    ledger = payoff.cashflows(bundle, r=params.r)
     redeem_fraction, coupon_fraction, never_redeemed_fraction = _autocall_liveness_from_ledger(
         ledger, payoff.notional
     )

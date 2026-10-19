@@ -66,7 +66,7 @@ def test_memory_coupon_releases_exactly_the_missed_coupons() -> None:
         ]
     )
     forced_bundle = replace(bundle, S=forced, v=np.abs(bundle.v[:1]))
-    forced_ledger = note.cashflows(forced_bundle)
+    forced_ledger = note.cashflows(forced_bundle, r=0.0)
 
     # obs1: miss -> 0. obs2: miss -> 0. obs3: pay, missed=2 -> notional*rate*(1+2).
     # obs4: pay, missed=0 -> notional*rate*(1+0), PLUS maturity leg (never called,
@@ -107,7 +107,7 @@ def test_called_path_emits_exactly_zero_after_call_index() -> None:
     # t=0.5 (ledger column 1) clears autocall_trigger=120, so the note calls there.
     forced = np.array([[100.0, 90.0, 130.0, 5.0, 5.0]])
     forced_bundle = replace(bundle, S=forced, v=np.abs(bundle.v[:1]))
-    ledger = note.cashflows(forced_bundle)
+    ledger = note.cashflows(forced_bundle, r=0.0)
 
     assert ledger.amounts[0, 1] > 0.0  # the call itself pays
     np.testing.assert_allclose(ledger.amounts[0, 2], 0.0, atol=0.0)  # exactly zero after
@@ -234,11 +234,11 @@ def test_cashflows_reads_terminal_spot_at_its_own_expiry_not_bundle_last_column(
         engine,
         PseudoRandomSource(seed=1, antithetic=False),
     )
-    ledger = note.cashflows(bundle)  # note.observations land on grid indices [5, 10]
+    ledger = note.cashflows(bundle, r=0.0)  # note.observations land on grid indices [5, 10]
 
     forged_s = bundle.S.copy()
     forged_s[:, 11:] = -999.0  # would corrupt bundle.S[:, -1] if read directly
     forged_bundle = replace(bundle, S=forged_s)
-    forged_ledger = note.cashflows(forged_bundle)
+    forged_ledger = note.cashflows(forged_bundle, r=0.0)
 
     np.testing.assert_array_equal(ledger.amounts, forged_ledger.amounts)

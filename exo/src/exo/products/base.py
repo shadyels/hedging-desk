@@ -4,10 +4,12 @@ WHY UNDISCOUNTED AND DATED, NOT A DISCOUNTED SCALAR PER PATH: early redemption (
 coupon strips, TARF accumulation (P2.M3) and mini-future residual-value settlement on stop-out
 (P2.M2) all become "a cashflow on a different date" under this shape rather than four bespoke
 payoff mechanisms. Discounting is centralized in `products/pricer.py` and tested once there.
-Keeping `r` OUT of the payoff means a payoff's shape does not change when P2.M4 bumps `r` for
-rho -- but that is a property of THIS ledger shape, not a universal invariant: P2.M2's LSM
-American exercise and mini future both need a rate inside the payoff (see ADR-006 Amendment 3
-and Amendment 5).
+Discounting stays OUT of the payoff, but the payoff RECEIVES `r` as a keyword-only, required
+argument of `cashflows(bundle, *, r)` (P2.M2 slice 2, ADR-006 Amendment 7): the mini future's
+financing level accrues at the discount rate `r`, so a payoff must be able to read it. Payoffs
+that do not use `r` take it and ignore it; there is no default, so a call site that forgets it
+is a `TypeError` rather than a silently wrong rate. (P2.M2's LSM American exercise needs a rate
+too but lives in `models/`, not behind this Protocol -- ADR-006 Amendment 3.)
 
 The `Payoff` Protocol takes a single `PathBundle`. `exo/CLAUDE.md`'s M2 abstraction rule: if a new
 payoff requires touching `models/`, the abstraction is wrong. Every payoff-specific mechanism
@@ -105,7 +107,7 @@ class Payoff(Protocol):
     @property
     def expiry(self) -> float: ...
 
-    def cashflows(self, bundle: PathBundle) -> CashflowLedger: ...
+    def cashflows(self, bundle: PathBundle, *, r: float) -> CashflowLedger: ...
 
 
 def observation_indices(times: NDArray[np.float64], bundle: PathBundle) -> NDArray[np.intp]:
@@ -196,6 +198,59 @@ def validate_observation_schedule(
 _BRIDGE_PEAK_ARRAY_RATIO = 11.0
 
 
+def bridge_step_survival(
+    bundle: PathBundle,
+    levels: NDArray[np.float64],
+    direction: Literal["down", "up"],
+    last_idx: int,
+) -> NDArray[np.float64]:
+    """Per-step conditional survival against a per-step level, shape `(n_paths, last_idx)`.
+
+    `levels[i]` is the level in force on step `(t_i, t_{i+1}]`, so a level that resets over time
+    (mini future) and a constant one (`barrier_survival`) share ONE copy of the bridge math:
+
+        q_i = 1{S_i live vs L_i} * 1{S_{i+1} live vs L_i} * (1 - p_cross_i)
+
+    with `p_cross_i = exp(-2 x_i x_{i+1} / (v_i dt))`, `x = ln(S / L_i)` (Glasserman s6.4; see
+    `barrier_survival` for the full derivation). "Live" means strictly on the un-breached side
+    (`S > L` for "down", `S < L` for "up"), so `q_i == 0` on any breached endpoint. Same three
+    guards as `barrier_survival`: `v_i` clamped at 0, `p_cross = 0` where `v_i dt <= 0`, and a
+    breached endpoint short-circuits to 0 exactly.
+
+    Covers steps `0 .. last_idx - 1` from inception (no gaps), so the left-point variance
+    approximation is applied once per simulation step.
+    """
+    if direction not in _DIRECTIONS:
+        raise ValueError(f"direction must be one of {_DIRECTIONS}, got {direction!r}")
+    if levels.shape != (last_idx,):
+        raise ValueError(f"levels must have shape ({last_idx},), got {levels.shape}")
+    if not np.all(np.isfinite(levels)) or np.any(levels <= 0.0):
+        # Same NaN-reads-as-live trap as `barrier_survival`'s level check.
+        raise ValueError("levels must all be positive and finite")
+    if last_idx > bundle.t.shape[0] - 1:
+        raise ValueError(f"last_idx={last_idx} exceeds the bundle's {bundle.t.shape[0] - 1} steps")
+
+    s_a = bundle.S[:, :last_idx]
+    s_b = bundle.S[:, 1 : last_idx + 1]
+    lv = levels[np.newaxis, :]
+    live = (s_a > lv) & (s_b > lv) if direction == "down" else (s_a < lv) & (s_b < lv)
+
+    v_a = np.maximum(bundle.v[:, :last_idx], 0.0)
+    dt = np.diff(bundle.t[: last_idx + 1])[np.newaxis, :]
+    x_a = np.log(s_a / lv)
+    x_b = np.log(s_b / lv)
+    denom = v_a * dt
+    diffusive = denom > 0.0
+    safe_denom = np.where(diffusive, denom, 1.0)
+    # A straddling pair (one endpoint breached, the other not) can overflow the exponent to
+    # +inf -- harmless, since `live` is False there and the step's survival is exactly 0
+    # whatever p_cross is. (The result is clipped before the product only to keep it finite.)
+    with np.errstate(over="ignore"):
+        p_cross = np.where(diffusive, np.exp(-2.0 * x_a * x_b / safe_denom), 0.0)
+    p_cross = np.clip(p_cross, 0.0, 1.0)
+    return np.where(live, 1.0 - p_cross, 0.0)
+
+
 def barrier_survival(
     bundle: PathBundle,
     level: float,
@@ -255,39 +310,16 @@ def barrier_survival(
             "apply the left-point variance approximation across multiple simulation steps"
         )
 
-    s = bundle.S
-    v = bundle.v
-
-    obs_s = s[:, obs_idx]
+    obs_s = bundle.S[:, obs_idx]
     breached = obs_s <= level if direction == "down" else obs_s >= level
     endpoint_breach = np.any(breached, axis=1)
 
     if monitoring == Monitoring.DISCRETE:
         return np.where(endpoint_breach, 0.0, 1.0)
 
-    idx_a = obs_idx[:-1]
-    idx_b = obs_idx[1:]
-    s_a = s[:, idx_a]
-    s_b = s[:, idx_b]
-    v_a = np.maximum(v[:, idx_a], 0.0)
-    dt = (bundle.t[idx_b] - bundle.t[idx_a])[np.newaxis, :]
-
-    x_a = np.log(s_a / level)
-    x_b = np.log(s_b / level)
-    denom = v_a * dt
-    diffusive = denom > 0.0
-    safe_denom = np.where(diffusive, denom, 1.0)
-    # A straddling pair (one endpoint breached, the other not) can overflow the exponent to
-    # +inf -- harmless, since such a pair always belongs to a path caught by `endpoint_breach`
-    # below and its p_cross is discarded. Airtight only because the contiguity guard above
-    # rules out a gap that would let a genuinely-surviving path get a wrong, non-overflowing
-    # p_cross instead.
-    with np.errstate(over="ignore"):
-        p_cross = np.where(diffusive, np.exp(-2.0 * x_a * x_b / safe_denom), 0.0)
-    p_cross = np.clip(p_cross, 0.0, 1.0)
-
-    survive_product = np.prod(1.0 - p_cross, axis=1)
-    survival = np.where(endpoint_breach, 0.0, survive_product)
+    last_idx = obs_idx.shape[0] - 1
+    step_survival = bridge_step_survival(bundle, np.full(last_idx, level), direction, last_idx)
+    survival = np.where(endpoint_breach, 0.0, np.prod(step_survival, axis=1))
     return np.clip(survival, 0.0, 1.0)
 
 

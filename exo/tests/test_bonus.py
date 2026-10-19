@@ -29,7 +29,7 @@ def test_bonus_floor_for_survivors_and_plain_underlying_once_knocked() -> None:
     # grid t = [0, .5, 1]. path 0: survives, ends 100 -> bonus pays 115. path 1: survives, ends
     # 130 -> underlying. path 2: touches 70 (knocked), ends 100 -> plain underlying, no bonus.
     bundle = forced_bundle([[100.0, 90.0, 100.0], [100.0, 110.0, 130.0], [100.0, 70.0, 100.0]])
-    ledger = _bonus().cashflows(bundle)
+    ledger = _bonus().cashflows(bundle, r=0.0)
     np.testing.assert_array_equal(ledger.t, [1.0])
     np.testing.assert_allclose(ledger.amounts[:, 0], [0.5 * 115.0, 0.5 * 130.0, 0.5 * 100.0])
 

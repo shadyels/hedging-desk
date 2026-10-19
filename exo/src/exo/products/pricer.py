@@ -59,14 +59,14 @@ def price_from_bundle(
     could pick up floating-point drift. This guard exists so the *pricer-mediated* path fails
     loud instead of silently pricing the wrong contract; `barrier.py`/`autocallable.py`
     independently bound their own monitoring/terminal-leg indices to the payoff's own expiry
-    (not the bundle's last column), so a caller that calls `payoff.cashflows(bundle)` directly,
-    bypassing this guard, is still priced correctly.
+    (not the bundle's last column), so a caller that calls `payoff.cashflows(bundle, r=...)`
+    directly, bypassing this guard, is still priced correctly.
 
     # ponytail (P2-8, P2.M1 slice 2): the exact `bundle.t[-1] != payoff.expiry` guard means this
     # function cannot price a shorter-dated payoff against a shared longer bundle -- the use
     # case this docstring's opening paragraph advertises for P2.M4's portfolio revaluation.
     # Every current shorter-dated caller must bypass `price_from_bundle` and call
-    # `discount(payoff.cashflows(bundle), r=...)` directly. Trigger: P2.M4, whose portfolio
+    # `discount(payoff.cashflows(bundle, r=...), r=...)` directly. Trigger: P2.M4, whose portfolio
     # revaluation decides whether to relax this guard. See docs/PONYTAIL-DEBT.md.
     """
     if bundle.t[-1] != payoff.expiry:
@@ -81,7 +81,7 @@ def price_from_bundle(
             "from a disjoint pilot sample (estimate_beta), never fitted on the sample being "
             "priced. See estimate_beta's docstring."
         )
-    ledger = payoff.cashflows(bundle)
+    ledger = payoff.cashflows(bundle, r=r)
     discounted = discount(ledger, r=r)
     if control is not None:
         assert beta is not None  # guarded above; narrows for mypy
@@ -200,7 +200,7 @@ def price_rqmc(
             seed=seed, n_paths=engine.n_paths, dims=dims, replicate=n_replicates, bridge=bridge, t=t
         )
         pilot_bundle = simulate(params, engine, pilot_rng)
-        pilot_discounted = discount(payoff.cashflows(pilot_bundle), r=params.r)
+        pilot_discounted = discount(payoff.cashflows(pilot_bundle, r=params.r), r=params.r)
         pilot_control = vanilla_control(
             pilot_bundle, params, strike=control_strike, expiry=payoff.expiry, r=params.r
         )
@@ -212,7 +212,7 @@ def price_rqmc(
             seed=seed, n_paths=engine.n_paths, dims=dims, replicate=i, bridge=bridge, t=t
         )
         bundle = simulate(params, engine, rng)
-        discounted = discount(payoff.cashflows(bundle), r=params.r)
+        discounted = discount(payoff.cashflows(bundle, r=params.r), r=params.r)
         if control_strike is not None:
             assert resolved_beta is not None  # resolved above whenever control_strike is set
             control = vanilla_control(

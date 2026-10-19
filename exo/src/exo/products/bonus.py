@@ -65,7 +65,7 @@ class BonusCertificate:
                 f"{self.observations}"
             )
 
-    def cashflows(self, bundle: PathBundle) -> CashflowLedger:
+    def cashflows(self, bundle: PathBundle, *, r: float) -> CashflowLedger:
         surv, expiry_idx = expiry_survival(
             bundle, self.barrier, "down", self.monitoring, self.observations, self.expiry
         )

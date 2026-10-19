@@ -30,7 +30,7 @@ def _rc(**overrides: object) -> ReverseConvertible:
 def test_rc_ledger_columns_and_terminal_conversion() -> None:
     # grid t = [0, .5, 1]; path 0 ends above strike (full notional), path 1 at 60 (converts)
     bundle = forced_bundle([[100.0, 100.0, 120.0], [100.0, 90.0, 60.0]])
-    ledger = _rc().cashflows(bundle)
+    ledger = _rc().cashflows(bundle, r=0.0)
     np.testing.assert_array_equal(ledger.t, [0.5, 1.0])
     np.testing.assert_allclose(
         ledger.amounts, [[30.0, 30.0 + 1000.0], [30.0, 30.0 + 600.0]], rtol=1e-12
@@ -42,14 +42,14 @@ def test_brc_knocked_path_converts_and_surviving_path_is_par() -> None:
     # path 1 never touches 80 and ends at 85 < K: survivor, par rather than converted.
     bundle = forced_bundle([[100.0, 70.0, 60.0], [100.0, 90.0, 85.0]])
     note = _rc(barrier=80.0, monitoring=Monitoring.DISCRETE, observations=(0.5, 1.0))
-    ledger = note.cashflows(bundle)
+    ledger = note.cashflows(bundle, r=0.0)
     np.testing.assert_allclose(ledger.amounts[:, -1], [30.0 + 600.0, 30.0 + 1000.0], rtol=1e-12)
 
 
 def test_terminal_leg_reads_own_expiry_on_a_longer_bundle() -> None:
     # bundle runs to t=2 (grid 0, .5, 1, 1.5, 2); the note expires at 1.0 -> index 2
     bundle = forced_bundle([[100.0, 100.0, 50.0, 500.0, 500.0]], expiry=2.0)
-    ledger = _rc().cashflows(bundle)
+    ledger = _rc().cashflows(bundle, r=0.0)
     np.testing.assert_allclose(ledger.amounts[0], [30.0, 30.0 + 500.0], rtol=1e-12)
 
 

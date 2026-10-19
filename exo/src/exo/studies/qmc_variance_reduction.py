@@ -308,7 +308,7 @@ def _fit_pseudo_beta(
     )
     rng = PseudoRandomSource(seed=seed, antithetic=antithetic)
     bundle = simulate(params, engine, rng)
-    discounted = discount(payoff.cashflows(bundle), r=params.r)
+    discounted = discount(payoff.cashflows(bundle, r=params.r), r=params.r)
     control = vanilla_control(
         bundle, params, strike=control_strike, expiry=payoff.expiry, r=params.r
     )
@@ -345,7 +345,7 @@ def _fit_rqmc_beta(
         t=t,
     )
     pilot_bundle = simulate(params, engine, pilot_rng)
-    pilot_discounted = discount(payoff.cashflows(pilot_bundle), r=params.r)
+    pilot_discounted = discount(payoff.cashflows(pilot_bundle, r=params.r), r=params.r)
     pilot_control = vanilla_control(
         pilot_bundle, params, strike=control_strike, expiry=payoff.expiry, r=params.r
     )

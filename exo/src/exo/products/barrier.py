@@ -89,7 +89,7 @@ class BarrierOption:
                 f"{self.observations}"
             )
 
-    def cashflows(self, bundle: PathBundle) -> CashflowLedger:
+    def cashflows(self, bundle: PathBundle, *, r: float) -> CashflowLedger:
         expiry_idx = int(observation_indices(np.array([self.expiry]), bundle)[0])
 
         if self.monitoring == Monitoring.DISCRETE:

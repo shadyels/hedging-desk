@@ -53,7 +53,7 @@ class Warrant:
         out: NDArray[np.float64] = self.ratio * np.maximum(sign * (s - self.strike), 0.0)
         return out
 
-    def cashflows(self, bundle: PathBundle) -> CashflowLedger:
+    def cashflows(self, bundle: PathBundle, *, r: float) -> CashflowLedger:
         if self.exercise == "american":
             raise ValueError(
                 "American warrants have no European cashflow ledger -- price them with "
