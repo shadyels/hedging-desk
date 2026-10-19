@@ -54,10 +54,10 @@ beyond reach (the same trick `test_pricer_rqmc.py` already uses, "avoids writing
 type just for these tests") rather than inventing a bespoke vanilla `Payoff`.
 
 **No internal batching.** Unlike `scheme_convergence.py`, this study's default path budget per
-repetition (`B = 32_768`) keeps one call's peak memory (~250 MB at defaults, `_PEAK_ARRAY_RATIO`
-below) well under any reasonable ceiling, and a bounded number of bundles is live within a
-repetition -- up to three at peak, never a list (see `price_rqmc`'s docstring; the pseudo path
-allocates one bundle per repetition).
+repetition (`B = 32_768`) keeps one call's peak memory (~250 MB at defaults,
+`RQMC_PEAK_ARRAY_RATIO` in `models/memory.py`) well under any reasonable ceiling, and a bounded
+number of bundles is live within a repetition -- up to three at peak, never a list (see
+`price_rqmc`'s docstring; the pseudo path allocates one bundle per repetition).
 `_estimate_peak_bytes` is informational only (Peak memory section of the report) -- this
 sweep's fixed 7-cell grid and fixed `n_steps` never approach a size where batching would matter,
 so there is no refusal guard or `resolve_batch_plan`-style machinery here.
@@ -80,6 +80,7 @@ from numpy.typing import NDArray
 
 from exo.models.control_variate import estimate_beta, vanilla_control
 from exo.models.heston import simulate
+from exo.models.memory import RQMC_PEAK_ARRAY_RATIO
 from exo.models.params import EngineConfig, HestonParams, Scheme
 from exo.models.rng import PseudoRandomSource, SobolRandomSource
 from exo.products.autocallable import Autocallable
@@ -122,18 +123,6 @@ _REPO_ROOT = _THIS_FILE.parents[4]  # .../exo/src/exo/studies/ -> .../hedging-de
 _EXO_ROOT = _THIS_FILE.parents[3]  # .../hedging-desk/exo
 DEFAULT_REPORT_PATH = _REPO_ROOT / "docs" / "studies" / "p2m1-qmc-variance-reduction.md"
 DEFAULT_MANIFEST_DIR = _EXO_ROOT / "run-manifests"
-
-# Peak bytes per (path, step) for one `price_rqmc` call (up to three bundles and two point matrices
-# live at peak -- the pilot plus the previous and current replicate; see price_rqmc's docstring),
-# MEASURED with tracemalloc (not hand-counted -- see `test_qmc_memory.py`) at the worst-case config
-# this study actually runs: n_paths=1024, n_steps=50, scheme="qe", bridge={"spot"}, control_strike
-# set (config 5's shape). Measured peak 7_660_768 bytes against a denominator of
-# n_paths*(n_steps+1)*8 = 417_792 bytes -> ratio ~18.34 (two repeated measurements agreed to 4
-# significant figures after a warmup call to exclude scipy's one-time lazy-import cost from the
-# trace). Committed at 19.0, a ~3.6% margin over the measured value -- covers heston.py's own ~5x
-# array footprint PLUS SobolRandomSource's (n_paths, 2*n_steps) point matrices (pilot + current)
-# PLUS bridge_normals' transient W array PLUS the control variate's own payoff/control arrays.
-_PEAK_ARRAY_RATIO = 19.0
 
 
 @dataclass(frozen=True)
@@ -284,7 +273,7 @@ def _sub_seed(base_seed: int, *tags: object) -> int:
 def _estimate_peak_bytes(n_paths_this_call: int, n_steps: int) -> int:
     """Conservative peak-memory estimate for ONE `simulate()`/`price_rqmc()` call (module
     docstring's refusal-guard design)."""
-    return int(_PEAK_ARRAY_RATIO * n_paths_this_call * (n_steps + 1) * 8)
+    return int(RQMC_PEAK_ARRAY_RATIO * n_paths_this_call * (n_steps + 1) * 8)
 
 
 def _fit_pseudo_beta(
@@ -848,9 +837,10 @@ def render_report(
     lines += [
         "## Peak memory",
         "",
-        f"`_PEAK_ARRAY_RATIO = {_PEAK_ARRAY_RATIO}` (tracemalloc-measured, see "
-        "`exo/tests/test_qmc_memory.py` and this module's own comment on the constant): peak "
-        "bytes for one `price_rqmc`/`simulate()` call is bounded by `_PEAK_ARRAY_RATIO * "
+        f"`RQMC_PEAK_ARRAY_RATIO = {RQMC_PEAK_ARRAY_RATIO}` (tracemalloc-measured, see "
+        "`exo/tests/test_qmc_memory.py` and the comment on the constant in "
+        "`exo/src/exo/models/memory.py`): peak "
+        "bytes for one `price_rqmc`/`simulate()` call is bounded by `RQMC_PEAK_ARRAY_RATIO * "
         "n_paths * (n_steps + 1) * 8` -- "
         f"{peak_estimate / 1e6:.0f} MB at this run's `n_paths`/`n_steps`.",
         "",

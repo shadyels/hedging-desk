@@ -20,6 +20,11 @@ acceptance test").
   that pins discounting.
 - G-W1: European warrant, call and put, three strikes, on `[models.SPX]` (Feller ratio
   0.231) vs `ratio * heston_vanilla_price`; closes the SPX Feller-violating carried risk.
+- G-W2 / G-W3 / G-W4 (P2.M2 slice 3): American warrants by Longstaff-Schwartz. G-W2 is the exact
+  zero-dividend-call identity (pins the Jensen floor and terminal plumbing, NOT the regression);
+  G-W3 is the ONE-SIDED Bermudan-binomial gate plus a declared low-bias budget (a two-sided 3-SE
+  gate is forbidden, ADR-006 A7 s3); G-W4 shows the (S, v) basis beats an S-only basis under
+  Heston.
 
 EVERY 3-SE GATE CARRIES A SECOND CONJUNCT BOUNDING THE SE ITSELF (`0 < se < tol_abs`, see
 `test_validation_gates.py`'s module docstring): `tol_abs` is set from the SE actually measured
@@ -35,17 +40,21 @@ from typing import Literal
 
 import numpy as np
 import pytest
+from numpy.typing import NDArray
 
 from exo.models.analytic import bs_barrier_price, bs_barrier_rebate_at_hit
+from exo.models.binomial import crr_price
+from exo.models.estimator import mc_estimate
 from exo.models.heston import simulate
 from exo.models.heston_cf import heston_call_price_and_error, heston_vanilla_price
+from exo.models.lsm import apply_exercise_policy, fit_exercise_policy
 from exo.models.params import EngineConfig, HestonParams, load_models_section
 from exo.models.rng import PseudoRandomSource
 from exo.products.barrier import BarrierOption
 from exo.products.base import Monitoring
 from exo.products.bonus import BonusCertificate
 from exo.products.mini_future import MiniFuture
-from exo.products.pricer import price_from_bundle
+from exo.products.pricer import discount, price_american, price_from_bundle
 from exo.products.reverse_convertible import ReverseConvertible
 from exo.products.warrant import Warrant
 
@@ -536,4 +545,214 @@ def test_g_mf2_mini_future_with_resets_is_worth_spot_minus_financing_within_3se(
     assert abs(result.pv - reference) < 3.0 * result.std_err, (
         f"{side} seed={seed}: pv={result.pv}, ref={reference}, off by "
         f"{(result.pv - reference) / result.std_err:.2f} SE"
+    )
+
+
+_LSM_STEPS = 50
+_LSM_EXERCISE_IDX = np.arange(1, _LSM_STEPS, dtype=np.intp)
+
+
+def _lsm_engine(n_paths: int = 50_000) -> EngineConfig:
+    return EngineConfig(
+        scheme="qe", n_steps=_LSM_STEPS, n_paths=n_paths, expiry=1.0, antithetic=True
+    )
+
+
+def _american(
+    option_type: Literal["call", "put"], strike: float, ratio: float, underlying: str = "SYN"
+) -> Warrant:
+    return Warrant(
+        underlying=underlying,
+        option_type=option_type,
+        strike=strike,
+        expiry=1.0,
+        ratio=ratio,
+        exercise="american",
+    )
+
+
+@pytest.mark.parametrize("model", ["aapl", "degenerate"])
+def test_g_w2_zero_dividend_american_call_equals_european_twin_exactly(model: str) -> None:
+    """G-W2. With q = 0 an American call is never exercised early (Merton), and the Jensen
+    continuation floor makes the fitted policy reproduce that exactly: per-path
+    `outcome.discounted` equals the European twin's discounted ledger to 1e-12 and no path
+    exercises early. `[models.AAPL]` with q overridden to 0 (r=0.0425, Feller 0.333) and its
+    BS-degenerate twin (sigma 0.2, same r, q=0), call struck at s0, ratio 0.1, QE / 50 steps /
+    50k valuation paths + a disjoint 50k pilot.
+
+    WHAT THIS PINS: the Jensen floor and the terminal-leg plumbing (discounting, `terminal_idx`,
+    `held` bookkeeping). It does NOT pin the regression: with the floor on, the regression never
+    gets to decide anything at q = 0, whatever it returns (G-W3 and G-W4 pin the regression).
+    Measured: n_early_exercised = 0 on both models; max |discounted - european| = 0.0. Floor
+    mutant (floor removed from fit and apply, same seeds): 715 (AAPL q=0) / 1,558 (degenerate) of
+    50,000 paths exercise early, max |discounted - european| = 12.13 / 3.41. (The spec's 5,657 /
+    z = -4.9 for the unfloored case was NOT reproduced; the mutant is sharp regardless.)
+    """
+    params = (
+        _AAPL.model_copy(update={"q": 0.0})
+        if model == "aapl"
+        else HestonParams(
+            s0=100.0,
+            r=0.0425,
+            q=0.0,
+            v0=_SIGMA_DEGENERATE**2,
+            kappa=1.5,
+            theta=_SIGMA_DEGENERATE**2,
+            xi=1e-4,
+            rho=0.0,
+        )
+    )
+    warrant = _american("call", params.s0, 0.1)
+    pilot = simulate(params, _lsm_engine(), PseudoRandomSource(seed=501))
+    policy = fit_exercise_policy(
+        pilot,
+        warrant.intrinsic,
+        exercise_idx=_LSM_EXERCISE_IDX,
+        terminal_idx=_LSM_STEPS,
+        r=params.r,
+        q=params.q,
+    )
+    del pilot
+    bundle = simulate(params, _lsm_engine(), PseudoRandomSource(seed=502))
+    outcome = apply_exercise_policy(bundle, warrant.intrinsic, policy, r=params.r, q=params.q)
+
+    twin = Warrant(
+        underlying=warrant.underlying,
+        option_type="call",
+        strike=warrant.strike,
+        expiry=1.0,
+        ratio=0.1,
+        exercise="european",
+    )
+    european = discount(twin.cashflows(bundle, r=params.r), r=params.r)
+
+    n_early = int(np.count_nonzero(outcome.exercise_step != _LSM_STEPS))
+    assert n_early == 0, f"{n_early} paths exercised a zero-dividend call early"
+    np.testing.assert_allclose(outcome.discounted, european, rtol=0.0, atol=1e-12)
+
+
+def _lsm_degenerate(r: float, q: float) -> HestonParams:
+    return HestonParams(
+        s0=100.0,
+        r=r,
+        q=q,
+        v0=_SIGMA_DEGENERATE**2,
+        kappa=1.5,
+        theta=_SIGMA_DEGENERATE**2,
+        xi=1e-4,
+        rho=0.0,
+    )
+
+
+@pytest.mark.parametrize("seed", [42, 7, 123, 2024])
+@pytest.mark.parametrize(("option_type", "r", "q"), [("put", 0.06, 0.0), ("call", 0.02, 0.08)])
+def test_g_w3_lsm_is_a_low_biased_estimate_of_the_bermudan_binomial_reference(
+    option_type: Literal["call", "put"], r: float, q: float, seed: int
+) -> None:
+    """G-W3. BS-degenerate model, S0 = K = 100, sigma 0.2, T = 1, 50 steps, ratio 1; (a) put r=0.06
+    q=0, (b) call r=0.02 q=0.08 (early exercise matters in both). 50k valuation paths + a disjoint
+    50k pilot (pilot seed = seed + 10_000) through the real `price_american`. Reference:
+    `crr_price(N=10000, exercise_every=200)` -- a BERMUDAN tree on exactly the 50 LSM exercise
+    dates (the continuous-American value is ~0.014 higher, ~0.7 SE, and would be misread as LSM
+    bias).
+
+    ASSERTION STRUCTURE (ADR-006 A7 s3), exactly three conjuncts: `0 < se < tol_abs`;
+    `pv - ref < 3 se` (UPPER bound: an out-of-sample fixed policy cannot beat the true Bermudan
+    value, so this is valid at any path count); and
+    `ref - pv < 3 se + 0.05` (a DECLARED low-bias budget: the LSM estimate is low by a
+    basis-limited amount that does not shrink with N, so a two-sided 3-SE gate is FORBIDDEN -- it
+    would go red as N grows). Sharp against never-exercising (bias -0.57). NOT sharp against
+    in-sample fitting: fitting and valuing on the SAME bundle (6 coefficients, 50k paths) measured
+    put -0.036/-0.005/+0.025/-0.028 and call -0.048/-0.022/+0.045/-0.049 at seeds 42/7/123/2024,
+    i.e. only ~+0.01 (~0.5 SE) above the out-of-sample figures below -- far inside the 3-SE upper
+    bound. That defect is blocked structurally by `price_american`'s disjoint-seed guard
+    (`test_lsm.py`), not by this gate.
+
+    Measured (ref put 5.78514, call 5.72492; se put 0.0193-0.0194, call 0.0260-0.0264):
+        put  seed 42/7/123/2024: bias -0.0492/-0.0068/+0.0165/-0.0468
+        call seed 42/7/123/2024: bias -0.0666/-0.0314/+0.0143/-0.0570
+    20-seed sweep (seeds 500..519), bias = pv - ref: put mean -0.0293 (range -0.0674..+0.0117),
+    call mean -0.0435 (range -0.0814..-0.0048); max |bias/se| 3.45 put / 3.09 call -- i.e. a
+    two-sided 3-SE gate would fail on ~1 seed in 20. At 400k valuation paths the same policies
+    give put -0.011 / call -0.025 (3 seeds, pilot 50k and 200k alike): basis-limited, not
+    pilot-limited. tol_abs: put 0.021, call 0.028 (just above the measured SEs).
+    """
+    params = _lsm_degenerate(r, q)
+    warrant = _american(option_type, 100.0, 1.0)
+    result = price_american(
+        warrant,
+        params,
+        _lsm_engine(),
+        PseudoRandomSource(seed=seed),
+        pilot_rng=PseudoRandomSource(seed=seed + 10_000),
+    )
+    reference = crr_price(
+        s0=100.0,
+        strike=100.0,
+        r=r,
+        q=q,
+        sigma=_SIGMA_DEGENERATE,
+        expiry=1.0,
+        option_type=option_type,
+        n_tree_steps=10_000,
+        exercise_every=200,
+    )
+    pv, se = result.price.pv, result.price.std_err
+
+    tol_abs = 0.021 if option_type == "put" else 0.028
+    assert 0.0 < se < tol_abs, (
+        f"{option_type} seed={seed}: se={se} is not tight enough to be a meaningful gate "
+        f"(tol_abs={tol_abs})"
+    )
+    assert pv - reference < 3.0 * se, (
+        f"{option_type} seed={seed}: pv={pv} EXCEEDS the Bermudan reference {reference} by "
+        f"{(pv - reference) / se:.2f} SE -- an out-of-sample policy cannot do that (in-sample fit?)"
+    )
+    assert reference - pv < 3.0 * se + 0.05, (
+        f"{option_type} seed={seed}: pv={pv} is {reference - pv:.4f} below ref={reference}, beyond "
+        "the 3 SE + 0.05 declared low-bias budget"
+    )
+
+
+def _s_only_basis(x: NDArray[np.float64], v: NDArray[np.float64]) -> NDArray[np.float64]:
+    """`[1, x, x^2]` -- the S-only basis ADR-006 A3 s1 calls a defect under stochastic vol."""
+    return np.column_stack([np.ones_like(x), x, x * x])
+
+
+@pytest.mark.parametrize("seed", [42, 7, 123, 2024])
+def test_g_w4_sv_basis_beats_s_only_basis_under_heston(seed: int) -> None:
+    """G-W4. `[models.SPX]` (Feller 0.231), American put K = s0, ratio 0.01, QE / 50 steps, 50k
+    valuation paths + a disjoint 50k pilot (pilot seed = seed + 10_000). Policy A (the (S, v)
+    `quadratic_sv_basis`) vs policy B (a test-local S-only `[1, x, x^2]`), fitted on the SAME pilot
+    bundle and applied to the SAME valuation bundle, so the per-path difference carries almost no
+    sampling noise. Asserts `mean(A - B) > 3 * se_diff` with `se_diff` the antithetic pair-mean SE
+    of the paired difference. Sharp against regressing on S alone (exo/CLAUDE.md M2 rule).
+
+    Measured (diff = A - B, se_diff):
+        seed 42:   A=2.87276 B=2.81605 diff=0.05671 se_diff=0.01163 z=4.88
+        seed 7:    A=2.87213 B=2.78059 diff=0.09153 se_diff=0.01198 z=7.64
+        seed 123:  A=2.84267 B=2.78050 diff=0.06217 se_diff=0.01163 z=5.35
+        seed 2024: A=2.88036 B=2.83239 diff=0.04797 se_diff=0.01196 z=4.01
+    20-seed sweep (seeds 500..519): mean z 6.38, min z 3.51, max z 8.85, mean diff 0.0788,
+    se_diff 0.0117-0.0128.
+    """
+    warrant = _american("put", _SPX.s0, 0.01, "SPX")
+    kwargs = {
+        "exercise_idx": _LSM_EXERCISE_IDX,
+        "terminal_idx": _LSM_STEPS,
+        "r": _SPX.r,
+        "q": _SPX.q,
+    }
+    pilot = simulate(_SPX, _lsm_engine(), PseudoRandomSource(seed=seed + 10_000))
+    policy_a = fit_exercise_policy(pilot, warrant.intrinsic, **kwargs)
+    policy_b = fit_exercise_policy(pilot, warrant.intrinsic, basis=_s_only_basis, **kwargs)
+    del pilot
+    bundle = simulate(_SPX, _lsm_engine(), PseudoRandomSource(seed=seed))
+    a = apply_exercise_policy(bundle, warrant.intrinsic, policy_a, r=_SPX.r, q=_SPX.q)
+    b = apply_exercise_policy(bundle, warrant.intrinsic, policy_b, r=_SPX.r, q=_SPX.q)
+    paired = mc_estimate(bundle, a.discounted - b.discounted)
+
+    assert paired.pv > 3.0 * paired.std_err, (
+        f"seed={seed}: mean(A - B)={paired.pv} is only {paired.pv / paired.std_err:.2f} "
+        "paired SE above zero -- the (S, v) basis shows no advantage over S-only"
     )

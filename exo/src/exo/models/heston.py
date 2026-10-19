@@ -20,10 +20,15 @@ the measured breakdown): `simulate()` allocates `S`, `v`, and two draw matrices 
 concatenation: a FIFTH full-size array's worth of memory, not four. Measured directly with
 `tracemalloc` against the real `simulate()` (antithetic=True, the only path this study runs):
 peak/array ~= 5.02-5.08. Ceiling: ~2.02 GB at 200k paths x 252 steps (five arrays' worth).
-Trigger: P2.M2's LSM work, or any run that needs more paths/steps than fit in memory at once —
-retain only a declared observation grid, or batch paths (see `PriceResult.combine()` in
-estimator.py, which exists for exactly this; `studies/scheme_convergence.py`'s
-`resolve_batch_plan` is the first consumer and accounts for the full measured footprint).
+P2.M2's LSM retains exactly one bundle at peak (`price_american` drops its pilot bundle before
+the valuation `simulate`): tracemalloc-measured peak/array 4.982, committed as
+`LSM_PEAK_ARRAY_RATIO = 5.2` in `models/memory.py`, so it adds nothing to this ceiling and needs
+no batching at the M2 gate sizes (<= 50k paths x 52 steps).
+Trigger: P2.M4 (RQMC American pricing, production-size portfolio revaluation), or any run that
+needs more paths/steps than fit in memory at once — retain only a declared observation grid, or
+batch paths (see `PriceResult.combine()` in estimator.py, which exists for exactly this;
+`studies/scheme_convergence.py`'s `resolve_batch_plan` is the first consumer and accounts for
+the full measured footprint).
 
 Two schemes are implemented:
 
