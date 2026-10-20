@@ -11,7 +11,8 @@ the DISCOUNT rate threaded through `Payoff.cashflows(bundle, *, r)` (user decisi
 `horizon` is a CARRY horizon, not a maturity: a real mini future is open-ended, and the engine
 needs a finite date to simulate to and discount over. `expiry` returns it so `price()`'s
 exact-expiry guard is unchanged. With `financing_spread = 0` and `q = 0` the PV is
-`ratio * (S0 - F0)` for ANY horizon and any continuous model (G-MF2).
+`ratio * (S0 - F0)` for any horizon over which the reset schedule keeps the level beyond F,
+and any continuous model (G-MF2).
 
 The stop-loss resets at each of `reset_times` to `F(t_k) * (1 + buffer)` (long) /
 `F(t_k) * (1 - buffer)` (short) and stays there until the next reset. `L_i` below is the level in

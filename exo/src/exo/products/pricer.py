@@ -116,6 +116,8 @@ def price(
     return price_from_bundle(payoff, bundle, r=params.r)
 
 
+# ponytail: the low-bias tag lives only in this type. Ceiling: `ProductLine` has no field for it,
+# so the tag is lost at the wire. Trigger: P2.M4/P3, when EXO first publishes.
 @dataclass(frozen=True)
 class LowerBoundPriceResult:
     """An LSM price: a LOWER BOUND in expectation on the (Bermudan-on-the-grid) American value.
@@ -160,6 +162,8 @@ def price_american(
             f"{warrant.expiry} -- these must match exactly, or the warrant would be priced "
             "against the wrong contract horizon."
         )
+    # ponytail: pseudo-random sources only. Ceiling: no RQMC variance reduction for American
+    # warrants. Trigger: P2.M4 RQMC American pricing (fixed external policy per ADR-006 A7 §2).
     if rng.low_discrepancy or pilot_rng.low_discrepancy:
         raise NotImplementedError(
             "price_american does not support low-discrepancy (RQMC) sources: RQMC American "

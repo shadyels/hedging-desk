@@ -71,8 +71,9 @@ class CashflowLedger:
     mispairs it.
 
     # ponytail (P2-6, P2.M1 slice 2): `t` is path-independent, so no payoff can emit a
-    # cashflow whose date varies by path. Trigger: P2.M2 mini-future stop-out / LSM American
-    # exercise. See docs/PONYTAIL-DEBT.md.
+    # cashflow whose date varies by path. P2.M2 did not need it (mini future: expected residual
+    # on full-grid columns; LSM: per-path values outside the ledger). Trigger: first product whose
+    # payment date is off the simulation grid (e.g. a settlement lag). See docs/PONYTAIL-DEBT.md.
     """
 
     t: NDArray[np.float64]
@@ -94,6 +95,9 @@ class CashflowLedger:
             raise ValueError(f"t must be strictly ascending, got {self.t.tolist()}")
 
 
+# ponytail: term sheets validate values but not types -- `bool` passes for float fields and a
+# `list` for tuple schedules (mutable after validation on a frozen dataclass). Harmless for pytest
+# fixtures. Trigger: first deserialized term sheet, P2.M4 persisted product book.
 class Payoff(Protocol):
     """A priceable product: something that turns one `PathBundle` into a `CashflowLedger`.
 
@@ -286,14 +290,16 @@ def barrier_survival(
       - a path whose ENDPOINT already breached short-circuits to survival 0 exactly.
 
     # ponytail (P2-1, P2.M1 slice 2): survival is a probability, carrying no crossing time.
-    # Ceiling: no rebate-bearing product can be built on this function as-is. Trigger: P2.M2
-    # mini future (needs the stop-out date). See docs/PONYTAIL-DEBT.md.
+    # Ceiling: no rebate-bearing product can be built on this function as-is (the P2.M2 mini
+    # future avoided it via `bridge_step_survival`). Trigger: first rebate-bearing barrier term
+    # sheet, P4.M5. See docs/PONYTAIL-DEBT.md.
     # ponytail (P2-2, P2.M1 slice 2): step variance is taken at the left point. Ceiling:
     # accuracy is unverified outside the BS-degenerate limit. Trigger: P4.M4 PDE cross-check.
     # See docs/PONYTAIL-DEBT.md.
     # ponytail (P2-7, P2.M1 slice 2): CONTINUOUS_BRIDGE peak memory, tracemalloc-measured at
-    # ~10.2x one array. Ceiling: ~1 GB once `n_paths * n_steps > 1.2e7`. Trigger: P2.M2 mini
-    # future on a daily grid, or P2.M4 portfolio revaluation. See docs/PONYTAIL-DEBT.md.
+    # ~10.2x one array. Ceiling: ~1 GB once `n_paths * n_steps > 1.2e7` (the P2.M2 mini future
+    # on a daily grid measured 8.22x at 20k x 252). Trigger: P2.M4 portfolio revaluation.
+    # See docs/PONYTAIL-DEBT.md.
     """
     if direction not in _DIRECTIONS:
         raise ValueError(f"direction must be one of {_DIRECTIONS}, got {direction!r}")

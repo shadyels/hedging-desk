@@ -31,6 +31,10 @@ class HestonParams(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    # ponytail: `r`/`q` are unconstrained and `s0` is only `gt=0`, so NaN/Inf can reach
+    # `mc_estimate`, which has no finiteness check -- `price()` then returns a NaN PV for payoffs
+    # that do not read `r`. Trigger: P2.M4, where bump-and-revalue first builds params in code
+    # and a PV first reaches the wire as `pv_e9`.
     s0: float = Field(gt=0)
     r: float
     q: float

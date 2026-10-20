@@ -35,8 +35,9 @@ class ControlVariate:
 # barrier products only. Ceiling: down-and-out/in CALLS get variance reduction; put barriers
 # and the autocallable get none. Upgrade: one parity line (`vanilla_price = call - S*exp(-q*T)
 # + K*exp(-r*T)`) makes a put control trivial; the autocallable needs a different control
-# entirely (no closed form for its coupon/redemption structure). Trigger: a put-barrier gate,
-# or P2.M3's products.
+# entirely (no closed form for its coupon/redemption structure). The original trigger (a
+# put-barrier gate) fired in P2.M2 (G-BRC, G-BON) without needing a control at gate SEs.
+# Owner: P2.M4, with the control-variate decision.
 #
 # ponytail: `mean` is the EXACT (continuous-time CF) price, not the DISCRETIZED model's own
 # expectation of `payoff` -- see `estimate_beta`'s docstring for why this makes `apply_control`

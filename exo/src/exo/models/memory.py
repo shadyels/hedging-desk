@@ -29,3 +29,7 @@ RQMC_PEAK_ARRAY_RATIO = 19.0
 # working set is small beside it. A kept pilot reference would read ~7. Committed at 5.2, a ~4.4%
 # margin (the regression test asserts `measured <= ceiling <= 1.06 * measured`).
 LSM_PEAK_ARRAY_RATIO = 5.2
+
+# ponytail: these ceilings are documented and test-measured, never enforced at runtime. Ceiling:
+# at 200k x 252, LSM ~2.1 GB and the mini future ~bundle + 8.6 arrays (~4.3 GB). Trigger: P2.M4
+# `ProcessPoolExecutor` revaluation (raise or batch from these constants).

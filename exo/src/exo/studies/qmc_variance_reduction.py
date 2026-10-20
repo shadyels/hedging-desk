@@ -44,8 +44,8 @@ decision without doubling the run). AAPL/MSFT `HestonParams` are kept as LOCAL c
 silently drift if `exo.toml` is later tweaked for an unrelated reason.
 
 # ponytail: fixture ceiling -- bridge and control-variate ratios are measured ONLY at Feller
-# ratios 0.333 (AAPL) and 1.633 (MSFT). Trigger: P2.M2's warrant gate, the existing owner of the
-# SPX (0.231) sweep -- unchanged by this study.
+# ratios 0.333 (AAPL) and 1.633 (MSFT). QE bias at SPX's 0.231 is now recorded by P2.M2's G-W1;
+# variance ratios at 0.231 remain unmeasured. Trigger: P2.M4's sampler decision.
 
 **No new estimator, pricer, or payoff abstraction.** This module reuses `price`,
 `price_from_bundle`, `price_rqmc`, `vanilla_control`, `estimate_beta`, `RunManifest`, `git_sha`,

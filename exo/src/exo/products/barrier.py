@@ -7,7 +7,8 @@ parity (`KO + KI == vanilla`) hold EXACTLY, path by path -- a free machine-preci
 feeds both weights and `w_ko + w_ki == 1` identically.
 
 # ponytail (P2-5, P2.M1 slice 2): no rebate on knock-out. Ceiling: cannot price a barrier with
-# a rebate feature. Trigger: P2.M2 (same trigger as base.py's crossing-time marker).
+# a rebate feature (the reference `bs_barrier_rebate_at_hit` exists since P2.M2). Trigger: first
+# rebate-bearing barrier term sheet, P4.M5 (same as base.py's crossing-time marker).
 # See docs/PONYTAIL-DEBT.md.
 """
 
