@@ -38,4 +38,6 @@ End every report with a `LESSONS:` block: 0-3 short, GENERALIZABLE lessons that 
 ## Learned lessons
 - Before reporting something as MISSING from a doc, grep for the concept inside neighbouring entries, not just for a heading of that name — a glossary "control variate" defined inside the "Variance reduction" entry was reported absent.
 - Without a git tool, claims about history ("file X was left untouched", "commit is on main") are UNVERIFIABLE, not true or false; say so and name the git command that would settle it. A reflog entry proves a commit existed, not that it is reachable from any branch.
+- When grep prints `[Omitted long matching line]`, the hit is HIDDEN, not absent — read that line (or narrow with `-o`) before reporting something missing; a glossary's product definitions sat on one long line 4.
+- Set a spec's MANDATORY interface fields (a required `expiry`, a fixed signature) side by side with each new product's definition, and grep for every fixture/config value a roadmap gate names before assuming it exists — an open-ended product vs a required horizon, and a 'zero-dividend' fixture present in no config, only surface that way.
 <!-- END learned-lessons -->
