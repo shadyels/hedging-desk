@@ -109,10 +109,12 @@ def bs_barrier_price(
     Evidence coverage across the eight (direction, option_type, strike-vs-barrier) cells is
     uneven: down-call `K>H` is checked against a real Heston MC engine degenerated to BS (G4);
     up-call `K>H` and down-put `K<H` are pinned exactly against `bs_call_price`/`bs_put_price`;
-    the remaining four cells rest solely on this module's own degenerate limits and seam
-    continuity, which are
-    self-referential. UP-BARRIER PUTS ARE THE WEAKEST-EVIDENCED CELLS -- the first P2.M2 gate
-    that prices an up-barrier put should suspect this reference before its own MC.
+    down-call `K<H` and up-put `K>H` are pinned by the optional-stopping identities with
+    `bs_barrier_rebate_at_hit` (`test_analytic_barrier.py`) and by P2.M2's mini-future gate
+    G-MF1; down-put `K>H` is checked by G-BRC. The remaining cells (up-call `K<H`, up-put `K<H`)
+    rest solely on this module's own degenerate limits and seam continuity, which are
+    self-referential -- the first gate that prices one of them should suspect this reference
+    before its own MC.
     """
     if option_type not in _OPTION_TYPES:
         raise ValueError(f"option_type must be one of {_OPTION_TYPES}, got {option_type!r}")
@@ -196,3 +198,68 @@ def bs_barrier_price(
         else bs_put_price(s0=s0, strike=strike, r=r, q=q, sigma=sigma, expiry=expiry)
     )
     return float(vanilla - in_price)
+
+
+def bs_barrier_rebate_at_hit(
+    *,
+    s0: float,
+    r: float,
+    q: float,
+    sigma: float,
+    expiry: float,
+    barrier: float,
+    direction: Literal["down", "up"],
+) -> float:
+    """PV of 1 paid at the FIRST time the barrier is hit, if that happens before `expiry`
+    (continuous monitoring, Black-Scholes). The rebate-at-hit term of Reiner-Rubinstein (Haug,
+    "The Complete Guide to Option Pricing Formulas", 2nd ed.):
+
+        mu     = (b - sigma^2 / 2) / sigma^2,   b = r - q
+        lambda = sqrt(mu^2 + 2 r / sigma^2)
+        z      = ln(H / S) / (sigma sqrt(T)) + lambda sigma sqrt(T)
+        PV     = (H/S)^(mu+lambda) N(eta z)
+               + (H/S)^(mu-lambda) N(eta z - 2 eta lambda sigma sqrt(T))
+
+    with `eta = +1` for a down barrier and `-1` for an up barrier. A GATE REFERENCE like
+    `bs_barrier_price` (the mini future's stop-out residual, P2.M2 G-MF1), pinned by the
+    optional-stopping identities in `test_analytic_barrier.py`, not by a second derivation.
+
+    RAISES `ValueError` on non-finite inputs, non-positive `s0`/`barrier`/`expiry`/`sigma`, an
+    inception breach (same convention as `bs_barrier_price`: `s0 <= barrier` for "down",
+    `s0 >= barrier` for "up"), or `mu^2 + 2 r / sigma^2 < 0` (large negative `r`: `lambda` would
+    be complex and the closed form does not apply).
+    """
+    if direction not in _DIRECTIONS:
+        raise ValueError(f"direction must be one of {_DIRECTIONS}, got {direction!r}")
+    if not all(math.isfinite(x) for x in (s0, barrier, expiry, sigma, r, q)):
+        raise ValueError(
+            f"s0, barrier, expiry, sigma, r and q must all be finite, got "
+            f"s0={s0}, barrier={barrier}, expiry={expiry}, sigma={sigma}, r={r}, q={q}"
+        )
+    if s0 <= 0.0 or barrier <= 0.0 or expiry <= 0.0 or sigma <= 0.0:
+        raise ValueError(
+            f"s0, barrier, expiry and sigma must all be positive, got "
+            f"s0={s0}, barrier={barrier}, expiry={expiry}, sigma={sigma}"
+        )
+    if (direction == "down" and s0 <= barrier) or (direction == "up" and s0 >= barrier):
+        raise ValueError(
+            f"barrier {barrier} is already breached at inception (s0={s0}, "
+            f"direction={direction!r}) -- the rebate is only defined from the live side"
+        )
+
+    mu = (r - q - 0.5 * sigma**2) / sigma**2
+    lam_sq = mu**2 + 2.0 * r / sigma**2
+    if lam_sq < 0.0:
+        raise ValueError(
+            f"mu^2 + 2r/sigma^2 = {lam_sq} < 0 (r={r}, q={q}, sigma={sigma}) -- lambda is "
+            "complex and the rebate closed form does not apply"
+        )
+    lam = math.sqrt(lam_sq)
+    sig_sqrt_t = sigma * math.sqrt(expiry)
+    eta = 1.0 if direction == "down" else -1.0
+    ratio = barrier / s0
+    z = math.log(ratio) / sig_sqrt_t + lam * sig_sqrt_t
+    return float(
+        ratio ** (mu + lam) * _norm_cdf(eta * z)
+        + ratio ** (mu - lam) * _norm_cdf(eta * z - 2.0 * eta * lam * sig_sqrt_t)
+    )

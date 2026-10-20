@@ -241,8 +241,8 @@ class SobolRandomSource:
     # ponytail: layout is caller-declared and only validated against the requested
     # draw shape, not derived from the scheme. Ceiling: the two streams simulate()
     # draws today ("variance", "spot"). Upgrade: derive the layout from
-    # EngineConfig. Trigger: a scheme or product drawing a third stream (P2.M2 LSM
-    # exercise dates).
+    # EngineConfig. Trigger: a scheme or product drawing a third stream. (LSM is not one:
+    # it draws no random stream -- it regresses over the retained (S, v) bundle, P2.M2.)
     dims: tuple[tuple[str, int], ...]
     replicate: int = 0
     bridge: frozenset[str] = frozenset()
@@ -310,14 +310,14 @@ class SobolRandomSource:
         Ceiling: tracemalloc-measured peak 7,660,768 bytes against a denominator of
         n_paths*(n_steps+1)*8 = 417,792 bytes at n_paths=1024, n_steps=50, scheme="qe",
         bridge={"spot"} -- a peak-array ratio of ~18.34, committed as
-        `_PEAK_ARRAY_RATIO = 19.0` in `studies/qmc_variance_reduction.py` (a ~3.6% margin
+        `RQMC_PEAK_ARRAY_RATIO = 19.0` in `models/memory.py` (a ~3.6% margin
         over the measured value; see that module's comment on the constant for the full
         breakdown). On the same scale as heston.py's ~5.02-5.08 peak-array ratio (~2.02 GB
         at 200k paths x 252 steps) and `products/base.py`'s ~10.2 (`_BRIDGE_PEAK_ARRAY_RATIO
         = 11.0`) -- this module's eager (n_paths, D) point matrix is the largest of the
         three. Upgrade: generate per-stream blocks on demand instead of one eager
-        (n_paths, D) matrix. Trigger: P2.M2 LSM retention, or a batch that will not fit the
-        study's --max-batch-bytes.
+        (n_paths, D) matrix. Trigger: P2.M4 RQMC American pricing, or a batch that will not fit
+        the study's --max-batch-bytes.
         """
         total_dims = sum(n_dims for _, n_dims in self.dims)
         seed_sequence = np.random.SeedSequence(

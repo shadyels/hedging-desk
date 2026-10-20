@@ -66,7 +66,7 @@ def test_g3a_autocallable_certain_call_at_first_observation_is_exact() -> None:
     engine = EngineConfig(scheme="qe", n_steps=50, n_paths=20_000, expiry=1.0, antithetic=True)
     bundle = simulate(_AAPL, engine, PseudoRandomSource(seed=201))
 
-    ledger = note.cashflows(bundle)
+    ledger = note.cashflows(bundle, r=_AAPL.r)
     assert np.all(ledger.amounts[:, 0] > 0.0), "every path must call at observation 1"
     assert np.all(ledger.amounts[:, 1] == 0.0), "no cashflow may follow the call"
 
@@ -106,7 +106,7 @@ def test_g3b_autocallable_never_called_decomposes_as_short_put_within_3se() -> N
     engine = EngineConfig(scheme="qe", n_steps=50, n_paths=20_000, expiry=1.0, antithetic=True)
     bundle = simulate(_AAPL, engine, PseudoRandomSource(seed=202))
 
-    ledger = note.cashflows(bundle)
+    ledger = note.cashflows(bundle, r=_AAPL.r)
     assert np.all(ledger.amounts[:, 0] == 0.0), "no path may call or earn a coupon"
 
     result = price_from_bundle(note, bundle, r=_AAPL.r)
@@ -244,8 +244,8 @@ def test_g4_companion_bridge_is_load_bearing_paired_difference() -> None:
     continuous = _g4_barrier_option(Monitoring.CONTINUOUS_BRIDGE, None)
     discrete = _g4_barrier_option(Monitoring.DISCRETE, observations)
 
-    disc_continuous = discount(continuous.cashflows(bundle), r=_DEGENERATE.r)
-    disc_discrete = discount(discrete.cashflows(bundle), r=_DEGENERATE.r)
+    disc_continuous = discount(continuous.cashflows(bundle, r=_DEGENERATE.r), r=_DEGENERATE.r)
+    disc_discrete = discount(discrete.cashflows(bundle, r=_DEGENERATE.r), r=_DEGENERATE.r)
 
     d = disc_discrete - disc_continuous
     n_pairs = bundle.n_pairs
@@ -306,8 +306,8 @@ def test_g5_in_out_parity_exact_per_path(
         observations=observations,
     )
 
-    ko_amounts = knock_out.cashflows(bundle).amounts[:, 0]
-    ki_amounts = knock_in.cashflows(bundle).amounts[:, 0]
+    ko_amounts = knock_out.cashflows(bundle, r=_AAPL.r).amounts[:, 0]
+    ki_amounts = knock_in.cashflows(bundle, r=_AAPL.r).amounts[:, 0]
     vanilla_payoff = np.maximum(bundle.S[:, -1] - _AAPL.s0, 0.0)
 
     np.testing.assert_allclose(ko_amounts + ki_amounts, vanilla_payoff, rtol=1e-12, atol=1e-9)

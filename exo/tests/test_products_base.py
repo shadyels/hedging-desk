@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import tracemalloc
+from typing import Literal
 
 import numpy as np
 import pytest
@@ -21,6 +22,7 @@ from exo.products.base import (
     Monitoring,
     ScheduleAlignmentError,
     barrier_survival,
+    bridge_step_survival,
     observation_indices,
     validate_observation_schedule,
 )
@@ -198,6 +200,16 @@ def test_barrier_survival_rejects_non_finite_level(monitoring: Monitoring) -> No
         barrier_survival(bundle, float("nan"), "down", monitoring, obs_idx)
 
 
+@pytest.mark.parametrize("level", [0.0, -90.0])
+@pytest.mark.parametrize("monitoring", [Monitoring.CONTINUOUS_BRIDGE, Monitoring.DISCRETE])
+def test_barrier_survival_rejects_non_positive_level(monitoring: Monitoring, level: float) -> None:
+    """Code review F6: DISCRETE accepted level <= 0, and with `obs_idx=[0]` the bridge's own
+    `<= 0` check is vacuous (no steps), so the level must be checked in `barrier_survival`."""
+    bundle = _bundle(n_steps=10, n_paths=50, expiry=1.0)
+    with pytest.raises(ValueError, match="positive"):
+        barrier_survival(bundle, level, "down", monitoring, np.array([0]))
+
+
 def test_cashflow_ledger_rejects_mismatched_shapes() -> None:
     """LOW-5 (code review, fix round 1): `amounts` must be `(n_paths, n_obs)` with
     `amounts.shape[1] == t.shape[0]` -- a payoff returning `(n_obs, n_paths)` must fail loud
@@ -279,3 +291,53 @@ def test_bridge_peak_memory_covers_measured_tracemalloc_ratio() -> None:
             f"n_paths={n_paths} n_steps={n_steps}: measured ratio {measured_ratio:.3f} is "
             "implausibly small -- this measurement itself looks broken, not the marker"
         )
+
+
+@pytest.mark.parametrize("direction", ["down", "up"])
+def test_bridge_step_survival_constant_level_product_equals_barrier_survival(
+    direction: Literal["down", "up"],
+) -> None:
+    """The CONTINUOUS branch of `barrier_survival` IS `prod(bridge_step_survival(...))` -- one
+    copy of the bridge math. Also checks a strict-prefix `last_idx` (< n_steps)."""
+    bundle = _bundle(n_steps=20, n_paths=500, expiry=1.0)
+    level = 92.0 if direction == "down" else 112.0
+    for last_idx in (20, 12):
+        steps = bridge_step_survival(bundle, np.full(last_idx, level), direction, last_idx)
+        assert steps.shape == (500, last_idx)
+        np.testing.assert_array_equal(
+            np.prod(steps, axis=1),
+            barrier_survival(
+                bundle, level, direction, Monitoring.CONTINUOUS_BRIDGE, np.arange(last_idx + 1)
+            ),
+        )
+
+
+def test_bridge_step_survival_uses_the_level_in_force_on_each_step() -> None:
+    """A rising per-step level: survival of step i is judged against `levels[i]` only."""
+    t = np.linspace(0.0, 1.0, 4)
+    s = np.array([[100.0, 100.0, 100.0, 100.0]])
+    bundle = PathBundle(
+        t=t,
+        S=s,
+        v=np.zeros_like(s),
+        antithetic=False,
+        n_pairs=None,
+        qe_fallback_count=None,
+        low_discrepancy=False,
+    )
+    steps = bridge_step_survival(bundle, np.array([90.0, 100.0, 110.0]), "down", 3)
+    # step 0: live vs 90; step 1: S == 100 is a breach of level 100; step 2: 100 <= 110 breached
+    np.testing.assert_array_equal(steps, [[1.0, 0.0, 0.0]])
+
+
+def test_bridge_step_survival_rejects_bad_inputs() -> None:
+    bundle = _bundle(n_steps=10, n_paths=50, expiry=1.0)
+    with pytest.raises(ValueError, match="shape"):
+        bridge_step_survival(bundle, np.full(3, 90.0), "down", 4)
+    with pytest.raises(ValueError, match="exceeds"):
+        bridge_step_survival(bundle, np.full(11, 90.0), "down", 11)
+    with pytest.raises(ValueError, match="direction"):
+        bridge_step_survival(bundle, np.full(5, 90.0), "Down", 5)  # type: ignore[arg-type]
+    for bad in (float("nan"), float("inf"), 0.0, -1.0):
+        with pytest.raises(ValueError, match="positive and finite"):
+            bridge_step_survival(bundle, np.array([90.0, bad, 90.0]), "down", 3)

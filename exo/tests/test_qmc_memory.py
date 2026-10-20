@@ -1,9 +1,9 @@
-"""Regression test for `qmc_variance_reduction._PEAK_ARRAY_RATIO` (T8).
+"""Regression test for `models.memory.RQMC_PEAK_ARRAY_RATIO` (T8).
 
 MEASURES peak memory against the real `price_rqmc()`, never re-derives the model it checks (see
-`_PEAK_ARRAY_RATIO`'s own comment in the study module for why: a hand re-count of heston.py's
+`RQMC_PEAK_ARRAY_RATIO`'s own comment in `models/memory.py` for why: a hand re-count of heston.py's
 arrays got that module's own constant wrong twice, missing a transient array one layer down).
-This test exercises the exact configuration `_PEAK_ARRAY_RATIO` was measured at, so a regression
+This test exercises the exact configuration `RQMC_PEAK_ARRAY_RATIO` was measured at, so a regression
 in `price_rqmc`'s allocation pattern (a new transient array, a bigger point matrix) fails this
 test rather than silently going unnoticed until a real sweep runs out of memory.
 """
@@ -12,11 +12,11 @@ from __future__ import annotations
 
 import tracemalloc
 
+from exo.models.memory import RQMC_PEAK_ARRAY_RATIO
 from exo.models.params import EngineConfig, HestonParams
 from exo.products.barrier import BarrierOption
 from exo.products.base import Monitoring
 from exo.products.pricer import price_rqmc
-from exo.studies.qmc_variance_reduction import _PEAK_ARRAY_RATIO
 
 _PARAMS = HestonParams(
     s0=187.50, r=0.0425, q=0.0050, v0=0.0400, kappa=1.50, theta=0.0400, xi=0.60, rho=-0.70
@@ -71,8 +71,8 @@ def test_peak_array_ratio_covers_measured_peak_with_tracemalloc() -> None:
     _current, peak_bytes = tracemalloc.get_traced_memory()
     tracemalloc.stop()
 
-    ceiling = _PEAK_ARRAY_RATIO * _N_PATHS * (_N_STEPS + 1) * 8
+    ceiling = RQMC_PEAK_ARRAY_RATIO * _N_PATHS * (_N_STEPS + 1) * 8
     assert peak_bytes <= ceiling, (
         f"peak_bytes={peak_bytes} exceeds the committed ceiling {ceiling} "
-        f"(_PEAK_ARRAY_RATIO={_PEAK_ARRAY_RATIO}) -- re-measure and update the constant"
+        f"(RQMC_PEAK_ARRAY_RATIO={RQMC_PEAK_ARRAY_RATIO}) -- re-measure and update the constant"
     )

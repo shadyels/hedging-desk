@@ -219,11 +219,11 @@ def test_cashflows_ignores_bundle_steps_beyond_its_own_expiry() -> None:
         monitoring=Monitoring.CONTINUOUS_BRIDGE,
         observations=None,
     )
-    ledger = opt.cashflows(bundle)
+    ledger = opt.cashflows(bundle, r=0.0)
 
     forged_s = bundle.S.copy()
     forged_s[:, expiry_idx + 1 :] = -999.0  # would corrupt bundle.S[:, -1] if read directly
     forged_bundle = replace(bundle, S=forged_s)
-    forged_ledger = opt.cashflows(forged_bundle)
+    forged_ledger = opt.cashflows(forged_bundle, r=0.0)
 
     np.testing.assert_array_equal(ledger.amounts, forged_ledger.amounts)

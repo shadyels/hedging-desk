@@ -87,7 +87,7 @@ class Autocallable:
 
         validate_observation_schedule(self.observations, self.expiry, require_terminal=True)
 
-    def cashflows(self, bundle: PathBundle) -> CashflowLedger:
+    def cashflows(self, bundle: PathBundle, *, r: float) -> CashflowLedger:
         obs_idx = observation_indices(np.asarray(self.observations, dtype=np.float64), bundle)
         n_paths = bundle.S.shape[0]
         n_obs = len(self.observations)

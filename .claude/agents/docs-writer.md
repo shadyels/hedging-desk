@@ -27,5 +27,7 @@ End every report with a `LESSONS:` block: 0-3 short, GENERALIZABLE lessons that 
 
 <!-- BEGIN learned-lessons (written ONLY by the orchestrator; install.sh preserves this section across updates) -->
 ## Learned lessons
-_(none yet)_
+- Check every count and formula in an approved VERBATIM block against the code before inserting it, and FLAG a mismatch rather than silently correcting or propagating it (an approved block said '50 exercise dates' where the code has 49).
+- When a VERBATIM block replaces a span inside a paragraph, read the surrounding sentences for a rule it now states twice; when quoting a sentence verbatim from a file, re-read the quoted line range after writing (wrapped sentences end on a later line than the first grep hit).
+- Before writing any number or formula a brief calls 'measured' or 'decided', grep the cited source for it; report any you cannot source instead of including them silently. Count ledger rows by grepping the file AFTER edits, never by adjusting the old headline.
 <!-- END learned-lessons -->

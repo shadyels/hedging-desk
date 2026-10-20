@@ -362,7 +362,7 @@ def test_g3b_q_autocallable_degenerate_short_put_within_3se() -> None:
     # second RQMC pricing run) checks that directly, so a future fixture drift fails HERE -- not
     # on the 3-SE conjunct below, where it would look like a pricing/sampler regression instead.
     pilot_bundle = simulate(_G3B_AAPL, engine, PseudoRandomSource(seed=202, antithetic=False))
-    assert np.all(note.cashflows(pilot_bundle).amounts[:, 0] == 0.0), (
+    assert np.all(note.cashflows(pilot_bundle, r=_G3B_AAPL.r).amounts[:, 0] == 0.0), (
         "no path may call or earn a coupon"
     )
 

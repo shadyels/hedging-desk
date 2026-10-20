@@ -13,15 +13,19 @@ paths.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 from numpy.typing import NDArray
 
 from exo.models.control_variate import ControlVariate, apply_control, estimate_beta, vanilla_control
 from exo.models.estimator import _MIN_RQMC_REPLICATES, PriceResult, mc_estimate, rqmc_estimate
 from exo.models.heston import PathBundle, simulate
+from exo.models.lsm import apply_exercise_policy, fit_exercise_policy
 from exo.models.params import EngineConfig, HestonParams
 from exo.models.rng import RandomSource, SobolRandomSource
 from exo.products.base import CashflowLedger, Payoff
+from exo.products.warrant import Warrant
 
 
 def discount(ledger: CashflowLedger, *, r: float) -> NDArray[np.float64]:
@@ -59,14 +63,14 @@ def price_from_bundle(
     could pick up floating-point drift. This guard exists so the *pricer-mediated* path fails
     loud instead of silently pricing the wrong contract; `barrier.py`/`autocallable.py`
     independently bound their own monitoring/terminal-leg indices to the payoff's own expiry
-    (not the bundle's last column), so a caller that calls `payoff.cashflows(bundle)` directly,
-    bypassing this guard, is still priced correctly.
+    (not the bundle's last column), so a caller that calls `payoff.cashflows(bundle, r=...)`
+    directly, bypassing this guard, is still priced correctly.
 
     # ponytail (P2-8, P2.M1 slice 2): the exact `bundle.t[-1] != payoff.expiry` guard means this
     # function cannot price a shorter-dated payoff against a shared longer bundle -- the use
     # case this docstring's opening paragraph advertises for P2.M4's portfolio revaluation.
     # Every current shorter-dated caller must bypass `price_from_bundle` and call
-    # `discount(payoff.cashflows(bundle), r=...)` directly. Trigger: P2.M4, whose portfolio
+    # `discount(payoff.cashflows(bundle, r=...), r=...)` directly. Trigger: P2.M4, whose portfolio
     # revaluation decides whether to relax this guard. See docs/PONYTAIL-DEBT.md.
     """
     if bundle.t[-1] != payoff.expiry:
@@ -81,7 +85,7 @@ def price_from_bundle(
             "from a disjoint pilot sample (estimate_beta), never fitted on the sample being "
             "priced. See estimate_beta's docstring."
         )
-    ledger = payoff.cashflows(bundle)
+    ledger = payoff.cashflows(bundle, r=r)
     discounted = discount(ledger, r=r)
     if control is not None:
         assert beta is not None  # guarded above; narrows for mypy
@@ -112,6 +116,87 @@ def price(
     return price_from_bundle(payoff, bundle, r=params.r)
 
 
+# ponytail: the low-bias tag lives only in this type. Ceiling: `ProductLine` has no field for it,
+# so the tag is lost at the wire. Trigger: P2.M4/P3, when EXO first publishes.
+@dataclass(frozen=True)
+class LowerBoundPriceResult:
+    """An LSM price: a LOWER BOUND in expectation on the (Bermudan-on-the-grid) American value.
+
+    Deliberately NOT a `PriceResult`: the low bias (basis-limited, grid-limited; see G-W3's
+    docstring in `tests/test_validation_gates_equity.py` for the measured figures) is carried by
+    the type so no caller can treat it as an unbiased estimate (ADR-006 Amendment 7 s3).
+    `price.std_err` is the sampling error of the fixed policy's value only.
+    """
+
+    price: PriceResult
+    n_early_exercised: int
+
+
+def price_american(
+    warrant: Warrant,
+    params: HestonParams,
+    engine: EngineConfig,
+    rng: RandomSource,
+    *,
+    pilot_rng: RandomSource,
+) -> LowerBoundPriceResult:
+    """Price an American `warrant` by Longstaff-Schwartz with a disjoint-pilot fixed policy
+    (`models/lsm.py`): fit the exercise policy on a pilot bundle drawn from `pilot_rng`, drop it,
+    then value an independent bundle from `rng` under that policy and estimate with `mc_estimate`.
+
+    Exercise dates are every grid step in `(0, expiry)` (Bermudan on the simulation grid).
+    `pilot_rng` and `rng` must be pseudo-random with DIFFERENT seeds: equal seeds replay the same
+    streams, which would make the pilot the valuation sample (in-sample foresight bias).
+    Low-discrepancy sources raise `NotImplementedError` (RQMC American pricing is P2.M4).
+
+    Memory: exactly one bundle is alive at peak -- the pilot bundle is released (`del`) before the
+    valuation `simulate()` allocates; `LSM_PEAK_ARRAY_RATIO` was measured against this pattern.
+    """
+    if warrant.exercise != "american":
+        raise ValueError(
+            "price_american prices exercise='american' warrants; use price() otherwise"
+        )
+    if engine.expiry != warrant.expiry:
+        raise ValueError(
+            f"EngineConfig.expiry={engine.expiry} does not match warrant.expiry="
+            f"{warrant.expiry} -- these must match exactly, or the warrant would be priced "
+            "against the wrong contract horizon."
+        )
+    # ponytail: pseudo-random sources only. Ceiling: no RQMC variance reduction for American
+    # warrants. Trigger: P2.M4 RQMC American pricing (fixed external policy per ADR-006 A7 §2).
+    if rng.low_discrepancy or pilot_rng.low_discrepancy:
+        raise NotImplementedError(
+            "price_american does not support low-discrepancy (RQMC) sources: RQMC American "
+            "pricing is owned by P2.M4 (ADR-006 Amendment 7)."
+        )
+    if pilot_rng.seed == rng.seed:
+        raise ValueError(
+            f"pilot_rng.seed == rng.seed == {rng.seed}: equal seeds replay identical streams, so "
+            "the policy would be fitted on the valuation paths (in-sample) and the result would "
+            "no longer be a lower bound."
+        )
+
+    terminal_idx = engine.n_steps
+    exercise_idx = np.arange(1, terminal_idx, dtype=np.intp)
+    pilot = simulate(params, engine, pilot_rng)
+    policy = fit_exercise_policy(
+        pilot,
+        warrant.intrinsic,
+        exercise_idx=exercise_idx,
+        terminal_idx=terminal_idx,
+        r=params.r,
+        q=params.q,
+    )
+    del pilot  # memory policy: release the pilot bundle BEFORE the valuation simulate()
+
+    bundle = simulate(params, engine, rng)
+    outcome = apply_exercise_policy(bundle, warrant.intrinsic, policy, r=params.r, q=params.q)
+    return LowerBoundPriceResult(
+        price=mc_estimate(bundle, outcome.discounted),
+        n_early_exercised=int(np.count_nonzero(outcome.exercise_step != terminal_idx)),
+    )
+
+
 def price_rqmc(
     payoff: Payoff,
     params: HestonParams,
@@ -132,7 +217,7 @@ def price_rqmc(
     one is already freed); when beta is fitted here, `pilot_rng` (with its materialised
     `(n_paths, 2*n_steps)` point matrix) and `pilot_bundle` stay bound until return -- up to three
     bundles and two point matrices at peak.
-    `studies.qmc_variance_reduction._PEAK_ARRAY_RATIO` was measured against this actual pattern.
+    `models.memory.RQMC_PEAK_ARRAY_RATIO` was measured against this actual pattern.
     Each replicate's scalar price is handed to `rqmc_estimate`, which reports the between-
     replicate standard error (see its docstring for the calibration this implies).
 
@@ -200,7 +285,7 @@ def price_rqmc(
             seed=seed, n_paths=engine.n_paths, dims=dims, replicate=n_replicates, bridge=bridge, t=t
         )
         pilot_bundle = simulate(params, engine, pilot_rng)
-        pilot_discounted = discount(payoff.cashflows(pilot_bundle), r=params.r)
+        pilot_discounted = discount(payoff.cashflows(pilot_bundle, r=params.r), r=params.r)
         pilot_control = vanilla_control(
             pilot_bundle, params, strike=control_strike, expiry=payoff.expiry, r=params.r
         )
@@ -212,7 +297,7 @@ def price_rqmc(
             seed=seed, n_paths=engine.n_paths, dims=dims, replicate=i, bridge=bridge, t=t
         )
         bundle = simulate(params, engine, rng)
-        discounted = discount(payoff.cashflows(bundle), r=params.r)
+        discounted = discount(payoff.cashflows(bundle, r=params.r), r=params.r)
         if control_strike is not None:
             assert resolved_beta is not None  # resolved above whenever control_strike is set
             control = vanilla_control(
