@@ -297,10 +297,11 @@ def barrier_survival(
     """
     if direction not in _DIRECTIONS:
         raise ValueError(f"direction must be one of {_DIRECTIONS}, got {direction!r}")
-    if not math.isfinite(level):
+    if not math.isfinite(level) or level <= 0.0:
         # A NaN level would otherwise silently read as never-breached (survival 1.0) under
-        # DISCRETE, since `<=`/`>=` are False for NaN under IEEE-754.
-        raise ValueError(f"level must be finite, got {level}")
+        # DISCRETE, since `<=`/`>=` are False for NaN under IEEE-754. A level <= 0 is checked
+        # here too: with `obs_idx=[0]` the bridge's own `<= 0` check sees an empty step set.
+        raise ValueError(f"level must be a positive finite number, got {level}")
     if monitoring == Monitoring.CONTINUOUS_BRIDGE and not np.array_equal(
         obs_idx, np.arange(obs_idx.shape[0])
     ):
@@ -335,8 +336,8 @@ def expiry_survival(
 
     CONTINUOUS_BRIDGE monitors `[0, expiry_idx]` (a strict prefix of the grid when the bundle
     runs past `expiry`); DISCRETE monitors `observations`. Shared by the certificate payoffs
-    (`reverse_convertible.py`, `bonus.py`), which all need "survival up to my expiry, and the
-    grid index to read S_T at" -- `barrier.py` carries the same logic inline.
+    (`reverse_convertible.py`, `bonus.py`) and `barrier.py`, which all need "survival up to my
+    expiry, and the grid index to read S_T at".
     """
     expiry_idx = int(observation_indices(np.array([expiry]), bundle)[0])
     if monitoring == Monitoring.DISCRETE:

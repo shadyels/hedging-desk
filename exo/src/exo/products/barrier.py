@@ -24,8 +24,7 @@ from exo.products.base import (
     _DIRECTIONS,  # the one products/ copy of the direction vocabulary
     CashflowLedger,
     Monitoring,
-    barrier_survival,
-    observation_indices,
+    expiry_survival,
     validate_observation_schedule,
 )
 
@@ -90,19 +89,13 @@ class BarrierOption:
             )
 
     def cashflows(self, bundle: PathBundle, *, r: float) -> CashflowLedger:
-        expiry_idx = int(observation_indices(np.array([self.expiry]), bundle)[0])
-
-        if self.monitoring == Monitoring.DISCRETE:
-            assert self.observations is not None  # __post_init__ guarantees this for DISCRETE
-            obs_idx = observation_indices(np.asarray(self.observations, dtype=np.float64), bundle)
-        else:
-            # Indices are bound to THIS option's own expiry, not the bundle's full horizon --
-            # `price_from_bundle` lets several products share one bundle, so a bundle simulated
-            # further out than this option's expiry must not have its extra steps monitored (or
-            # read as the terminal spot below) as if they belonged to this contract.
-            obs_idx = np.arange(expiry_idx + 1)
-
-        survival = barrier_survival(bundle, self.barrier, self.direction, self.monitoring, obs_idx)
+        # Monitoring is bound to THIS option's own expiry, not the bundle's full horizon --
+        # `price_from_bundle` lets several products share one bundle, so a bundle simulated
+        # further out than this option's expiry must not have its extra steps monitored (or
+        # read as the terminal spot below) as if they belonged to this contract.
+        survival, expiry_idx = expiry_survival(
+            bundle, self.barrier, self.direction, self.monitoring, self.observations, self.expiry
+        )
         weight = survival if self.knock == "out" else 1.0 - survival
 
         s_t = bundle.S[:, expiry_idx]

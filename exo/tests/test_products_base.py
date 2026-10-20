@@ -200,6 +200,16 @@ def test_barrier_survival_rejects_non_finite_level(monitoring: Monitoring) -> No
         barrier_survival(bundle, float("nan"), "down", monitoring, obs_idx)
 
 
+@pytest.mark.parametrize("level", [0.0, -90.0])
+@pytest.mark.parametrize("monitoring", [Monitoring.CONTINUOUS_BRIDGE, Monitoring.DISCRETE])
+def test_barrier_survival_rejects_non_positive_level(monitoring: Monitoring, level: float) -> None:
+    """Code review F6: DISCRETE accepted level <= 0, and with `obs_idx=[0]` the bridge's own
+    `<= 0` check is vacuous (no steps), so the level must be checked in `barrier_survival`."""
+    bundle = _bundle(n_steps=10, n_paths=50, expiry=1.0)
+    with pytest.raises(ValueError, match="positive"):
+        barrier_survival(bundle, level, "down", monitoring, np.array([0]))
+
+
 def test_cashflow_ledger_rejects_mismatched_shapes() -> None:
     """LOW-5 (code review, fix round 1): `amounts` must be `(n_paths, n_obs)` with
     `amounts.shape[1] == t.shape[0]` -- a payoff returning `(n_obs, n_paths)` must fail loud

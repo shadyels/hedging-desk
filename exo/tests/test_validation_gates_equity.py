@@ -16,8 +16,9 @@ acceptance test").
   financing accrual, reset schedule and reset-jump stop price via the martingale identity
   `PV = ratio * (S0 - F0)`. COVERAGE CAVEAT: both are BLIND to per-column discount
   differentiation -- a "discount every column at T" mutant moves the 20-seed mean z only
-  -0.12 -> -0.68 (SE of the mean ~0.22) because `e^{-rt} F_t` cancels -- G-RC1 is the gate
-  that pins discounting.
+  -0.12 -> -0.68 (SE of the mean ~0.22; measured on G-MF1 long q=0) because the mutant only
+  re-dates the small stopped-out residual, an effect of order `ratio * |B - F| * r * E[T - tau] *
+  P_hit` ~ 0.5 SE -- G-RC1 is the gate that pins discounting.
 - G-W1: European warrant, call and put, three strikes, on `[models.SPX]` (Feller ratio
   0.231) vs `ratio * heston_vanilla_price`; closes the SPX Feller-violating carried risk.
 - G-W2 / G-W3 / G-W4 (P2.M2 slice 3): American warrants by Longstaff-Schwartz. G-W2 is the exact
@@ -459,9 +460,11 @@ def test_g_mf1_mini_future_without_resets_matches_knock_out_plus_rebate_within_3
 
     COVERAGE CAVEAT: this gate is BLIND to per-column discount differentiation. A mutant that
     discounts every column at T instead of its own date moves the long q=0 20-seed mean z only
-    from -0.12 to -0.68 (SE of the mean ~0.22; max |z| 2.13, so no single seed fails), because
-    `e^{-rt} F_t` cancels when the financing level accrues at the discount rate. G-RC1 is the
-    gate that pins discounting.
+    from -0.12 to -0.68 (SE of the mean ~0.22; max |z| 2.13, so no single seed fails). The
+    reason is magnitude, not cancellation (spread = -+r here, so rate_F = 0 and F does not
+    accrue): the mutant only re-dates the stopped-out residual, whose effect is of order
+    `ratio * |B - F| * r * E[T - tau] * P_hit` = 5 * 0.1 * r * E[T - tau] * ~0.4 ~ 0.004
+    ~ 0.57 SE, matching the measured -0.56 shift. G-RC1 is the gate that pins discounting.
     """
     params = _mf_params(q)
     spread = -_MF_R if side == "long" else _MF_R
@@ -525,8 +528,11 @@ def test_g_mf2_mini_future_with_resets_is_worth_spot_minus_financing_within_3se(
     dt / 2 * P(hit)`, <= ~0.24 SE at 20k paths -- why the path count is fixed here).
     tol_abs: long 0.009, short 0.0075.
 
-    COVERAGE CAVEAT: blind to per-column discount differentiation, exactly as G-MF1 (the
-    discount-all-at-T mutant moves the mean z only -0.12 -> -0.68) -- G-RC1 pins discounting.
+    COVERAGE CAVEAT: blind to per-column discount differentiation for the same magnitude reason
+    as G-MF1 (the discount-all-at-T mutant only re-dates the stopped-out residual). G-MF1's
+    measured shift (long q=0 mean z -0.12 -> -0.68) is quoted for scale; this gate's own
+    mutant was not separately measured (its unmutated mean z is the -0.30 / +0.21 above).
+    G-RC1 pins discounting.
     """
     params = _mf_params(0.0)
     reset_times = tuple(0.08 * k for k in range(1, 13))
@@ -706,7 +712,7 @@ def test_g_w3_lsm_is_a_low_biased_estimate_of_the_bermudan_binomial_reference(
     )
     assert pv - reference < 3.0 * se, (
         f"{option_type} seed={seed}: pv={pv} EXCEEDS the Bermudan reference {reference} by "
-        f"{(pv - reference) / se:.2f} SE -- an out-of-sample policy cannot do that (in-sample fit?)"
+        f"{(pv - reference) / se:.2f} SE -- an out-of-sample policy cannot do that"
     )
     assert reference - pv < 3.0 * se + 0.05, (
         f"{option_type} seed={seed}: pv={pv} is {reference - pv:.4f} below ref={reference}, beyond "

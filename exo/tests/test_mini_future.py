@@ -56,9 +56,10 @@ def test_expiry_is_the_carry_horizon() -> None:
 
 
 def test_survivor_pays_spot_minus_accrued_financing_at_horizon() -> None:
-    """Long, r=0.1, spread 0.05 -> rate_F = 0.15; short: rate_F = r - spread = 0.05."""
+    """Long, r=0.1, spread 0.05 -> rate_F = 0.15; short: rate_F = r - spread = 0.05. The long
+    stop is 95 so it stays beyond F_T = 80 * exp(0.15) = 92.9 (the accrual guard)."""
     bundle = forced_bundle([[100.0, 101.0, 102.0, 103.0, 104.0]], v=0.0)
-    ledger = _mf(spread=0.05).cashflows(bundle, r=0.1)
+    ledger = _mf(spread=0.05, stop=95.0).cashflows(bundle, r=0.1)
     np.testing.assert_allclose(ledger.t, [0.25, 0.5, 0.75, 1.0])
     expected = _RATIO * (104.0 - 80.0 * math.exp(0.15))
     np.testing.assert_allclose(ledger.amounts, [[0.0, 0.0, 0.0, expected]], atol=1e-12)
@@ -71,10 +72,11 @@ def test_survivor_pays_spot_minus_accrued_financing_at_horizon() -> None:
 
 def test_in_step_stop_pays_level_minus_financing_at_step_end_column() -> None:
     """Path falls through the stop between t1 and t2: residual `L - F_2` lands in column 1
-    (dated t2), nothing afterwards. r=0.1, spread 0 -> F_2 = 80 * exp(0.1 * 0.5)."""
+    (dated t2), nothing afterwards. r=0.1, spread 0 -> F_2 = 80 * exp(0.1 * 0.5). The stop is 90
+    so it stays beyond F_T = 80 * exp(0.1) = 88.4 (the accrual guard)."""
     bundle = forced_bundle([[100.0, 100.0, 80.0, 70.0, 60.0]], v=0.0)
-    ledger = _mf().cashflows(bundle, r=0.1)
-    expected = _RATIO * (85.0 - 80.0 * math.exp(0.05))
+    ledger = _mf(stop=90.0).cashflows(bundle, r=0.1)
+    expected = _RATIO * (90.0 - 80.0 * math.exp(0.05))
     np.testing.assert_allclose(ledger.amounts, [[0.0, expected, 0.0, 0.0]], atol=1e-12)
 
 
@@ -86,27 +88,29 @@ def test_short_in_step_stop_has_flipped_sign() -> None:
 
 
 def test_reset_jump_pays_spot_minus_financing_at_the_previous_column() -> None:
-    """spread 0.5, r=0: F_2 = 80 * exp(0.25) = 102.72, so the level reset at t=0.5 is
-    F_2 * 1.05 = 107.86 -- computed from the ACCRUED financing level, not F0 * 1.05 = 84.
-    Path A (S_2 = 106) is live against the old level 85 but already beyond 107.86 -> a reset
-    jump paying `S_2 - F_2` (negative: the holder bears the gap) at t_2 = column 1. Path B
-    (S_2 = 108) is live against both and survives to pay `S_4 - F_4` at the horizon -- it would
-    also survive against a level mistakenly rebuilt from F0, which path A does not."""
+    """spread 0.1, r=0, buffer 0.1: F_2 = 80 * exp(0.05) = 84.10, so the level reset at t=0.5 is
+    F_2 * 1.1 = 92.51 -- computed from the ACCRUED financing level, not F0 * 1.1 = 88. Path A
+    (S_2 = 90) is live against the old level 85 and against 88, but already beyond 92.51 -> a
+    reset jump paying `S_2 - F_2` (+5.90: positive, since the path was alive against a level
+    beyond F) at t_2 = column 1. Path B (S_2 = 95) is live against both and survives to pay
+    `S_4 - F_4` at the horizon. A level mistakenly rebuilt from F0 would let path A survive,
+    which it does not. (F stays below the level in force on every step, the accrual guard.)"""
     bundle = forced_bundle(
         [
-            [100.0, 100.0, 106.0, 106.0, 106.0],
-            [100.0, 100.0, 108.0, 110.0, 140.0],
+            [100.0, 100.0, 90.0, 90.0, 90.0],
+            [100.0, 100.0, 95.0, 110.0, 140.0],
         ],
         v=0.0,
     )
-    ledger = _mf(spread=0.5, reset_times=(0.5,)).cashflows(bundle, r=0.0)
-    f2 = 80.0 * math.exp(0.25)
-    f4 = 80.0 * math.exp(0.5)
-    assert 106.0 < f2 * 1.05 < 108.0  # fixture sanity: the two paths straddle the reset level
+    ledger = _mf(spread=0.1, buffer=0.1, reset_times=(0.5,)).cashflows(bundle, r=0.0)
+    f2 = 80.0 * math.exp(0.05)
+    f4 = 80.0 * math.exp(0.1)
+    # fixture sanity: path A is live against an F0-based level (88) but not the accrued one
+    assert 88.0 < 90.0 < f2 * 1.1 < 95.0 and f2 * 1.1 > f4
     np.testing.assert_allclose(
         ledger.amounts,
         [
-            [0.0, _RATIO * (106.0 - f2), 0.0, 0.0],
+            [0.0, _RATIO * (90.0 - f2), 0.0, 0.0],
             [0.0, 0.0, 0.0, _RATIO * (140.0 - f4)],
         ],
         atol=1e-12,
@@ -141,6 +145,21 @@ def test_levels_are_recomputed_at_every_reset() -> None:
         ],
         atol=1e-12,
     )
+
+
+@pytest.mark.parametrize(("side", "spread"), [("long", 0.05), ("short", 0.1)])
+def test_stop_loss_overtaken_by_accruing_financing_raises_unless_reset(
+    side: Literal["long", "short"], spread: float
+) -> None:
+    """Code review F1. r=0.0425: long rate_F = +0.0925 carries F from 80 to 87.7 by t=1, past the
+    fixed stop 85; short rate_F = -0.0575 carries F from 120 to 113.3, past the stop 115. Each
+    knock-out would pay `sg * (L - F) < 0`, a silently wrong PV, so it must raise. The same
+    sheet WITH resets re-bases the level on the accrued F and prices."""
+    bundle = forced_bundle([[100.0, 100.0, 100.0, 100.0, 100.0]], v=0.0)
+    with pytest.raises(ValueError, match="not beyond the accrued financing level"):
+        _mf(side, spread=spread).cashflows(bundle, r=0.0425)
+    ledger = _mf(side, spread=spread, reset_times=(0.25, 0.5, 0.75)).cashflows(bundle, r=0.0425)
+    assert np.all(ledger.amounts[:, :3] == 0.0)  # flat path at 100 never stops out
 
 
 def test_reset_at_the_horizon_has_no_effect() -> None:
@@ -272,27 +291,27 @@ def test_mini_future_peak_memory_covers_measured_tracemalloc_ratio() -> None:
         s0=100.0, r=0.0425, q=0.0, v0=0.04, kappa=1.5, theta=0.04, xi=1e-4, rho=0.0
     )
     note = _mf(spread=0.0, reset_times=tuple(0.25 * k for k in range(1, 4)))
-    for n_paths, n_steps in [(20_000, 252)]:
-        engine = EngineConfig(
-            scheme="qe", n_steps=n_steps, n_paths=n_paths, expiry=1.0, antithetic=True
-        )
-        bundle = simulate(params, engine, PseudoRandomSource(seed=1))
-        note.cashflows(bundle, r=0.0425)  # warm-up, outside the measured window
+    n_paths, n_steps = 20_000, 252
+    engine = EngineConfig(
+        scheme="qe", n_steps=n_steps, n_paths=n_paths, expiry=1.0, antithetic=True
+    )
+    bundle = simulate(params, engine, PseudoRandomSource(seed=1))
+    note.cashflows(bundle, r=0.0425)  # warm-up, outside the measured window
 
-        tracemalloc.start()
-        try:
-            note.cashflows(bundle, r=0.0425)
-            _current, peak = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
+    tracemalloc.start()
+    try:
+        note.cashflows(bundle, r=0.0425)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
 
-        measured = peak / (n_paths * (n_steps + 1) * 8)
-        ceiling = mini_future._MINI_FUTURE_PEAK_ARRAY_RATIO
-        assert measured <= ceiling, (
-            f"n_paths={n_paths} n_steps={n_steps}: measured peak/array {measured:.3f} exceeds "
-            f"the declared ceiling {ceiling}"
-        )
-        assert ceiling <= measured * 1.06, (
-            f"n_paths={n_paths} n_steps={n_steps}: ceiling {ceiling} is more than 6% above the "
-            f"measured {measured:.3f} -- re-measure and tighten it"
-        )
+    measured = peak / (n_paths * (n_steps + 1) * 8)
+    ceiling = mini_future._MINI_FUTURE_PEAK_ARRAY_RATIO
+    assert measured <= ceiling, (
+        f"n_paths={n_paths} n_steps={n_steps}: measured peak/array {measured:.3f} exceeds "
+        f"the declared ceiling {ceiling}"
+    )
+    assert ceiling <= measured * 1.06, (
+        f"n_paths={n_paths} n_steps={n_steps}: ceiling {ceiling} is more than 6% above the "
+        f"measured {measured:.3f} -- re-measure and tighten it"
+    )

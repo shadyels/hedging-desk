@@ -120,10 +120,10 @@ def price(
 class LowerBoundPriceResult:
     """An LSM price: a LOWER BOUND in expectation on the (Bermudan-on-the-grid) American value.
 
-    Deliberately NOT a `PriceResult`: the low bias (basis-limited, grid-limited; measured -0.017 to
-    -0.026 at the G-W3 fixtures) is carried by the type so no caller can treat it as an unbiased
-    estimate (ADR-006 Amendment 7 s3). `price.std_err` is the sampling error of the fixed policy's
-    value only.
+    Deliberately NOT a `PriceResult`: the low bias (basis-limited, grid-limited; see G-W3's
+    docstring in `tests/test_validation_gates_equity.py` for the measured figures) is carried by
+    the type so no caller can treat it as an unbiased estimate (ADR-006 Amendment 7 s3).
+    `price.std_err` is the sampling error of the fixed policy's value only.
     """
 
     price: PriceResult

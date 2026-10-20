@@ -30,9 +30,12 @@ loop over paths runs. Mass stopping
   at `t_{i+1}`, i.e. column `i`;
 - survivors: `A_k * (S_T - F_T)` at the horizon; all times `ratio * side_sign`.
 
-The reset-jump residual `S_i - F_i` is NOT floored at zero: the holder bears gap risk. This is
-what keeps `PV = ratio * (S0 - F0)` an exact martingale identity (G-MF2); a floored (issuer-gap)
-variant is a different product.
+No residual is floored at zero, and none needs to be: `cashflows()` raises unless the level in
+force on every step stays strictly beyond the accrued financing level `F_{i+1}`. The model is a
+diffusion with no intra-step gaps, so an in-step stop pays the deterministic `L_i - F_{i+1}`, and
+a reset-jump path was alive against `L_{i-1}` at `t_i` (so `S_i` is beyond `L_{i-1}`, which is
+beyond `F_i`). Every residual is then provably non-negative (in the long sign; flipped for short).
+A negative residual arises only when `F` has overtaken the level in force -- the guard's regime.
 
 # ponytail: no dividend pass-through into F (real issuers lower the financing level on ex-div).
 # Ceiling: with q > 0 the PV carries the holder's dividend leakage unhedged by F. Trigger:
@@ -68,8 +71,10 @@ _SIDES = ("long", "short")
 # `(n_paths, n_steps + 1)` float64 array: tracemalloc-MEASURED against the real call at
 # n_paths=20_000, n_steps=252 (warm-up call outside the window) at 8.22, identical to 3 digits at
 # 40_000 x 126 and with/without resets; committed with a <5% margin. Of that, ~1.0 is the
-# returned ledger itself. `test_mini_future.py`'s memory test measures again and asserts against
-# THIS constant (and that it is not stale-loose), never against a re-derived array count.
+# returned ledger itself. The ratio EXCLUDES the caller-owned input bundle (S, v), allocated
+# outside the measured window: the real footprint is about bundle + 8.6 arrays.
+# `test_mini_future.py`'s memory test measures again and asserts against THIS constant (and that
+# it is not stale-loose), never against a re-derived array count.
 _MINI_FUTURE_PEAK_ARRAY_RATIO = 8.6
 
 
@@ -168,6 +173,16 @@ class MiniFuture:
             raise ValueError(
                 f"stop-loss level {levels[0]} is already breached at inception (spot "
                 f"{float(spot0.min())}..{float(spot0.max())}, side={self.side!r})"
+            )
+
+        # The level in force on step i must stay strictly beyond the accrued financing level
+        # F_{i+1} (the in-step residual `L_i - F_{i+1}` is then > 0). That also covers the
+        # reset-jump residual `S_i - F_i`: the path was alive against L_{i-1} at t_i, so
+        # sg * (S_i - F_i) > sg * (L_{i-1} - F_i) > 0, the step i-1 case of this same check.
+        if np.any(sg * (levels - fin[1:]) <= 0.0):
+            raise ValueError(
+                "stop-loss level in force on step i is not beyond the accrued financing level "
+                "F_{i+1}; add resets or check the spread"
             )
 
         direction: Literal["down", "up"] = "down" if long else "up"

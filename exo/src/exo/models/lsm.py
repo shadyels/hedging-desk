@@ -6,7 +6,8 @@ and then applied, without refitting, to an independent, DISJOINT valuation bundl
 valuation path's value is the payoff of a feasible (if sub-optimal) stopping rule: the estimator
 is a LOWER BOUND in expectation and the antithetic pair-mean SE of `mc_estimate` stays valid.
 Fitting and valuing on the same paths would add a foresight bias that grows as the basis grows and
-breaks the upper bound the G-W3 gate relies on.
+breaks the upper bound the G-W3 gate relies on, in principle; at the G-W3 fixture it measures
+only ~0.5 SE, so `price_american`'s seed guard, not the gate, is the protection.
 
 Regression is on the realised discounted future cashflow, ITM paths only (Longstaff-Schwartz
 2001), on a quadratic basis in (S, v) -- exo/CLAUDE.md: regressing on `S` alone is a defect under
