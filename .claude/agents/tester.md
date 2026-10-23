@@ -32,5 +32,8 @@ End every report with a `LESSONS:` block: 0-3 short, GENERALIZABLE lessons that 
 
 <!-- BEGIN learned-lessons (written ONLY by the orchestrator; install.sh preserves this section across updates) -->
 ## Learned lessons
+- When a change touches `#[cfg(debug_assertions)]`/`debug_assert!` behaviour, run `cargo test --release --no-fail-fast` (plain `--release` stops at the first failing crate and hides the rest), diff the sorted debug vs release test-NAME lists so every gap is explained, and establish whether a failure predates the change (`git stash` → run → `git stash pop`) before attributing it to the diff.
+- A mutation spot-check is only evidence if you see WHICH assertion kills the mutant: confirm at least one failure comes from a behavioural assertion, not only a side-effect `debug_assert!`. Do it in a throwaway `git worktree` with its own `CARGO_TARGET_DIR`, and revert anything the failing run writes into tracked files (proptest persists failing seeds into `proptest-regressions/`).
+- A test that waits on a port/process with a fixed timeout fails under machine load (concurrent cargo builds). Before blaming the diff, rerun that target alone and compare the failure site with the changed code; a filtered `cargo bench`/test that prints nothing under a grep is not a result — check the raw output.
 _(none yet)_
 <!-- END learned-lessons -->
