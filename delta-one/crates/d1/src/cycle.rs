@@ -667,8 +667,12 @@ mod tests {
                 fill,
                 excess_qty_e2,
             } => (fill, excess_qty_e2),
-            _ => (None, -1), // fails the assert below
+            _ => (None, -1),
         };
+        assert!(
+            fill.is_some(),
+            "expected ExecOutcome::Overfilled with a booked fill, got {out:?}"
+        );
         let f = fill.unwrap();
         assert_eq!((f.qty_e2, excess_qty_e2), (500, 100));
         assert_eq!(

@@ -817,7 +817,7 @@ fn run_core(
                     let detail = (excess_qty_e2 > 0).then_some(OVERFILL_AUDIT_DETAIL);
                     if excess_qty_e2 > 0 {
                         eprintln!(
-                            "d1: OVERFILL EXCESS NOT BOOKED cl_ord_id={} exec_id={} excess_qty_e2={excess_qty_e2} last_qty_e2={} px_e9={} -- venue filled more than the order; firm position now differs from the venue's by the excess",
+                            "d1: OVERFILL EXCESS NOT BOOKED cl_ord_id={:?} exec_id={:?} excess_qty_e2={excess_qty_e2} last_qty_e2={} px_e9={} -- venue filled more than the order; firm position now differs from the venue's by the excess",
                             String::from_utf8_lossy(&event.cl_ord_id.0),
                             String::from_utf8_lossy(event.exec_id.unpadded()),
                             event.last_qty_e2,
@@ -954,7 +954,8 @@ fn run_core(
                             }
                         }
                     } else if let (Some(from_status), Some(order)) = (from_status, current) {
-                        // A non-fill terminal exec (reject/cancel/expire):
+                        // A non-fill terminal exec (reject/cancel/expire), or an overfill
+                        // with nothing left to book:
                         // no quantity moved, so no `TradeLeg`/allocation, but
                         // the state transition itself must still land on the
                         // audit topic -- a compliance stream that silently

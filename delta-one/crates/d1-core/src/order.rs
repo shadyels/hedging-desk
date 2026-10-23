@@ -261,6 +261,10 @@ impl OrderStore {
         // (Filled with leaves > 0, PartiallyFilled that exactly exhausts
         // leaves) stays a `debug_assert!`. Decide both before the first
         // non-sim venue (P5 venue dialects).
+        debug_assert!(
+            order.leaves_qty_e2 >= 0,
+            "leaves_qty_e2 went negative (place() does not validate order_qty)"
+        );
         let booked = event.last_qty_e2.min(order.leaves_qty_e2);
         let excess = event
             .last_qty_e2
@@ -607,7 +611,11 @@ mod tests {
             order_qty in 1i64..=1_000_000,
             partial_seed in 0i64..1_000_000,
             over_extra in 1i64..=1_000_000,
-            reported in prop_oneof![Just(OrderStatus::PartiallyFilled), Just(OrderStatus::Filled)],
+            reported in prop_oneof![
+                Just(OrderStatus::PartiallyFilled),
+                Just(OrderStatus::Filled),
+                Just(OrderStatus::Canceled),
+            ],
         ) {
             let mut store = OrderStore::new(4);
             let id = ClOrdId::from_seq(1);
@@ -628,7 +636,8 @@ mod tests {
                 other => prop_assert!(false, "expected Overfilled, got {:?}", other),
             }
             let o = store.get(id).unwrap();
-            prop_assert_eq!((o.cum_qty_e2, o.leaves_qty_e2, o.status), (order_qty, 0, OrderStatus::Filled));
+            let expected = if reported.is_terminal() { reported } else { OrderStatus::Filled };
+            prop_assert_eq!((o.cum_qty_e2, o.leaves_qty_e2, o.status), (order_qty, 0, expected));
             prop_assert_eq!(store.apply_exec(&ev).unwrap(), ExecOutcome::Duplicate);
             prop_assert_eq!(store.get(id).unwrap().cum_qty_e2, order_qty);
         }
