@@ -640,6 +640,64 @@ mod tests {
     }
 
     #[test]
+    fn overfill_books_clamped_qty_and_clears_inflight() {
+        use d1_core::{ExecEvent, ExecId, ExecOutcome, OrderStatus, OrderStore};
+        let mut keeper = PositionKeeper::new(&[BookId(1)], &[InstrumentId(1001)]);
+        let mut session = NettingSession::new(RefPxPolicy::ArrivalMid, 1, Stamper::Wall);
+        let order1 = session
+            .on_target(target(1, 1001, 500, 0), &mut keeper, 1)
+            .unwrap()
+            .parent_order
+            .unwrap();
+        assert_eq!(order1.order_qty_e2, 500);
+        let mut store = OrderStore::new(4);
+        store.place(order1);
+
+        let out = store
+            .apply_exec(&ExecEvent {
+                cl_ord_id: order1.cl_ord_id,
+                exec_id: ExecId::from_short(b"X1").unwrap(),
+                reported_status: OrderStatus::Filled,
+                last_qty_e2: 600,
+                last_px_e9: 100_000_000_000,
+            })
+            .unwrap();
+        let (fill, excess_qty_e2) = match out {
+            ExecOutcome::Overfilled {
+                fill,
+                excess_qty_e2,
+            } => (fill, excess_qty_e2),
+            _ => (None, -1), // fails the assert below
+        };
+        let f = fill.unwrap();
+        assert_eq!((f.qty_e2, excess_qty_e2), (500, 100));
+        assert_eq!(
+            store.get(order1.cl_ord_id).unwrap().status,
+            OrderStatus::Filled
+        );
+
+        let parent = session.parent_mut(order1.cl_ord_id).unwrap();
+        let (side, instrument) = (parent.side, parent.instrument);
+        for (book, qty) in allocate_fill(parent, f.qty_e2) {
+            keeper
+                .apply_fill(book, instrument, side, qty, f.px_e9)
+                .unwrap();
+        }
+        assert_eq!(session.inflight(InstrumentId(1001), BookId(1)).unwrap(), 0);
+        assert_eq!(
+            keeper
+                .position(BookId(1), InstrumentId(1001))
+                .unwrap()
+                .net_qty_e2,
+            500
+        );
+        let again = session
+            .on_target(target(1, 1001, 500, 0), &mut keeper, 1)
+            .unwrap();
+        assert!(again.parent_order.is_none());
+    }
+
+    #[test]
     fn negative_band_errors_not_panics() {
         let mut keeper = PositionKeeper::new(&[BookId(1)], &[InstrumentId(1001)]);
         let mut session = NettingSession::new(RefPxPolicy::ArrivalMid, 1, Stamper::Wall);

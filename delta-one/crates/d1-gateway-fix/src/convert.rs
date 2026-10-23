@@ -83,6 +83,12 @@ pub fn exec_report_to_event(msg: &Message) -> Result<ExecEvent, FixError> {
     let exec_id_str = msg
         .get_field(TAG_EXEC_ID)
         .ok_or(FixError::MissingField(TAG_EXEC_ID))?;
+    if exec_id_str.is_empty() {
+        return Err(FixError::Parse {
+            tag: TAG_EXEC_ID,
+            reason: "ExecID must not be empty".to_string(),
+        });
+    }
     let exec_id = exec_id_from_fix(&exec_id_str);
 
     let ord_status_str = msg
@@ -160,27 +166,18 @@ fn clordid_from_fix(s: &str) -> Result<ClOrdId, FixError> {
     Ok(ClOrdId::from_bytes(buf))
 }
 
-/// Convert a FIX `ExecID` (tag 17) to our fixed-size `ExecId`.
+/// Convert a FIX `ExecID` (tag 17) to our fixed-size `ExecId`, the key
+/// `OrderStore::apply_exec` dedupes on by equality -- two distinct execs
+/// mapping to one key would look like a replay and drop a real fill.
 ///
-/// FIX `ExecID` is a variable-length string with no 20-byte cap (unlike
-/// `ClOrdID`, which this system always mints at exactly 20 bytes itself --
-/// see `clordid_from_fix` above). Silently truncating an oversize `ExecID`
-/// would risk two distinct execs colliding to the same 20-byte dedupe key
-/// (`d1-core::OrderStore::apply_exec` dedupes purely on `ExecId` equality,
-/// `ExecId`, built via `ExecId::from_bytes`) -- a truncated collision would
-/// look like a replay and silently drop a real fill.
-///
-/// For `s.len() <= 20` this is unambiguous: right-align into the 20-byte
-/// array, left-padded with SOH (0x01, `ExecId::from_short`). A FIX `String`
-/// can never contain SOH (it is the field delimiter), so the encoding is
-/// injective: `"123"` and `"0123"` stay distinct (zero-padding would collide
-/// them and drop a real fill). Above 20 bytes -- **hash** rather than
-/// reject: a fixed-size digest (via `std`'s `DefaultHasher`, no new
-/// dependency) gives an oversize ExecID a (near-certainly) unique dedupe key
-/// instead of dropping the fill outright. A dropped fill leaves an order
-/// stuck mid-execution forever, which is worse for a trading desk than an
-/// astronomically unlikely hash collision; `reject` was the tonight-only
-/// placeholder, this is the considered choice.
+/// `s.len() <= 20`: `ExecId::from_short` (right-aligned, SOH-padded). A
+/// FIX `String` can never contain SOH (it is the field delimiter), so
+/// short IDs map injectively: `"123"` and `"0123"` stay distinct.
+/// Above 20 bytes: hashed via `hash20`, never truncated (truncation would
+/// collide IDs sharing a 20-byte prefix). Short-vs-hashed distinctness is
+/// probabilistic -- a digest could in principle equal a padded short ID
+/// -- with the same odds as any `hash20` collision. The caller
+/// (`exec_report_to_event`) rejects an empty ExecID before this runs.
 pub fn exec_id_from_fix(s: &str) -> ExecId {
     ExecId::from_short(s.as_bytes()).unwrap_or_else(|| ExecId::from_bytes(hash20(s)))
 }
@@ -522,6 +519,19 @@ mod tests {
             exec_report_to_event(&msg),
             Err(FixError::Parse {
                 tag: TAG_LAST_PX,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn exec_report_to_event_rejects_empty_exec_id() {
+        let mut msg = sample_exec_report();
+        msg.set_field(TAG_EXEC_ID, "").unwrap();
+        assert!(matches!(
+            exec_report_to_event(&msg),
+            Err(FixError::Parse {
+                tag: TAG_EXEC_ID,
                 ..
             })
         ));

@@ -59,7 +59,8 @@ impl ExecId {
 
     /// Encode an ID of at most 20 bytes, right-aligned and left-padded with
     /// 0x01. Injective over inputs that contain no 0x01. `None` if longer
-    /// than 20 bytes.
+    /// than 20 bytes. Distinct from hashed (`from_bytes(digest)`) ids only
+    /// probabilistically: a digest could in principle equal a padded short id.
     #[must_use]
     pub fn from_short(id: &[u8]) -> Option<Self> {
         let mut buf = [EXEC_ID_PAD; 20];

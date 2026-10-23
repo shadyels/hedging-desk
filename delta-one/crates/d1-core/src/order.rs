@@ -148,6 +148,16 @@ pub enum ExecOutcome {
     /// Applied; `Some(Fill)` if the exec carried fill quantity, `None` for
     /// a genuine non-fill status transition (e.g. a reject).
     Applied(Option<Fill>),
+    /// Applied, but `last_qty_e2` exceeded the order's leaves. Only `leaves`
+    /// was booked (`fill`; `None` if leaves was already 0), the order is
+    /// terminal, and `excess_qty_e2` (> 0) is booked NOWHERE -- the caller
+    /// must surface it.
+    Overfilled {
+        /// The booked part (`min(last_qty, leaves)`), if non-zero.
+        fill: Option<Fill>,
+        /// Quantity beyond leaves that no book holds.
+        excess_qty_e2: i64,
+    },
 }
 
 /// Preallocated order store: `ClOrdId` -> `Order`, plus exec-id dedupe for
@@ -200,7 +210,10 @@ impl OrderStore {
     /// or already-terminal order, validate the transition, update
     /// `cum`/`leaves`/`status`, and return `ExecOutcome::Applied(Some(Fill))`
     /// when the exec carried a fill quantity or `ExecOutcome::Applied(None)`
-    /// for a genuine non-fill status transition.
+    /// for a genuine non-fill status transition. A fill quantity above the
+    /// order's leaves books only `leaves`, ends the order terminal and
+    /// returns `ExecOutcome::Overfilled` carrying the unbooked excess; a
+    /// negative fill quantity is `OrderError::NegativeFillQty`.
     pub fn apply_exec(&mut self, event: &ExecEvent) -> Result<ExecOutcome, OrderError> {
         if self.seen_execs.contains(&event.exec_id) {
             return Ok(ExecOutcome::Duplicate);
@@ -230,44 +243,61 @@ impl OrderStore {
             (from, to) => return Err(OrderError::IllegalTransition { from, to }),
         }
 
-        // Boundary checks (root CLAUDE.md #7): return errors before any
-        // mutation and before `seen_execs.insert`, so a rejected exec is not
-        // marked seen. ExecEvent has pub fields, so negative/overfill can
-        // arrive from any adapter.
-        // ponytail: (1) an overfill is rejected, not booked -- the venue's excess is then unbooked and visible only via the core loop's `eprintln!`; book-and-alert needs `allocate_fill` (cycle.rs) to place the excess, since it clamps to remaining today. (2) Status/leaves consistency (Filled <=> leaves==0, PartiallyFilled <=> leaves>0) is still debug-only. Decide both before the first non-sim venue (P5 venue dialects).
+        // Negative fill (root CLAUDE.md #7): error before any mutation and
+        // before `seen_execs.insert`, so a rejected exec is not marked seen.
+        // `ExecEvent` has pub fields, so it can arrive from any adapter.
         if event.last_qty_e2 < 0 {
             return Err(OrderError::NegativeFillQty);
         }
-        if event.last_qty_e2 > order.leaves_qty_e2 {
-            return Err(OrderError::Overfill);
-        }
+        // Overfill (last_qty > leaves): book only `leaves`, end the order
+        // terminal (`Filled` unless the venue reported Rejected/Canceled)
+        // so the parent's inflight clears, mark the exec seen, and return
+        // the unbooked remainder as `ExecOutcome::Overfilled`.
+        // ponytail: the overfill excess is surfaced, not booked -- the core
+        // loop logs it and flags the order-audit `detail`, but no book holds
+        // it, so the firm position differs from the venue's by
+        // `excess_qty_e2`. Booking it needs `allocate_fill` (d1/cycle.rs) to
+        // place quantity beyond each book's `m_b`. Status/leaves consistency
+        // (Filled with leaves > 0, PartiallyFilled that exactly exhausts
+        // leaves) stays a `debug_assert!`. Decide both before the first
+        // non-sim venue (P5 venue dialects).
+        let booked = event.last_qty_e2.min(order.leaves_qty_e2);
+        let excess = event
+            .last_qty_e2
+            .checked_sub(booked)
+            .ok_or(OrderError::Overflow)?;
         let new_cum = order
             .cum_qty_e2
-            .checked_add(event.last_qty_e2)
+            .checked_add(booked)
             .ok_or(OrderError::Overflow)?;
         let new_leaves = order
             .leaves_qty_e2
-            .checked_sub(event.last_qty_e2)
+            .checked_sub(booked)
             .ok_or(OrderError::Overflow)?;
+        let status = if excess > 0 && !event.reported_status.is_terminal() {
+            OrderStatus::Filled
+        } else {
+            event.reported_status
+        };
         debug_assert!(
-            event.reported_status != OrderStatus::Filled || new_leaves == 0,
+            status != OrderStatus::Filled || new_leaves == 0,
             "reported Filled but leaves_qty is nonzero"
         );
         debug_assert!(
-            event.reported_status != OrderStatus::PartiallyFilled || new_leaves > 0,
+            status != OrderStatus::PartiallyFilled || new_leaves > 0,
             "reported PartiallyFilled but leaves_qty is zero"
         );
 
         order.cum_qty_e2 = new_cum;
         order.leaves_qty_e2 = new_leaves;
-        order.status = event.reported_status;
-        let fill = if event.last_qty_e2 > 0 {
+        order.status = status;
+        let fill = if booked > 0 {
             order.last_px_e9 = event.last_px_e9;
             Some(Fill {
                 book: order.book,
                 instrument: order.instrument,
                 side: order.side,
-                qty_e2: event.last_qty_e2,
+                qty_e2: booked,
                 px_e9: event.last_px_e9,
             })
         } else {
@@ -275,6 +305,12 @@ impl OrderStore {
         };
 
         self.seen_execs.insert(event.exec_id);
+        if excess > 0 {
+            return Ok(ExecOutcome::Overfilled {
+                fill,
+                excess_qty_e2: excess,
+            });
+        }
         Ok(ExecOutcome::Applied(fill))
     }
 }
@@ -438,22 +474,66 @@ mod tests {
     }
 
     #[test]
-    fn overfill_is_rejected_without_mutation() {
+    fn overfill_books_leaves_and_reports_excess() {
         let mut store = OrderStore::new(4);
         let id = ClOrdId::from_seq(1);
         store.place(sample_order(id)); // order_qty_e2 = 10_000
-        let before = store.get(id).unwrap();
-        let err = store
+        let out = store
             .apply_exec(&exec(id, 1, OrderStatus::Filled, 12_000))
-            .unwrap_err();
-        assert_eq!(err, OrderError::Overfill);
-        assert_eq!(store.get(id).unwrap(), before);
-        // Same exec_id, valid qty: applied, proving the rejected exec was not
-        // inserted into seen_execs.
-        let ok = store
-            .apply_exec(&exec(id, 1, OrderStatus::Filled, 10_000))
             .unwrap();
-        assert!(matches!(ok, ExecOutcome::Applied(Some(_))));
+        assert_eq!(
+            out,
+            ExecOutcome::Overfilled {
+                fill: Some(Fill {
+                    book: BookId(1),
+                    instrument: InstrumentId(1001),
+                    side: Side::Buy,
+                    qty_e2: 10_000,
+                    px_e9: 1,
+                }),
+                excess_qty_e2: 2_000,
+            }
+        );
+        let o = store.get(id).unwrap();
+        assert_eq!(o.status, OrderStatus::Filled);
+        assert_eq!(
+            (o.cum_qty_e2, o.leaves_qty_e2, o.last_px_e9),
+            (10_000, 0, 1)
+        );
+        // The overfill exec was applied, so a replay is a Duplicate.
+        let replay = store
+            .apply_exec(&exec(id, 1, OrderStatus::Filled, 12_000))
+            .unwrap();
+        assert_eq!(replay, ExecOutcome::Duplicate);
+        assert_eq!(store.get(id).unwrap().cum_qty_e2, 10_000);
+    }
+
+    #[test]
+    fn overfill_reported_partially_filled_ends_filled() {
+        let mut store = OrderStore::new(4);
+        let id = ClOrdId::from_seq(1);
+        store.place(sample_order(id));
+        store
+            .apply_exec(&exec(id, 1, OrderStatus::PartiallyFilled, 4_000))
+            .unwrap();
+        let out = store
+            .apply_exec(&exec(id, 2, OrderStatus::PartiallyFilled, 7_000))
+            .unwrap();
+        assert!(
+            matches!(
+                out,
+                ExecOutcome::Overfilled {
+                    fill: Some(Fill { qty_e2: 6_000, .. }),
+                    excess_qty_e2: 1_000
+                }
+            ),
+            "got {out:?}"
+        );
+        assert_eq!(store.get(id).unwrap().status, OrderStatus::Filled);
+        let err = store
+            .apply_exec(&exec(id, 3, OrderStatus::Filled, 1))
+            .unwrap_err();
+        assert_eq!(err, OrderError::AlreadyTerminal);
     }
 
     #[test]
@@ -498,12 +578,10 @@ mod tests {
 
     proptest! {
         #[test]
-        fn invalid_fill_never_mutates_order(
+        fn negative_fill_never_mutates_order(
             order_qty in 1i64..=1_000_000,
             partial_seed in 0i64..1_000_000,
             neg in -1_000_000i64..=-1,
-            over_extra in 1i64..=1_000_000,
-            use_neg in proptest::bool::ANY,
         ) {
             let mut store = OrderStore::new(4);
             let id = ClOrdId::from_seq(1);
@@ -516,10 +594,43 @@ mod tests {
             }
             let leaves = order_qty - p;
             let before = store.get(id).unwrap();
-            let bad = if use_neg { neg } else { leaves + over_extra };
-            let res = store.apply_exec(&exec(id, 2, OrderStatus::PartiallyFilled, bad));
-            prop_assert!(res.is_err());
+            let res = store.apply_exec(&exec(id, 2, OrderStatus::PartiallyFilled, neg));
+            prop_assert_eq!(res, Err(OrderError::NegativeFillQty));
             prop_assert_eq!(store.get(id).unwrap(), before);
+            // Not marked seen: the same exec id with a valid qty applies.
+            let ok = store.apply_exec(&exec(id, 2, OrderStatus::Filled, leaves)).unwrap();
+            prop_assert!(matches!(ok, ExecOutcome::Applied(Some(_))));
+        }
+
+        #[test]
+        fn overfill_books_exactly_leaves(
+            order_qty in 1i64..=1_000_000,
+            partial_seed in 0i64..1_000_000,
+            over_extra in 1i64..=1_000_000,
+            reported in prop_oneof![Just(OrderStatus::PartiallyFilled), Just(OrderStatus::Filled)],
+        ) {
+            let mut store = OrderStore::new(4);
+            let id = ClOrdId::from_seq(1);
+            let mut order = sample_order(id);
+            order.order_qty_e2 = order_qty;
+            store.place(order);
+            let p = partial_seed % order_qty;
+            if p > 0 {
+                store.apply_exec(&exec(id, 1, OrderStatus::PartiallyFilled, p)).unwrap();
+            }
+            let leaves = order_qty - p;
+            let ev = exec(id, 2, reported, leaves + over_extra);
+            match store.apply_exec(&ev).unwrap() {
+                ExecOutcome::Overfilled { fill: Some(f), excess_qty_e2 } => {
+                    prop_assert_eq!(f.qty_e2, leaves);
+                    prop_assert_eq!(excess_qty_e2, over_extra);
+                }
+                other => prop_assert!(false, "expected Overfilled, got {:?}", other),
+            }
+            let o = store.get(id).unwrap();
+            prop_assert_eq!((o.cum_qty_e2, o.leaves_qty_e2, o.status), (order_qty, 0, OrderStatus::Filled));
+            prop_assert_eq!(store.apply_exec(&ev).unwrap(), ExecOutcome::Duplicate);
+            prop_assert_eq!(store.get(id).unwrap().cum_qty_e2, order_qty);
         }
 
         #[test]
@@ -552,8 +663,8 @@ mod tests {
                     .unwrap();
                 let fill = match outcome {
                     ExecOutcome::Applied(f) => f,
-                    ExecOutcome::Duplicate => {
-                        prop_assert!(false, "expected Applied, got Duplicate");
+                    other => {
+                        prop_assert!(false, "expected Applied, got {:?}", other);
                         None
                     }
                 };
