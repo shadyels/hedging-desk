@@ -29,8 +29,8 @@ pub enum OrderStatus {
     // P3.M2 kill switch, its first real consumer.
     PendingCancel,
     /// A cancel/replace request is in flight.
-    // ponytail: not driven — FIX 35=G (OrderCancelReplaceRequest) lands with
-    // the P3.M2 kill switch, its first real consumer.
+    // ponytail: not driven — FIX 35=G (OrderCancelReplaceRequest): no
+    // roadmap consumer (kill switch only cancels); owner undecided.
     PendingReplace,
 }
 

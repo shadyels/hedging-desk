@@ -1,6 +1,6 @@
 # Ponytail Debt Ledger
 
-**69 marker rows catalogued below, 6 with no upgrade trigger.** Counted, not carried: `main` had **42** rows while its headline claimed 43, P2.M1 slice 3 (`feat/exo-qmc-cv`) adds 8, and P2.M2 (`feat/exo-equity-products`) adds 10. This round (`chore/ponytail-fixing-round`) closed 3 rows, added 12, and renumbered 14 in the 2026-10-23 reconcile against the tree.
+**70 marker rows catalogued below, 6 with no upgrade trigger.** Counted, not carried: `main` had **42** rows while its headline claimed 43, P2.M1 slice 3 (`feat/exo-qmc-cv`) adds 8, and P2.M2 (`feat/exo-equity-products`) adds 10. This round (`chore/ponytail-fixing-round`) closed 3 rows, added 13, and renumbered 14 in the 2026-10-23 reconcile against the tree.
 
 ## By File
 
@@ -8,7 +8,7 @@
 |------|------|-----------|---------|---------|
 | `delta-one/crates/d1-core/src/keeper.rs` | 158 | Weighted-average cost-basis (no lot tracking, no realized P&L) — **per-book cash half DELIVERED P1.M5 Slice 1** | cash is now tracked per book (`seed_cash` at startup, moved on every fill, `credit_dividend` on a dividend tick, `accrue_cash` per sample); lot tracking, realized P&L and the Σ-book-position invariants remain | partially closed — cost-basis simplification still stands |
 | `delta-one/crates/d1-core/src/order.rs` | 28 | FIX OrderCancelRequest not driven | Slice 1 only | Lands with the P3.M2 kill switch, its first real consumer |
-| `delta-one/crates/d1-core/src/order.rs` | 32 | FIX OrderCancelReplaceRequest not driven | Slice 1 only | Lands with the P3.M2 kill switch, its first real consumer |
+| `delta-one/crates/d1-core/src/order.rs` | 32 | FIX OrderCancelReplaceRequest not driven; no roadmap consumer | Slice 1 only | owner undecided — no ROADMAP milestone amends a working order (the P3.M2 kill switch only cancels); trigger: first feature that amends a working order |
 | `delta-one/crates/d1-core/src/order.rs` | 173 | Append-only slab, no freelist | single-session memory | freelist + eviction policy for sustained long-running session use (production uptime, not milestone completion) |
 | `delta-one/crates/d1-core/src/order.rs` | 256 | Overfill books only `leaves`, ends the order `Filled` (unless reported terminal), and surfaces the excess as `ExecOutcome::Overfilled` (log plus order-audit `detail`), but books it nowhere. Status/leaves consistency is still `debug_assert!`-only | firm position differs from the venue's by `excess_qty_e2` | undecided: decide before the first non-sim venue (P5 venue dialects); the marker says booking needs `allocate_fill` (`d1/cycle.rs`) to place quantity beyond each book's `m_b` |
 | `delta-one/crates/d1-core/src/cross.rs` | 41 | ⚠️ **no-trigger** — omits `transfer_id`/`reason` | intentional M4 omission | none named |
@@ -22,8 +22,9 @@
 | `delta-one/crates/d1/src/config.rs` | 33 | `publish_interval_s` parsed but not wired to a separate publish cadence | `TrackerAnalytics` publishes on every sample, as if `publish_interval_s == sampling_interval_s` | downsampling as a separate cadence is future work if the demo needs a slower UI cadence than the analytics window |
 | `delta-one/crates/d1-gateway-fix/src/convert.rs` | 34 | No `TransactTime` (60) field | missing required spec field | add time dependency + field if real venue requires validation |
 | `delta-one/crates/d1-gateway-fix/src/convert.rs` | 51 | `limit_px_e9 == 0` as market-order sentinel | ambiguous encoding | explicit `OrdType` enum field on `Order` at the first non-market order type |
-| `delta-one/crates/d1-gateway-fix/src/convert.rs` | 193 | `hash20` (three salted `DefaultHasher` passes) is the dedupe key for oversize ExecIDs; short IDs are SOH-padded verbatim, so ledger `exec_id` shows the venue ID | `DefaultHasher` algorithm is not stable across Rust releases, and `ExecId` is persisted as `exec_id` on `posttrade.trades`/`posttrade.allocations`, so ledger values for OVERSIZE ExecIDs are stable only within one toolchain | undecided (owner undecided: a hash with a specified, stable algorithm); trigger: any consumer that correlates ledger `exec_id` across deploys or against venue IDs |
-| `delta-one/crates/d1-gateway-fix/src/convert.rs` | 237 | Lenient precision handling | tolerance for mismatch | tighten if real venue needs exact preservation |
+| `delta-one/crates/d1-gateway-fix/src/convert.rs` | 78 | Inbound-exec hardening deferred: the per-reject `eprintln!` is not rate-limited; `apply_exec` does not check price (only this boundary does); hashed IDs render lossily in the ledger; an exec after a forced-terminal overfill hits `AlreadyTerminal` with only the generic log line | ExecID is not validated as printable ASCII (QuickFIX's lossy C-string read truncates at NUL and can merge invalid UTF-8) | undecided; trigger: first non-sim venue (P5 venue dialects) |
+| `delta-one/crates/d1-gateway-fix/src/convert.rs` | 201 | `hash20` (three salted `DefaultHasher` passes) is the dedupe key for oversize ExecIDs; short IDs are SOH-padded verbatim, so ledger `exec_id` shows the venue ID | `DefaultHasher` algorithm is not stable across Rust releases, and `ExecId` is persisted as `exec_id` on `posttrade.trades`/`posttrade.allocations`, so ledger values for OVERSIZE ExecIDs are stable only within one toolchain | undecided (owner undecided: a hash with a specified, stable algorithm); trigger: any consumer that correlates ledger `exec_id` across deploys or against venue IDs |
+| `delta-one/crates/d1-gateway-fix/src/convert.rs` | 245 | Lenient precision handling | tolerance for mismatch | tighten if real venue needs exact preservation |
 | `delta-one/crates/d1/src/lib.rs` | 552 | Tracker sample can fire on the first tick of a feed wave, before the rest of that wave's instruments are ingested | demo-scale approximation, not a windowed barrier | an explicit "wave complete" signal from a real feed |
 | `delta-one/crates/d1/src/lib.rs` | 646 | Log-and-drop on full ring | demo-sized ring | backpressure protocol |
 | `delta-one/crates/d1/src/lib.rs` | 680 | ⚠️ **no-trigger** — dropped push orphans registration | inflight weight permanent | none named |
@@ -112,7 +113,7 @@ The Kafka wiring ships with one demo-grade shortcut:
 These are deliberate design choices or deferred decisions, not tech debt to upgrade. Flag if behavior expectations change.
 
 ### Phase-Gated Upgrades
-- **P1.M2 Slice 2 FIX wiring:** `convert.rs:34` (TransactTime). `order.rs:28,32` (cancel/replace) now lands with the P3.M2 kill switch per its marker, not here; `ids.rs:48` (ExecID validation) is delivered and its marker is gone.
+- **P1.M2 Slice 2 FIX wiring:** `convert.rs:34` (TransactTime). `order.rs:28` (35=F cancel) lands with the P3.M2 kill switch; `order.rs:32` (35=G cancel/replace) has no roadmap consumer (owner undecided), not here; `ids.rs:48` (ExecID validation) is delivered and its marker is gone.
 - **P1.M2 Slices 2-3 long-uptime:** `order.rs:173` (freelist), `d1-gateway-nats/lib.rs:208` (eviction)
 - **P1.M3 netting:** `keeper.rs:158` (cost-basis full invariants)
 - **P1.M5 tracker analytics:** `keeper.rs:158` per-book cash — **delivered** (Slice 1). `lib.rs:737` qty upper bound — **not** delivered; it was mis-scoped here, being a Tier-1 risk check (ADR-008), not a cash concern. Re-targeted to P4.

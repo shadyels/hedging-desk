@@ -74,6 +74,14 @@ pub fn order_to_new_order_single(order: &Order) -> Result<Message, FixError> {
 /// correctly produces no fill while still transitioning the order's status.
 /// A fill (`LastQty > 0`) requires a positive `LastPx`: an absent or zero
 /// price on a fill is rejected (`Parse` on tag 31).
+///
+/// ponytail: inbound-exec hardening deferred to the first non-sim venue
+/// (P5 venue dialects): the core loop's per-reject `eprintln!` is not
+/// rate-limited; ExecID is not validated as printable ASCII (QuickFIX's
+/// lossy C-string read truncates at NUL and can merge invalid UTF-8);
+/// hashed IDs render lossily in the ledger; `apply_exec` does not check
+/// price (only this boundary does); an exec after a forced-terminal
+/// overfill hits `AlreadyTerminal` with only the generic log line.
 pub fn exec_report_to_event(msg: &Message) -> Result<ExecEvent, FixError> {
     let cl_ord_id_str = msg
         .get_field(TAG_CL_ORD_ID)
