@@ -88,6 +88,22 @@ pub fn parse(text: &str) -> Result<Vec<FeedTick>> {
 
         anyhow::ensure!(fields.next().is_none(), "line {n}: trailing fields");
 
+        // Producer-side sanity (`sim`'s `expand` enforces the same): a zero
+        // or negative price, a crossed book, or a negative dividend is a
+        // corrupt tick, not data to net against.
+        anyhow::ensure!(
+            bid_px_e9 > 0 && ask_px_e9 > 0 && last_px_e9 > 0,
+            "line {n}: bid/ask/last must be > 0, got {bid_px_e9}/{ask_px_e9}/{last_px_e9}"
+        );
+        anyhow::ensure!(
+            bid_px_e9 <= ask_px_e9,
+            "line {n}: bid_px_e9 {bid_px_e9} exceeds ask_px_e9 {ask_px_e9}"
+        );
+        anyhow::ensure!(
+            div_per_share_e9 >= 0,
+            "line {n}: div_per_share_e9 {div_per_share_e9} must be >= 0"
+        );
+
         // Non-decreasing across the whole file: `run_tick_file_producer`'s
         // pacer computes each tick's deadline as an ABSOLUTE offset from one
         // `Instant` captured at entry, so a file whose clock ever runs
@@ -255,6 +271,19 @@ mod tests {
     fn empty_input_is_an_error() {
         assert!(parse("").is_err());
         assert!(parse("# only a comment\n").is_err());
+    }
+
+    #[test]
+    fn invalid_prices_or_dividend_are_errors() {
+        for (line, needle) in [
+            ("1001 0 0 0 0 0\n", "line 1: bid/ask/last must be > 0"),
+            ("1001 -1 1 1 0 0\n", "must be > 0"),
+            ("1001 2 1 1 0 0\n", "exceeds ask_px_e9"),
+            ("1001 1 1 1 0 -5\n", "div_per_share_e9"),
+        ] {
+            let err = parse(line).unwrap_err();
+            assert!(format!("{err:#}").contains(needle), "{line}: {err:#}");
+        }
     }
 
     #[test]

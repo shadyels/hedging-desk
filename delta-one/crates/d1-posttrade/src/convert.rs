@@ -436,7 +436,7 @@ pub(crate) fn clordid_to_string(id: &ClOrdId) -> String {
 }
 
 fn execid_to_string(id: &ExecId) -> String {
-    String::from_utf8_lossy(&id.0).into_owned()
+    String::from_utf8_lossy(id.unpadded()).into_owned()
 }
 
 /// `OrderStatus` -> SCREAMING_SNAKE, for the `transition` string. Kept local
@@ -572,7 +572,7 @@ mod tests {
         let uni = test_universe();
         let mut stamper = Stamper::Fixed { next: 1 };
         let cl_ord_id = ClOrdId::from_seq(42);
-        let exec_id = ExecId::from_bytes(*b"00000000000000EXEC-1");
+        let exec_id = ExecId::from_short(b"EXEC-1").unwrap();
         let leg = TradeLeg {
             book: BookId(1),
             instrument: InstrumentId(1001),
@@ -616,10 +616,7 @@ mod tests {
         );
         assert_eq!(
             field(&decoded, "exec_id"),
-            &Value::Union(
-                1,
-                Box::new(Value::String("00000000000000EXEC-1".to_string()))
-            )
+            &Value::Union(1, Box::new(Value::String("EXEC-1".to_string())))
         );
         // Derived from `TradeKind::ExternalFill` at the encoder edge: the
         // universe's `venue_counterparty`, not a per-leg literal.
@@ -699,7 +696,7 @@ mod tests {
         let mut stamper = Stamper::Fixed { next: 1 };
         let alloc = Allocation {
             parent_cl_ord_id: ClOrdId::from_seq(7),
-            exec_id: ExecId::from_bytes(*b"00000000000000EXEC-9"),
+            exec_id: ExecId::from_short(b"EXEC-9").unwrap(),
             instrument: InstrumentId(1001),
             book: BookId(2),
             qty_e2: 40_000,
@@ -727,7 +724,7 @@ mod tests {
         );
         assert_eq!(
             field(&decoded, "exec_id"),
-            &Value::String("00000000000000EXEC-9".to_string())
+            &Value::String("EXEC-9".to_string())
         );
         assert_eq!(field(&decoded, "book_id"), &Value::Int(2));
         assert_eq!(

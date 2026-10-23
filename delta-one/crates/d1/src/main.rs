@@ -225,16 +225,21 @@ fn parse_args() -> Result<Args> {
                 });
             }
             "--qty" => {
-                qty_e2 = Some(
-                    next_arg(&mut args, "--qty")?
-                        .parse()
-                        .context("--qty must be an integer, fixed-point x10^2")?,
-                );
+                let q: i64 = next_arg(&mut args, "--qty")?
+                    .parse()
+                    .context("--qty must be an integer, fixed-point x10^2")?;
+                if q <= 0 {
+                    bail!("--qty must be > 0 (direction is --side), got {q}");
+                }
+                qty_e2 = Some(q);
             }
             "--px" => {
                 px_e9 = next_arg(&mut args, "--px")?
                     .parse()
                     .context("--px must be an integer, fixed-point x10^9 (0 = market)")?;
+                if px_e9 < 0 {
+                    bail!("--px must be >= 0 (0 = market), got {px_e9}");
+                }
             }
             "--cfg" => cfg = PathBuf::from(next_arg(&mut args, "--cfg")?),
             "--nats-url" => nats_url = next_arg(&mut args, "--nats-url")?,

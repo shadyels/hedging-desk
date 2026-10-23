@@ -37,6 +37,10 @@ pub const RING_CAPACITY: usize = 64;
 /// Poll/backoff interval for the core thread's drain loop.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
+/// `order_audit.detail` flag for an exec whose `LastQty` exceeded leaves.
+const OVERFILL_AUDIT_DETAIL: &str =
+    "OVERFILL: venue LastQty exceeded leaves; excess not booked (see d1 log)";
+
 /// The CLI-driven startup order: placed once at core-thread startup as a
 /// position + FIX round-trip anchor, additive alongside whatever
 /// `TargetPosition`s arrive over NATS and get netted through
@@ -616,13 +620,20 @@ fn run_core(
             // process was never configured for. Placing that order would
             // fill at the venue and then have nowhere to book -- a position
             // lost in silence (root CLAUDE.md #2). Reject it instead.
-            match keeper.position(target.book, target.instrument) {
-                None => eprintln!(
+            let ref_px_e9 = arrival_mid_px_e9(&market_data, target.instrument);
+            match (keeper.position(target.book, target.instrument), ref_px_e9) {
+                (None, _) => eprintln!(
                     "d1: target for unconfigured book={:?} instrument={:?}, rejecting (not in this process's position universe)",
                     target.book, target.instrument
                 ),
-                Some(_) => {
-                    let ref_px_e9 = arrival_mid_px_e9(&market_data, target.instrument);
+                // Rejected whole, before `on_target`: it builds residual
+                // weights from ALL crosses, so dropping one cross mid-cycle
+                // would unbalance books.
+                (Some(_), px) if px <= 0 => eprintln!(
+                    "d1: target book={:?} instrument={:?} ref_px_e9={px}, rejecting (non-positive reference price)",
+                    target.book, target.instrument
+                ),
+                (Some(_), ref_px_e9) => {
                     match session.on_target(target, &mut keeper, ref_px_e9) {
                         Ok(output) => {
                             if !output.crosses_to_book.is_empty() {
@@ -716,6 +727,7 @@ fn run_core(
             // keeper slot for is rejected outright, plus the transfer-only
             // invariants (distinct books, positive qty) `d1_netting::net`
             // would otherwise enforce for netting-derived crosses.
+            let ref_px_e9 = arrival_mid_px_e9(&market_data, transfer.instrument);
             if transfer.from_book == transfer.to_book {
                 eprintln!(
                     "d1: transfer rejected, from_book == to_book book={:?} instrument={:?}",
@@ -744,34 +756,37 @@ fn run_core(
                     "d1: transfer for unconfigured book/instrument from_book={:?} to_book={:?} instrument={:?}, rejecting (not in this process's position universe)",
                     transfer.from_book, transfer.to_book, transfer.instrument
                 );
-            } else {
-                let ref_px_e9 = arrival_mid_px_e9(&market_data, transfer.instrument);
-                if let Some(record) = session.on_transfer(transfer, &mut keeper, ref_px_e9) {
-                    println!(
-                        "d1: booked directed transfer cross_id={} instrument={:?} buy_book={:?} sell_book={:?} qty_e2={}",
-                        record.cross_id,
-                        record.instrument,
-                        record.buy_book,
-                        record.sell_book,
-                        record.qty_e2
-                    );
-                    // Ledger first, NATS notice second -- same ordering
-                    // rationale as the netting-derived cross path above.
-                    for event in posttrade::cross_events(&record, NettingCycleId::Direct) {
-                        push_posttrade(&mut posttrade_tx, event);
-                    }
-                    if cross_tx.push(record).is_err() {
-                        eprintln!(
-                            "d1: cross ring full, dropping InternalCrossNotice cross_id={}",
-                            record.cross_id
-                        );
-                    }
-                } else {
+            } else if ref_px_e9 <= 0 {
+                // Same whole-reject-before-`on_transfer` rule as targets.
+                eprintln!(
+                    "d1: transfer from_book={:?} to_book={:?} instrument={:?} ref_px_e9={ref_px_e9}, rejecting (non-positive reference price)",
+                    transfer.from_book, transfer.to_book, transfer.instrument
+                );
+            } else if let Some(record) = session.on_transfer(transfer, &mut keeper, ref_px_e9) {
+                println!(
+                    "d1: booked directed transfer cross_id={} instrument={:?} buy_book={:?} sell_book={:?} qty_e2={}",
+                    record.cross_id,
+                    record.instrument,
+                    record.buy_book,
+                    record.sell_book,
+                    record.qty_e2
+                );
+                // Ledger first, NATS notice second -- same ordering
+                // rationale as the netting-derived cross path above.
+                for event in posttrade::cross_events(&record, NettingCycleId::Direct) {
+                    push_posttrade(&mut posttrade_tx, event);
+                }
+                if cross_tx.push(record).is_err() {
                     eprintln!(
-                        "d1: transfer not booked (overflow) instrument={:?} from_book={:?} to_book={:?} qty_e2={} -- not published",
-                        transfer.instrument, transfer.from_book, transfer.to_book, transfer.qty_e2
+                        "d1: cross ring full, dropping InternalCrossNotice cross_id={}",
+                        record.cross_id
                     );
                 }
+            } else {
+                eprintln!(
+                    "d1: transfer not booked (overflow) instrument={:?} from_book={:?} to_book={:?} qty_e2={} -- not published",
+                    transfer.instrument, transfer.from_book, transfer.to_book, transfer.qty_e2
+                );
             }
         }
 
@@ -783,7 +798,12 @@ fn run_core(
             // an unexpected `None` here can only mean the store and the
             // exec disagree about the order's existence.
             let from_status = store.get(event.cl_ord_id).map(|o| o.status);
-            match store.apply_exec(&event) {
+            let outcome = store.apply_exec(&event);
+            let excess_qty_e2 = match outcome {
+                Ok(ExecOutcome::Overfilled { excess_qty_e2, .. }) => excess_qty_e2,
+                _ => 0,
+            };
+            match outcome {
                 // A redelivered `ExecId` (FIX PossDup after a sequence
                 // reset, or a venue re-send -- root CLAUDE.md #4, the exact
                 // scenario `OrderStore`'s dedupe exists for): no state
@@ -792,7 +812,18 @@ fn run_core(
                 // those here would mint a fresh, undedupable record for an
                 // exec that already landed once.
                 Ok(ExecOutcome::Duplicate) => {}
-                Ok(ExecOutcome::Applied(fill)) => {
+                Ok(ExecOutcome::Applied(fill) | ExecOutcome::Overfilled { fill, .. }) => {
+                    let booked_qty_e2 = fill.map_or(0, |f| f.qty_e2);
+                    let detail = (excess_qty_e2 > 0).then_some(OVERFILL_AUDIT_DETAIL);
+                    if excess_qty_e2 > 0 {
+                        eprintln!(
+                            "d1: OVERFILL EXCESS NOT BOOKED cl_ord_id={:?} exec_id={:?} excess_qty_e2={excess_qty_e2} last_qty_e2={} px_e9={} -- venue filled more than the order; firm position now differs from the venue's by the excess",
+                            String::from_utf8_lossy(&event.cl_ord_id.0),
+                            String::from_utf8_lossy(event.exec_id.unpadded()),
+                            event.last_qty_e2,
+                            event.last_px_e9
+                        );
+                    }
                     // Post-`apply_exec` snapshot, reused below both for the
                     // audit trail's cum/leaves and for the `ExecReport`.
                     let current = store.get(event.cl_ord_id);
@@ -864,12 +895,12 @@ fn run_core(
                                         instrument,
                                         side,
                                         from_status,
-                                        event.reported_status,
+                                        order.status,
                                         fill.qty_e2,
                                         order.cum_qty_e2,
                                         order.leaves_qty_e2,
                                         AuditOrigin::System,
-                                        None,
+                                        detail,
                                     ),
                                 );
                             }
@@ -912,18 +943,19 @@ fn run_core(
                                         fill.instrument,
                                         fill.side,
                                         from_status,
-                                        event.reported_status,
+                                        order.status,
                                         fill.qty_e2,
                                         order.cum_qty_e2,
                                         order.leaves_qty_e2,
                                         AuditOrigin::System,
-                                        None,
+                                        detail,
                                     ),
                                 );
                             }
                         }
                     } else if let (Some(from_status), Some(order)) = (from_status, current) {
-                        // A non-fill terminal exec (reject/cancel/expire):
+                        // A non-fill terminal exec (reject/cancel/expire), or an overfill
+                        // with nothing left to book:
                         // no quantity moved, so no `TradeLeg`/allocation, but
                         // the state transition itself must still land on the
                         // audit topic -- a compliance stream that silently
@@ -935,12 +967,12 @@ fn run_core(
                                 order.instrument,
                                 order.side,
                                 from_status,
-                                event.reported_status,
-                                event.last_qty_e2,
+                                order.status,
+                                booked_qty_e2,
                                 order.cum_qty_e2,
                                 order.leaves_qty_e2,
                                 AuditOrigin::System,
-                                None,
+                                detail,
                             ),
                         );
                     }
@@ -956,7 +988,7 @@ fn run_core(
                                 instrument: order.instrument,
                                 side: order.side,
                                 status: order.status,
-                                last_qty_e2: event.last_qty_e2,
+                                last_qty_e2: booked_qty_e2,
                                 last_px_e9: event.last_px_e9,
                                 cum_qty_e2: order.cum_qty_e2,
                                 leaves_qty_e2: order.leaves_qty_e2,
@@ -1039,9 +1071,10 @@ fn push_posttrade(tx: &mut rtrb::Producer<PostTradeEvent>, event: PostTradeEvent
 /// Cross/order reference price for a netting cycle (ADR-005 §4 default:
 /// arrival mid). Falls back to `last_px_e9` if either side of the book is
 /// unpriced (e.g. a two-sided quote hasn't ticked yet), and to `0` if the
-/// instrument has never ticked at all -- `d1-netting::net` itself has no
-/// opinion on price validity, so an unpriced instrument nets at 0 rather
-/// than blocking the cycle.
+/// instrument has never ticked at all. `d1-netting::net` itself has no
+/// opinion on price validity, so this function does not reject; `run_core`
+/// does -- it drops any target/transfer whose reference price is `<= 0`
+/// (`ref_px_e9 <= 0`) before `on_target`/`on_transfer`.
 ///
 /// `pub` (not `pub(crate)`) because it is the cross/order reference-price
 /// read shared by the live loop (`run_core`, above) and the in-repo
@@ -1241,5 +1274,30 @@ fn refresh_constituent_mids(
         if let Some(slot) = prev_mids_e9.get_mut(idx) {
             *slot = mid_now_e9;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_and_never_ticked_instruments_have_non_positive_ref_px() {
+        let (zero, good, never) = (InstrumentId(1), InstrumentId(2), InstrumentId(3));
+        let mut md = MarketData::new(&[zero, good, never]);
+        let tick = |instrument_id, px| FeedTick {
+            instrument_id,
+            bid_px_e9: px,
+            ask_px_e9: px,
+            last_px_e9: px,
+            exch_ts_ns: 1,
+            div_per_share_e9: 0,
+        };
+        md.ingest(&tick(zero, 0)); // `tickfile::parse` now rejects zero prices, but a hand-built tick passed as `spawn(.., Some(ticks))` still reaches `MarketData` unchecked; a never-ticked instrument (below) also reads 0
+        md.ingest(&tick(good, 150_000_000_000));
+        // The `<= 0` values `run_core` rejects targets/transfers on.
+        assert!(arrival_mid_px_e9(&md, zero) <= 0);
+        assert!(arrival_mid_px_e9(&md, never) <= 0); // never ticked -> 0
+        assert!(arrival_mid_px_e9(&md, good) > 0);
     }
 }

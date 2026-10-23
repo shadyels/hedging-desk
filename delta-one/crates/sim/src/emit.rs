@@ -6,21 +6,13 @@
 //! imported by production crates, dependency direction is sim -> d1-core
 //! only, so this writes a file rather than calling into `d1` directly.
 //!
-//! Known divergence, deliberately not converged here: `sim replay` credits
-//! a `dividend` action's cash with NO accompanying ex-div price move (its
-//! `MarketData` entry keeps whatever mid it last had), while `expand`'s
-//! dividend arm below emits an ex-div tick -- the price drops by the
-//! dividend amount on the same tick that carries the credit, same
-//! rationale as `crates/d1/src/feed.rs::run_feed_producer`'s M6
-//! remediation: crediting cash without dropping the price creates value out
-//! of nothing, and `run_core` (the eventual consumer of this file) credits
-//! dividends from `FeedTick::div_per_share_e9` and nowhere else, so a
-//! keeper-side-only credit has no representation on this transport at all.
-//! Same YAML `action: dividend`, two different readings depending on which
-//! binary mode consumes it. Converging them would change `just sim`'s
-//! printed AAPL row from 176.00 to 175.75 -- a P1.M5 tracker-output
-//! behavior change, out of scope for this transport-only change and
-//! recorded as a P2.M4 debt item (`docs/PONYTAIL-DEBT.md`).
+//! `sim replay` (`replay.rs`) consumes `expand` too, so both binary modes
+//! read a scenario identically. In particular a `dividend` action emits an
+//! ex-div tick -- all three prices drop by the dividend on the same tick
+//! that carries `div_per_share_e9` -- matching `run_core`, which credits
+//! dividends from `FeedTick::div_per_share_e9` and nowhere else
+//! (`crates/d1/src/feed.rs::run_feed_producer`'s M6 remediation: cash
+//! without a price drop creates value out of nothing).
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -82,10 +74,9 @@ pub fn run(scenario_path: &Path, out_path: &Path) -> Result<()> {
 /// tally of skipped non-feed entries by action label (`run` above turns that
 /// tally into the one-line stderr summary via `print_skip_summary` -- kept
 /// out of this function so it stays pure: no I/O, directly unit-testable).
-/// Mirrors `replay::run`'s `quote`/`gap` arms verbatim (same `to_fixed_e9`,
-/// same `resolve`, same `bail!` wording for missing fields); `dividend`
-/// diverges as described in this module's doc comment.
-fn expand(
+/// Shared by `replay::run` and `run` above; `dividend` emits an ex-div tick
+/// as described in this module's doc comment.
+pub(crate) fn expand(
     scenario: &Scenario,
     universe: &Universe,
 ) -> Result<(Vec<FeedTick>, BTreeMap<String, usize>)> {
@@ -118,13 +109,21 @@ fn expand(
                     bail!("quote at {}ms missing instrument/bid/ask", entry.at_ms);
                 };
                 let id = resolve(universe, symbol, entry.at_ms)?;
-                let bid_px_e9 = to_fixed_e9(bid);
-                let ask_px_e9 = to_fixed_e9(ask);
-                // `checked_add`, not `+`: `serde_yaml` accepts YAML-1.1
-                // `.inf`, and `to_fixed_e9`'s `f64 as i64` cast saturates
-                // rather than panicking, so a quote with `bid`/`ask: .inf`
-                // turns `bid_px_e9`/`ask_px_e9` into `i64::MAX` --
-                // `bid_px_e9 + ask_px_e9` then overflows `i64`.
+                let bid_px_e9 =
+                    to_fixed_e9(bid).with_context(|| format!("quote at {}ms bid", entry.at_ms))?;
+                let ask_px_e9 =
+                    to_fixed_e9(ask).with_context(|| format!("quote at {}ms ask", entry.at_ms))?;
+                if bid_px_e9 <= 0 || ask_px_e9 <= 0 || bid_px_e9 > ask_px_e9 {
+                    bail!(
+                        "quote at {}ms instrument={:?}: need 0 < bid <= ask, got bid_px_e9={} ask_px_e9={}",
+                        entry.at_ms,
+                        id,
+                        bid_px_e9,
+                        ask_px_e9
+                    );
+                }
+                // `checked_add`, not `+`: two valid prices near `i64::MAX`
+                // still overflow when summed for the mid.
                 // `[profile.release]` has `overflow-checks` off, so an
                 // unchecked add would silently wrap into a bogus price that
                 // `d1` then books as real (root CLAUDE.md invariant 1).
@@ -148,12 +147,27 @@ fn expand(
                 last_px_e9.insert(id, tick.last_px_e9);
                 ticks.push(tick);
             }
+            // ponytail: `quote`/`gap` synthesize bid/ask/last directly from the
+            // scenario's decimal values (fixed-point conversion at this boundary,
+            // per root CLAUDE.md invariant 1). `gap` has no spread info in the
+            // scenario schema, so bid=ask=last=to_mid -- a real feed would
+            // preserve the last known spread (affects both `sim replay` and
+            // emit-ticks, which share this arm); add that when a scenario needs it.
             "gap" => {
                 let (Some(symbol), Some(to_mid)) = (&entry.instrument, entry.to_mid) else {
                     bail!("gap at {}ms missing instrument/to_mid", entry.at_ms);
                 };
                 let id = resolve(universe, symbol, entry.at_ms)?;
-                let px_e9 = to_fixed_e9(to_mid);
+                let px_e9 = to_fixed_e9(to_mid)
+                    .with_context(|| format!("gap at {}ms to_mid", entry.at_ms))?;
+                if px_e9 <= 0 {
+                    bail!(
+                        "gap at {}ms instrument={:?}: to_mid_px_e9={} must be > 0",
+                        entry.at_ms,
+                        id,
+                        px_e9
+                    );
+                }
                 let tick = FeedTick {
                     instrument_id: id,
                     bid_px_e9: px_e9,
@@ -174,7 +188,16 @@ fn expand(
                     );
                 };
                 let id = resolve(universe, symbol, entry.at_ms)?;
-                let div_per_share_e9 = to_fixed_e9(amount);
+                let div_per_share_e9 = to_fixed_e9(amount)
+                    .with_context(|| format!("dividend at {}ms amount_per_share", entry.at_ms))?;
+                if div_per_share_e9 <= 0 {
+                    bail!(
+                        "dividend at {}ms instrument={:?}: div_per_share_e9={} must be > 0",
+                        entry.at_ms,
+                        id,
+                        div_per_share_e9
+                    );
+                }
                 // Ex-div drop (module doc comment): the emitted tick's
                 // price is the instrument's last known price minus the
                 // dividend, on all three of bid/ask/last. A missing prior
@@ -189,14 +212,12 @@ fn expand(
                         id
                     );
                 };
-                // `checked_sub`, not `-`: `serde_yaml` accepts YAML-1.1
-                // `.inf`, and `to_fixed_e9`'s `f64 as i64` cast saturates
-                // rather than panicking, so `amount_per_share: -.inf` turns
-                // `div_per_share_e9` into `i64::MIN` -- `prior - i64::MIN`
-                // then overflows `i64`. `[profile.release]` has
+                // `checked_sub`, not `-`: `[profile.release]` has
                 // `overflow-checks` off, so an unchecked subtract would
                 // silently wrap into a bogus price that `d1` then books as
-                // real (root CLAUDE.md invariant 1).
+                // real (root CLAUDE.md invariant 1). With both operands
+                // validated positive it cannot overflow today; kept as the
+                // belt to the validation's braces.
                 let Some(px_e9) = prior_last_px_e9.checked_sub(div_per_share_e9) else {
                     bail!(
                         "dividend at {}ms instrument={:?}: prior_last_px_e9={} minus div_per_share_e9={} overflows i64",
@@ -206,6 +227,16 @@ fn expand(
                         div_per_share_e9
                     );
                 };
+                if px_e9 <= 0 {
+                    bail!(
+                        "dividend at {}ms instrument={:?}: ex-div price {} (prior_last_px_e9={} minus div_per_share_e9={}) must be > 0",
+                        entry.at_ms,
+                        id,
+                        px_e9,
+                        prior_last_px_e9,
+                        div_per_share_e9
+                    );
+                }
                 let tick = FeedTick {
                     instrument_id: id,
                     bid_px_e9: px_e9,
@@ -217,8 +248,8 @@ fn expand(
                 last_px_e9.insert(id, tick.last_px_e9);
                 ticks.push(tick);
             }
-            // exo_book_event / anything else: no feed representation,
-            // exactly as `replay.rs` skips them.
+            // exo_book_event / anything else: no feed representation; tallied
+            // in `skipped` (both `replay` and emit-ticks drop them).
             other => {
                 *skipped.entry(other.to_string()).or_insert(0) += 1;
             }
@@ -268,7 +299,7 @@ fn print_skip_summary(emitted: usize, skipped: &BTreeMap<String, usize>) {
 // and index its fixed-length tick vec directly, same carve-out shape as
 // `crates/d1/src/config.rs`'s and `crates/d1/src/tickfile.rs`'s test modules.
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::scenario::TimelineEntry;
 
@@ -276,7 +307,7 @@ mod tests {
     /// `protocol/refdata/universe.json` from disk -- every field is `pub`
     /// (`d1-refdata::Universe`), so a direct struct literal is simpler than
     /// parsing YAML/JSON just to exercise `expand`'s pure logic.
-    fn test_universe() -> Universe {
+    pub(crate) fn test_universe() -> Universe {
         let id = InstrumentId(1001);
         Universe {
             book_ids: Vec::new(),
@@ -291,7 +322,7 @@ mod tests {
         }
     }
 
-    fn quote_entry(at_ms: u64, symbol: &str, bid: f64, ask: f64) -> TimelineEntry {
+    pub(crate) fn quote_entry(at_ms: u64, symbol: &str, bid: f64, ask: f64) -> TimelineEntry {
         TimelineEntry {
             at_ms,
             action: Some("quote".to_string()),
@@ -303,7 +334,7 @@ mod tests {
         }
     }
 
-    fn dividend_entry(at_ms: u64, symbol: &str, amount_per_share: f64) -> TimelineEntry {
+    pub(crate) fn dividend_entry(at_ms: u64, symbol: &str, amount_per_share: f64) -> TimelineEntry {
         TimelineEntry {
             at_ms,
             action: Some("dividend".to_string()),
@@ -362,39 +393,75 @@ mod tests {
         assert!(format!("{err:#}").contains("no prior quote"));
     }
 
-    #[test]
-    fn dividend_overflow_is_a_checked_error_not_a_wrapped_price() {
-        // `.inf` parses through `serde_yaml`/`f64`, and `to_fixed_e9`'s
-        // `as i64` cast saturates it to `i64::MIN` -- `prior - i64::MIN`
-        // must be rejected via `checked_sub`, not silently wrapped.
+    fn expand_err(timeline: Vec<TimelineEntry>) -> String {
         let scenario = Scenario {
-            scenario: "overflow-dividend".to_string(),
+            scenario: "t".to_string(),
             seed: 1,
             universe: "universe.json".to_string(),
-            timeline: vec![
-                quote_entry(0, "AAPL", 187.50, 187.52),
-                dividend_entry(9_000, "AAPL", f64::NEG_INFINITY),
-            ],
+            timeline,
         };
+        format!("{:#}", expand(&scenario, &test_universe()).unwrap_err())
+    }
 
-        let err = expand(&scenario, &test_universe()).unwrap_err();
-        assert!(format!("{err:#}").contains("overflows"));
+    #[test]
+    fn non_finite_dividend_is_rejected_not_saturated() {
+        // `.inf` parses through `serde_yaml`/`f64`; `to_fixed_e9` now errors
+        // on it instead of saturating to `i64::MIN`.
+        let err = expand_err(vec![
+            quote_entry(0, "AAPL", 187.50, 187.52),
+            dividend_entry(9_000, "AAPL", f64::NEG_INFINITY),
+        ]);
+        assert!(err.contains("not a finite value"), "{err}");
     }
 
     #[test]
     fn quote_mid_overflow_is_a_checked_error_not_a_wrapped_price() {
-        // `.inf` parses through `serde_yaml`/`f64`, and `to_fixed_e9`'s
-        // `as i64` cast saturates it to `i64::MAX` -- `bid_px_e9 +
-        // ask_px_e9` must be rejected via `checked_add`, not silently
-        // wrapped.
-        let scenario = Scenario {
-            scenario: "overflow-quote".to_string(),
-            seed: 1,
-            universe: "universe.json".to_string(),
-            timeline: vec![quote_entry(0, "AAPL", f64::INFINITY, f64::INFINITY)],
-        };
+        // Two valid prices (9e18 each, < i64::MAX) whose sum overflows:
+        // `checked_add` must reject it, not wrap.
+        let err = expand_err(vec![quote_entry(0, "AAPL", 9e9, 9e9)]);
+        assert!(err.contains("overflows"), "{err}");
+    }
 
-        let err = expand(&scenario, &test_universe()).unwrap_err();
-        assert!(format!("{err:#}").contains("overflows"));
+    #[test]
+    fn non_finite_quote_is_rejected_not_saturated() {
+        let err = expand_err(vec![quote_entry(0, "AAPL", f64::INFINITY, f64::INFINITY)]);
+        assert!(err.contains("not a finite value"), "{err}");
+    }
+
+    #[test]
+    fn crossed_or_non_positive_quote_is_rejected() {
+        assert!(expand_err(vec![quote_entry(0, "AAPL", 187.52, 187.50)]).contains("bid <= ask"));
+        assert!(expand_err(vec![quote_entry(0, "AAPL", 0.0, 187.50)]).contains("bid <= ask"));
+    }
+
+    #[test]
+    fn non_positive_gap_is_rejected() {
+        let gap = TimelineEntry {
+            action: Some("gap".to_string()),
+            to_mid: Some(0.0),
+            bid: None,
+            ask: None,
+            amount_per_share: None,
+            ..quote_entry(0, "AAPL", 0.0, 0.0)
+        };
+        assert!(expand_err(vec![gap]).contains("must be > 0"));
+    }
+
+    #[test]
+    fn non_positive_dividend_or_ex_div_price_is_rejected() {
+        assert!(
+            expand_err(vec![
+                quote_entry(0, "AAPL", 187.50, 187.52),
+                dividend_entry(1, "AAPL", 0.0)
+            ])
+            .contains("must be > 0")
+        );
+        assert!(
+            expand_err(vec![
+                quote_entry(0, "AAPL", 187.50, 187.52),
+                dividend_entry(1, "AAPL", 500.0)
+            ])
+            .contains("ex-div price")
+        );
     }
 }

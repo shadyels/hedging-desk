@@ -30,4 +30,6 @@ End every report with a `LESSONS:` block: 0-3 short, GENERALIZABLE lessons that 
 - Check every count and formula in an approved VERBATIM block against the code before inserting it, and FLAG a mismatch rather than silently correcting or propagating it (an approved block said '50 exercise dates' where the code has 49).
 - When a VERBATIM block replaces a span inside a paragraph, read the surrounding sentences for a rule it now states twice; when quoting a sentence verbatim from a file, re-read the quoted line range after writing (wrapped sentences end on a later line than the first grep hit).
 - Before writing any number or formula a brief calls 'measured' or 'decided', grep the cited source for it; report any you cannot source instead of including them silently. Count ledger rows by grepping the file AFTER edits, never by adjusting the old headline.
+- When a marker has no trigger, distinguish 'deliberate' (`no-trigger`, e.g. YAGNI) from 'not yet decided' (`undecided`) before filling the Upgrade column, and state the choice so a reviewer can flip it.
+- When a marker's MEANING changes (not just its line), grep the ledger's cluster and phase prose for its old PHRASES ('promote to error', 'lands with P3.M2') as well as its old line number — meaning-based citations survive a line-number grep.
 <!-- END learned-lessons -->

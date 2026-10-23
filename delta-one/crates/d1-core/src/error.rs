@@ -22,4 +22,7 @@ pub enum OrderError {
     /// The order is already in a terminal state and cannot accept further execs.
     #[error("order already terminal")]
     AlreadyTerminal,
+    /// The exec reported a negative fill quantity.
+    #[error("exec reported a negative fill quantity")]
+    NegativeFillQty,
 }

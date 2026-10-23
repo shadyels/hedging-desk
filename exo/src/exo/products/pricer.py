@@ -54,8 +54,9 @@ def price_from_bundle(
     # ponytail: `beta` is supplied from outside, never fitted on the priced sample, and
     # carries no degrees-of-freedom correction (none is valid under RQMC -- see
     # `estimate_beta`'s docstring). Ceiling: beta is only as good as whatever produced it --
-    # a poor beta costs variance, never bias. Upgrade: a larger pilot sample. Trigger: the
-    # study showing a CV ratio below ~1.2 at a cell with high payoff/control correlation.
+    # a poor beta costs variance, never bias. Upgrade: a larger pilot sample. TRIGGER FIRED
+    # (ADR-006 Amendment 6 §6: CV ratio 1.15x barrier/AAPL, 0.89x barrier/MSFT under RQMC),
+    # owner P2.M4.
 
     Requires `bundle.t[-1] == payoff.expiry` EXACTLY, for the same reason `price()` requires
     `engine.expiry == payoff.expiry` exactly (see `price()`'s docstring) -- `bundle.t[-1]` is
