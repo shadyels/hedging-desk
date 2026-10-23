@@ -4,11 +4,6 @@
 /// (`crate::convert`), and for the FIX session machinery itself.
 #[derive(Debug, thiserror::Error)]
 pub enum FixError {
-    /// A FIX `ExecID` (tag 17) is longer than the 20-byte `ExecId` newtype
-    /// can hold without truncating (`d1-core::ids` — truncation risks
-    /// colliding two distinct execs into one dedupe key).
-    #[error("ExecID is {0} bytes, exceeds the 20-byte ExecId capacity")]
-    ExecIdTooLong(usize),
     /// A FIX `ClOrdID` (tag 11) is longer than the 20-byte `ClOrdId` newtype
     /// can hold.
     #[error("ClOrdID is {0} bytes, exceeds the 20-byte ClOrdId capacity")]

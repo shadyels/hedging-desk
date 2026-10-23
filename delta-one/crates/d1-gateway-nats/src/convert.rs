@@ -187,7 +187,7 @@ fn clordid_to_string(id: &ClOrdId) -> String {
 }
 
 fn execid_to_string(id: &ExecId) -> String {
-    String::from_utf8_lossy(&id.0).into_owned()
+    String::from_utf8_lossy(id.unpadded()).into_owned()
 }
 
 fn side_to_pb(side: Side) -> PbSide {
@@ -371,7 +371,7 @@ mod tests {
     fn exec_report_to_pb_maps_all_fields() {
         let report = ExecReport {
             cl_ord_id: ClOrdId::from_seq(42),
-            exec_id: ExecId::from_bytes(*b"00000000000000EXEC-1"),
+            exec_id: ExecId::from_short(b"EXEC-1").unwrap(),
             book: BookId(1),
             instrument: InstrumentId(1001),
             side: Side::Buy,
@@ -387,7 +387,7 @@ mod tests {
         assert_eq!(pb.meta.as_ref().unwrap().producer, "delta-one");
         assert_eq!(pb.meta.as_ref().unwrap().sent_ns, 42);
         assert_eq!(pb.cl_ord_id, "00000000000000000042");
-        assert_eq!(pb.exec_id, "00000000000000EXEC-1");
+        assert_eq!(pb.exec_id, "EXEC-1");
         assert_eq!(pb.book_id, 1);
         assert_eq!(pb.instrument.as_ref().unwrap().instrument_id, 1001);
         assert_eq!(pb.side, PbSide::Buy as i32);

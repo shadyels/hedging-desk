@@ -230,14 +230,17 @@ impl OrderStore {
             (from, to) => return Err(OrderError::IllegalTransition { from, to }),
         }
 
-        // Trust the exec's reported cum/leaves inputs as authoritative (the
-        // FIX session already resolved them) rather than recomputing them
-        // locally. `checked_*` guards i64 overflow only, so `debug_assert`
-        // the *domain* invariants (root CLAUDE.md #7): these catch our own
-        // conversion/wiring bugs before they corrupt the ledger, and compile
-        // out of the release hot path.
-        // ponytail: debug-only. If a live venue is ever trusted to send
-        // malformed execs in production, promote these to a returned error.
+        // Boundary checks (root CLAUDE.md #7): return errors before any
+        // mutation and before `seen_execs.insert`, so a rejected exec is not
+        // marked seen. ExecEvent has pub fields, so negative/overfill can
+        // arrive from any adapter.
+        // ponytail: (1) an overfill is rejected, not booked -- the venue's excess is then unbooked and visible only via the core loop's `eprintln!`; book-and-alert needs `allocate_fill` (cycle.rs) to place the excess, since it clamps to remaining today. (2) Status/leaves consistency (Filled <=> leaves==0, PartiallyFilled <=> leaves>0) is still debug-only. Decide both before the first non-sim venue (P5 venue dialects).
+        if event.last_qty_e2 < 0 {
+            return Err(OrderError::NegativeFillQty);
+        }
+        if event.last_qty_e2 > order.leaves_qty_e2 {
+            return Err(OrderError::Overfill);
+        }
         let new_cum = order
             .cum_qty_e2
             .checked_add(event.last_qty_e2)
@@ -246,11 +249,6 @@ impl OrderStore {
             .leaves_qty_e2
             .checked_sub(event.last_qty_e2)
             .ok_or(OrderError::Overflow)?;
-        debug_assert!(event.last_qty_e2 >= 0, "exec reported negative fill qty");
-        debug_assert!(
-            new_leaves >= 0,
-            "overfill: cum exceeded order_qty (leaves went negative)"
-        );
         debug_assert!(
             event.reported_status != OrderStatus::Filled || new_leaves == 0,
             "reported Filled but leaves_qty is nonzero"
@@ -429,23 +427,50 @@ mod tests {
         assert_eq!(err, OrderError::AlreadyTerminal);
     }
 
+    fn exec(id: ClOrdId, exec_id: u8, status: OrderStatus, qty: i64) -> ExecEvent {
+        ExecEvent {
+            cl_ord_id: id,
+            exec_id: ExecId::from_bytes([exec_id; 20]),
+            reported_status: status,
+            last_qty_e2: qty,
+            last_px_e9: 1,
+        }
+    }
+
     #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic(expected = "overfill")]
-    fn overfill_trips_invariant_in_debug() {
-        // last_qty exceeds order_qty -> leaves would go negative. The
-        // debug_assert must fire (this test relies on debug_assertions, i.e.
-        // the default `cargo test` profile).
+    fn overfill_is_rejected_without_mutation() {
         let mut store = OrderStore::new(4);
         let id = ClOrdId::from_seq(1);
         store.place(sample_order(id)); // order_qty_e2 = 10_000
-        let _ = store.apply_exec(&ExecEvent {
-            cl_ord_id: id,
-            exec_id: ExecId::from_bytes([1; 20]),
-            reported_status: OrderStatus::Filled,
-            last_qty_e2: 12_000,
-            last_px_e9: 1,
-        });
+        let before = store.get(id).unwrap();
+        let err = store
+            .apply_exec(&exec(id, 1, OrderStatus::Filled, 12_000))
+            .unwrap_err();
+        assert_eq!(err, OrderError::Overfill);
+        assert_eq!(store.get(id).unwrap(), before);
+        // Same exec_id, valid qty: applied, proving the rejected exec was not
+        // inserted into seen_execs.
+        let ok = store
+            .apply_exec(&exec(id, 1, OrderStatus::Filled, 10_000))
+            .unwrap();
+        assert!(matches!(ok, ExecOutcome::Applied(Some(_))));
+    }
+
+    #[test]
+    fn negative_fill_qty_is_rejected_without_mutation() {
+        let mut store = OrderStore::new(4);
+        let id = ClOrdId::from_seq(1);
+        store.place(sample_order(id));
+        let before = store.get(id).unwrap();
+        let err = store
+            .apply_exec(&exec(id, 1, OrderStatus::PartiallyFilled, -1))
+            .unwrap_err();
+        assert_eq!(err, OrderError::NegativeFillQty);
+        assert_eq!(store.get(id).unwrap(), before);
+        let ok = store
+            .apply_exec(&exec(id, 1, OrderStatus::PartiallyFilled, 5_000))
+            .unwrap();
+        assert!(matches!(ok, ExecOutcome::Applied(Some(_))));
     }
 
     #[test]
@@ -472,6 +497,31 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn invalid_fill_never_mutates_order(
+            order_qty in 1i64..=1_000_000,
+            partial_seed in 0i64..1_000_000,
+            neg in -1_000_000i64..=-1,
+            over_extra in 1i64..=1_000_000,
+            use_neg in proptest::bool::ANY,
+        ) {
+            let mut store = OrderStore::new(4);
+            let id = ClOrdId::from_seq(1);
+            let mut order = sample_order(id);
+            order.order_qty_e2 = order_qty;
+            store.place(order);
+            let p = partial_seed % order_qty; // 0..order_qty
+            if p > 0 {
+                store.apply_exec(&exec(id, 1, OrderStatus::PartiallyFilled, p)).unwrap();
+            }
+            let leaves = order_qty - p;
+            let before = store.get(id).unwrap();
+            let bad = if use_neg { neg } else { leaves + over_extra };
+            let res = store.apply_exec(&exec(id, 2, OrderStatus::PartiallyFilled, bad));
+            prop_assert!(res.is_err());
+            prop_assert_eq!(store.get(id).unwrap(), before);
+        }
+
         #[test]
         fn fill_sequence_conserves_invariants(fills in prop::collection::vec(1i64..=1_000, 1..10)) {
             let order_qty: i64 = fills.iter().sum();

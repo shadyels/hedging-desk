@@ -72,6 +72,8 @@ pub fn order_to_new_order_single(order: &Order) -> Result<Message, FixError> {
 /// absent (parsed strictly when present). `apply_exec` (`order.rs`) returns
 /// `None` (no fill) when `last_qty_e2 == 0`, so a defaulted-zero status report
 /// correctly produces no fill while still transitioning the order's status.
+/// A fill (`LastQty > 0`) requires a positive `LastPx`: an absent or zero
+/// price on a fill is rejected (`Parse` on tag 31).
 pub fn exec_report_to_event(msg: &Message) -> Result<ExecEvent, FixError> {
     let cl_ord_id_str = msg
         .get_field(TAG_CL_ORD_ID)
@@ -81,7 +83,7 @@ pub fn exec_report_to_event(msg: &Message) -> Result<ExecEvent, FixError> {
     let exec_id_str = msg
         .get_field(TAG_EXEC_ID)
         .ok_or(FixError::MissingField(TAG_EXEC_ID))?;
-    let exec_id = exec_id_from_fix(&exec_id_str)?;
+    let exec_id = exec_id_from_fix(&exec_id_str);
 
     let ord_status_str = msg
         .get_field(TAG_ORD_STATUS)
@@ -96,6 +98,14 @@ pub fn exec_report_to_event(msg: &Message) -> Result<ExecEvent, FixError> {
         Some(s) => parse_fixed(&s, 9, TAG_LAST_PX)?,
         None => 0,
     };
+
+    if last_qty_e2 > 0 && last_px_e9 == 0 {
+        return Err(FixError::Parse {
+            tag: TAG_LAST_PX,
+            reason: "LastPx must be positive when LastQty > 0 (an absent LastPx counts as 0)"
+                .to_string(),
+        });
+    }
 
     Ok(ExecEvent {
         cl_ord_id,
@@ -161,24 +171,18 @@ fn clordid_from_fix(s: &str) -> Result<ClOrdId, FixError> {
 /// look like a replay and silently drop a real fill.
 ///
 /// For `s.len() <= 20` this is unambiguous: right-align into the 20-byte
-/// array, same as `clordid_from_fix`. Above 20 bytes -- **hash** rather than
+/// array, left-padded with SOH (0x01, `ExecId::from_short`). A FIX `String`
+/// can never contain SOH (it is the field delimiter), so the encoding is
+/// injective: `"123"` and `"0123"` stay distinct (zero-padding would collide
+/// them and drop a real fill). Above 20 bytes -- **hash** rather than
 /// reject: a fixed-size digest (via `std`'s `DefaultHasher`, no new
 /// dependency) gives an oversize ExecID a (near-certainly) unique dedupe key
 /// instead of dropping the fill outright. A dropped fill leaves an order
 /// stuck mid-execution forever, which is worse for a trading desk than an
 /// astronomically unlikely hash collision; `reject` was the tonight-only
 /// placeholder, this is the considered choice.
-pub fn exec_id_from_fix(s: &str) -> Result<ExecId, FixError> {
-    let bytes = s.as_bytes();
-    if bytes.len() <= 20 {
-        let mut buf = [b'0'; 20];
-        let Some(dest) = buf.get_mut(20 - bytes.len()..) else {
-            return Err(FixError::ExecIdTooLong(bytes.len()));
-        };
-        dest.copy_from_slice(bytes);
-        return Ok(ExecId::from_bytes(buf));
-    }
-    Ok(ExecId::from_bytes(hash20(s)))
+pub fn exec_id_from_fix(s: &str) -> ExecId {
+    ExecId::from_short(s.as_bytes()).unwrap_or_else(|| ExecId::from_bytes(hash20(s)))
 }
 
 /// Digest an arbitrary-length string into 20 bytes: three independently
@@ -236,9 +240,24 @@ fn fmt_fixed(value_e_n: i64, decimals: u32) -> String {
 /// ponytail: sim never sends more precision than we format, so this
 /// leniency costs nothing today; tighten if a real venue's precision needs
 /// to be preserved exactly.
+///
+/// Unsigned only: no negative-price instrument is in the universe and
+/// direction is `Side`, so signs are rejected (not mis-parsed).
 fn parse_fixed(s: &str, decimals: u32, tag: i32) -> Result<i64, FixError> {
     let scale = 10i64.pow(decimals);
     let (whole_str, frac_str) = s.split_once('.').unwrap_or((s, ""));
+    if whole_str.is_empty() || !whole_str.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(FixError::Parse {
+            tag,
+            reason: format!("expected unsigned decimal digits before '.', got {s:?}"),
+        });
+    }
+    if !frac_str.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(FixError::Parse {
+            tag,
+            reason: format!("expected only decimal digits after '.', got {s:?}"),
+        });
+    }
     let whole: i64 = whole_str.parse().map_err(|_| FixError::Parse {
         tag,
         reason: format!("bad integer part {whole_str:?}"),
@@ -382,10 +401,141 @@ mod tests {
     }
 
     #[test]
-    fn exec_id_from_fix_short_id_right_aligns_zero_padded() {
-        let id = exec_id_from_fix("EXEC-1").unwrap();
-        // "EXEC-1" is 6 bytes; right-aligned into 20 means 14 leading zeros.
-        assert_eq!(id, ExecId::from_bytes(*b"00000000000000EXEC-1"));
+    fn exec_id_from_fix_short_id_pads_with_soh() {
+        let id = exec_id_from_fix("EXEC-1");
+        // "EXEC-1" is 6 bytes; right-aligned into 20 means 14 leading SOH.
+        assert_eq!(
+            id,
+            ExecId::from_bytes(*b"\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01EXEC-1")
+        );
+        assert_eq!(id.unpadded(), b"EXEC-1");
+    }
+
+    #[test]
+    fn exec_id_from_fix_short_ids_are_injective() {
+        let a = exec_id_from_fix("123");
+        let b = exec_id_from_fix("0123");
+        let c = exec_id_from_fix("00000000000000000123");
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(b, c);
+    }
+
+    #[test]
+    fn parse_fixed_rejects_signs() {
+        for s in ["-0.50", "-5.50", "+5.50", "-5"] {
+            assert!(
+                matches!(
+                    parse_fixed(s, 2, TAG_LAST_QTY),
+                    Err(FixError::Parse {
+                        tag: TAG_LAST_QTY,
+                        ..
+                    })
+                ),
+                "{s}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_fixed_rejects_non_digit_fraction() {
+        for s in ["1.+5", "1.-5", "1.5x", "1.2.3"] {
+            assert!(
+                matches!(
+                    parse_fixed(s, 2, TAG_LAST_QTY),
+                    Err(FixError::Parse {
+                        tag: TAG_LAST_QTY,
+                        ..
+                    })
+                ),
+                "{s}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_fixed_rejects_empty_whole() {
+        for s in ["", ".5"] {
+            assert!(
+                matches!(
+                    parse_fixed(s, 2, TAG_LAST_QTY),
+                    Err(FixError::Parse {
+                        tag: TAG_LAST_QTY,
+                        ..
+                    })
+                ),
+                "{s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_fixed_accepts_unsigned_forms() {
+        assert_eq!(parse_fixed("5", 2, TAG_LAST_QTY).unwrap(), 500);
+        assert_eq!(parse_fixed("5.", 2, TAG_LAST_QTY).unwrap(), 500);
+        assert_eq!(parse_fixed("0.50", 2, TAG_LAST_QTY).unwrap(), 50);
+        assert_eq!(parse_fixed("5.505", 2, TAG_LAST_QTY).unwrap(), 550);
+    }
+
+    #[test]
+    fn exec_report_to_event_rejects_negative_qty_and_px() {
+        let mut msg = sample_exec_report();
+        msg.set_field(TAG_LAST_QTY, "-1.00").unwrap();
+        assert!(matches!(
+            exec_report_to_event(&msg),
+            Err(FixError::Parse {
+                tag: TAG_LAST_QTY,
+                ..
+            })
+        ));
+        let mut msg = sample_exec_report();
+        msg.set_field(TAG_LAST_PX, "-150.5").unwrap();
+        assert!(matches!(
+            exec_report_to_event(&msg),
+            Err(FixError::Parse {
+                tag: TAG_LAST_PX,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn exec_report_to_event_rejects_fill_without_positive_px() {
+        let mut msg = sample_exec_report();
+        msg.set_field(TAG_LAST_PX, "0").unwrap();
+        assert!(matches!(
+            exec_report_to_event(&msg),
+            Err(FixError::Parse {
+                tag: TAG_LAST_PX,
+                ..
+            })
+        ));
+        let mut msg = Message::new();
+        msg.with_header_mut(|h| h.set_field(TAG_MSG_TYPE, "8"))
+            .unwrap();
+        msg.set_field(TAG_CL_ORD_ID, "00000000000000000042")
+            .unwrap();
+        msg.set_field(TAG_EXEC_ID, "EXEC-1").unwrap();
+        msg.set_field(TAG_ORD_STATUS, "2").unwrap();
+        msg.set_field(TAG_LAST_QTY, "100.00").unwrap();
+        assert!(matches!(
+            exec_report_to_event(&msg),
+            Err(FixError::Parse {
+                tag: TAG_LAST_PX,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn exec_report_to_event_accepts_zero_qty_with_price() {
+        let mut msg = sample_exec_report();
+        msg.set_field(TAG_ORD_STATUS, "8").unwrap();
+        msg.set_field(TAG_LAST_QTY, "0.00").unwrap();
+        msg.set_field(TAG_LAST_PX, "100.000000000").unwrap();
+        let ev = exec_report_to_event(&msg).unwrap();
+        assert_eq!(ev.last_qty_e2, 0);
+        assert_eq!(ev.last_px_e9, 100_000_000_000);
     }
 
     #[test]
@@ -397,9 +547,9 @@ mod tests {
         let a = "E".repeat(21);
         let b = format!("{}X", "E".repeat(21));
 
-        let id_a1 = exec_id_from_fix(&a).unwrap();
-        let id_a2 = exec_id_from_fix(&a).unwrap();
-        let id_b = exec_id_from_fix(&b).unwrap();
+        let id_a1 = exec_id_from_fix(&a);
+        let id_a2 = exec_id_from_fix(&a);
+        let id_b = exec_id_from_fix(&b);
 
         assert_eq!(id_a1, id_a2, "hashing must be deterministic");
         assert_ne!(

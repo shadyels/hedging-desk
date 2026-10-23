@@ -100,10 +100,9 @@ fn fix_error_to_from_app(err: FixError) -> MsgFromAppError {
     match err {
         FixError::MissingField(_) => MsgFromAppError::FieldNotFound,
         FixError::UnknownStatus(_) => MsgFromAppError::IncorrectTagValue,
-        FixError::ExecIdTooLong(_)
-        | FixError::ClOrdIdTooLong(_)
-        | FixError::Parse { .. }
-        | FixError::Fix(_) => MsgFromAppError::IncorrectDataFormat,
+        FixError::ClOrdIdTooLong(_) | FixError::Parse { .. } | FixError::Fix(_) => {
+            MsgFromAppError::IncorrectDataFormat
+        }
     }
 }
 

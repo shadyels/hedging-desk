@@ -228,7 +228,7 @@ fn immediate_full_fill_reaches_filled_and_dedupes_replay() {
     // ("EXEC-1" for ImmediateFull's one and only exec). Replaying the exact
     // exec that was already applied must be a deduped no-op (root CLAUDE.md
     // invariant 4), not a second fill on top of an already-terminal order.
-    let exec_id = d1_gateway_fix::convert::exec_id_from_fix("EXEC-1").expect("exec id");
+    let exec_id = d1_gateway_fix::convert::exec_id_from_fix("EXEC-1");
     let replay = store
         .apply_exec(&ExecEvent {
             cl_ord_id,
