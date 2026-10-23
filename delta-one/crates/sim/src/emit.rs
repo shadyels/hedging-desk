@@ -6,21 +6,13 @@
 //! imported by production crates, dependency direction is sim -> d1-core
 //! only, so this writes a file rather than calling into `d1` directly.
 //!
-//! Known divergence, deliberately not converged here: `sim replay` credits
-//! a `dividend` action's cash with NO accompanying ex-div price move (its
-//! `MarketData` entry keeps whatever mid it last had), while `expand`'s
-//! dividend arm below emits an ex-div tick -- the price drops by the
-//! dividend amount on the same tick that carries the credit, same
-//! rationale as `crates/d1/src/feed.rs::run_feed_producer`'s M6
-//! remediation: crediting cash without dropping the price creates value out
-//! of nothing, and `run_core` (the eventual consumer of this file) credits
-//! dividends from `FeedTick::div_per_share_e9` and nowhere else, so a
-//! keeper-side-only credit has no representation on this transport at all.
-//! Same YAML `action: dividend`, two different readings depending on which
-//! binary mode consumes it. Converging them would change `just sim`'s
-//! printed AAPL row from 176.00 to 175.75 -- a P1.M5 tracker-output
-//! behavior change, out of scope for this transport-only change and
-//! recorded as a P2.M4 debt item (`docs/PONYTAIL-DEBT.md`).
+//! `sim replay` (`replay.rs`) consumes `expand` too, so both binary modes
+//! read a scenario identically. In particular a `dividend` action emits an
+//! ex-div tick -- all three prices drop by the dividend on the same tick
+//! that carries `div_per_share_e9` -- matching `run_core`, which credits
+//! dividends from `FeedTick::div_per_share_e9` and nowhere else
+//! (`crates/d1/src/feed.rs::run_feed_producer`'s M6 remediation: cash
+//! without a price drop creates value out of nothing).
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -82,10 +74,9 @@ pub fn run(scenario_path: &Path, out_path: &Path) -> Result<()> {
 /// tally of skipped non-feed entries by action label (`run` above turns that
 /// tally into the one-line stderr summary via `print_skip_summary` -- kept
 /// out of this function so it stays pure: no I/O, directly unit-testable).
-/// Mirrors `replay::run`'s `quote`/`gap` arms verbatim (same `to_fixed_e9`,
-/// same `resolve`, same `bail!` wording for missing fields); `dividend`
-/// diverges as described in this module's doc comment.
-fn expand(
+/// Shared by `replay::run` and `run` above; `dividend` emits an ex-div tick
+/// as described in this module's doc comment.
+pub(crate) fn expand(
     scenario: &Scenario,
     universe: &Universe,
 ) -> Result<(Vec<FeedTick>, BTreeMap<String, usize>)> {
@@ -148,6 +139,12 @@ fn expand(
                 last_px_e9.insert(id, tick.last_px_e9);
                 ticks.push(tick);
             }
+            // ponytail: `quote`/`gap` synthesize bid/ask/last directly from the
+            // scenario's decimal values (fixed-point conversion at this boundary,
+            // per root CLAUDE.md invariant 1). `gap` has no spread info in the
+            // scenario schema, so bid=ask=last=to_mid -- a real feed would
+            // preserve the last known spread (affects both `sim replay` and
+            // emit-ticks, which share this arm); add that when a scenario needs it.
             "gap" => {
                 let (Some(symbol), Some(to_mid)) = (&entry.instrument, entry.to_mid) else {
                     bail!("gap at {}ms missing instrument/to_mid", entry.at_ms);

@@ -1,10 +1,4 @@
 //! Market-data feed tick: the sim -> d1-core ingest seam.
-//!
-//! ponytail: M1 ingest is a direct function call (`MarketData::ingest`). No
-//! threads/rings exist yet because nothing needs decoupling until M2 adds the
-//! NATS/FIX/Kafka gateways. M2 drops an SPSC ring in front of this call once a
-//! real consumer thread exists (`rtrb` vs `crossbeam` ADR pending,
-//! delta-one/CLAUDE.md).
 
 use crate::ids::InstrumentId;
 
@@ -20,7 +14,7 @@ pub struct FeedTick {
     pub ask_px_e9: i64,
     /// Last/reference price, fixed-point ×10⁹.
     pub last_px_e9: i64,
-    /// Exchange timestamp, nanoseconds since Unix epoch.
+    /// Exchange timestamp, nanoseconds since session start (0); both producers (the synthetic walk and `sim --mode emit-ticks` tick files) count from there, not from the Unix epoch.
     pub exch_ts_ns: u64,
     /// Per-share cash dividend, fixed-point ×10⁹; `0` on ordinary ticks.
     /// Riding the same tick stream as the price update (rather than a

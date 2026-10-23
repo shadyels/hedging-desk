@@ -50,8 +50,8 @@ pub fn order_to_new_order_single(order: &Order) -> Result<Message, FixError> {
 
     // ponytail: `limit_px_e9 == 0` is an in-band "market order" sentinel —
     // it conflates a genuine zero-price limit order. Fine while D1 only emits
-    // market orders (Slice 2); add an explicit `OrdType`/enum field on `Order`
-    // when real limit orders arrive (P1.M3).
+    // market orders; add an explicit `OrdType`/enum field on `Order` at the
+    // first non-market order type.
     let is_market = order.limit_px_e9 == 0;
     msg.set_field(TAG_ORD_TYPE, if is_market { "1" } else { "2" })?;
     msg.set_field(TAG_ORDER_QTY, fmt_fixed(order.order_qty_e2, 2))?;
@@ -187,6 +187,13 @@ pub fn exec_id_from_fix(s: &str) -> Result<ExecId, FixError> {
 /// within and across process runs), each contributing 8 bytes, truncated to
 /// fill the array. ~160 bits of digest, not just a single 64-bit hash, so
 /// two ExecIDs that happen to share a 64-bit hash don't collide either.
+///
+/// ponytail: `DefaultHasher`'s algorithm is not guaranteed stable across Rust
+/// releases, so the same venue ExecID can map to a different `ExecId` after a
+/// toolchain upgrade ("across process runs" above holds for one toolchain
+/// only). Harmless while dedup state is in-memory only. Trigger: before any
+/// dedup/`ExecId` state is persisted or compared across processes. Upgrade
+/// path: owner undecided (a hash with a specified, stable algorithm).
 fn hash20(s: &str) -> [u8; 20] {
     let mut buf = [0u8; 20];
     let mut offset = 0usize;
@@ -210,13 +217,11 @@ fn hash20(s: &str) -> [u8; 20] {
 /// so integer division/modulo does the conversion exactly. Assumes
 /// non-negative input (this system never sends negative quantities/prices;
 /// direction is `Side`).
-///
-/// ponytail: the non-negative precondition is currently unguarded — negative
-/// input yields malformed FIX text (e.g. `fmt_fixed(-50, 2)` -> `"0.-50"`).
-/// Upgrade path is a one-line `debug_assert!(value_e_n >= 0, ...)` (matching
-/// the `apply_exec` domain-assert style) if a caller that could ever pass a
-/// negative appears. Note only for now — no caller can today.
 fn fmt_fixed(value_e_n: i64, decimals: u32) -> String {
+    debug_assert!(
+        value_e_n >= 0,
+        "fmt_fixed requires a non-negative value (negative yields malformed FIX text), got {value_e_n}"
+    );
     let scale = 10i64.pow(decimals);
     let whole = value_e_n / scale;
     let frac = value_e_n % scale;
@@ -414,5 +419,12 @@ mod tests {
         let s = fmt_fixed(150_500_000_000, 9);
         assert_eq!(s, "150.500000000");
         assert_eq!(parse_fixed(&s, 9, TAG_LAST_PX).unwrap(), 150_500_000_000);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "non-negative")]
+    fn fmt_fixed_rejects_negative_in_debug() {
+        let _ = fmt_fixed(-50, 2);
     }
 }

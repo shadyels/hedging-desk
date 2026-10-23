@@ -1,15 +1,15 @@
 //! Deterministic scenario replay: resolves symbols via refdata, builds
 //! `MarketData` + `PositionKeeper`, seeds each tracker book's starting cash,
-//! feeds the timeline into `MarketData::ingest`/`PositionKeeper::credit_dividend`
-//! in order, and prints the resulting book plus per-book cash. The demoable
-//! M1 output (docs/ROADMAP.md P1.M1), extended for per-book cash + dividends
+//! expands the timeline via `emit::expand` (the single scenario -> tick
+//! reading, shared with `--mode emit-ticks`), applies each tick to
+//! `MarketData::ingest`/`PositionKeeper::credit_dividend` in order, and
+//! prints the resulting book plus per-book cash. The demoable M1 output (docs/ROADMAP.md P1.M1), extended for per-book cash + dividends
 //! in P1.M5 Slice 1.
 //!
-//! ponytail: `quote`/`gap` synthesize bid/ask/last directly from the
-//! scenario's decimal values (fixed-point conversion at this boundary, per
-//! root CLAUDE.md invariant 1). `gap` has no spread info in the scenario
-//! schema, so bid=ask=last=to_mid — a real feed replay would preserve the
-//! last known spread; add that when a scenario needs it.
+//! `quote`/`gap`/`dividend` semantics (fixed-point conversion at the boundary,
+//! `gap` as bid=ask=last, the ex-div price drop) live in `emit::expand`; a
+//! dividend tick drops the stored price AND credits cash here, matching what
+//! `d1::run_core` does with the same tick.
 
 use std::path::Path;
 
@@ -33,9 +33,8 @@ pub fn run(scenario_path: &Path) -> Result<()> {
     let universe = d1_refdata::load(&universe_path)?;
 
     let mut market_data = MarketData::new(&universe.instrument_ids);
-    // Not driven by fills yet -- those arrive with the M2 order path -- but
-    // now real for cash: each tracker book's `initial_cash_e9` is seeded
-    // below and the `dividend` timeline arm credits it (P1.M5 Slice 1).
+    // Not driven by fills: each tracker book's `initial_cash_e9` is seeded
+    // below and dividend ticks credit it (P1.M5 Slice 1).
     let mut keeper = PositionKeeper::new(&universe.book_ids, &universe.instrument_ids);
     for tracker in &universe.tracker_books {
         if keeper
@@ -54,73 +53,38 @@ pub fn run(scenario_path: &Path) -> Result<()> {
         scenario.scenario, scenario.seed
     );
 
-    for entry in &scenario.timeline {
-        let Some(action) = entry.action.as_deref() else {
-            continue;
-        };
-        match action {
-            "quote" => {
-                let (Some(symbol), Some(bid), Some(ask)) =
-                    (&entry.instrument, entry.bid, entry.ask)
-                else {
-                    bail!("quote at {}ms missing instrument/bid/ask", entry.at_ms);
-                };
-                let id = resolve(&universe, symbol, entry.at_ms)?;
-                let bid_px_e9 = to_fixed_e9(bid);
-                let ask_px_e9 = to_fixed_e9(ask);
-                market_data.ingest(&FeedTick {
-                    instrument_id: id,
-                    bid_px_e9,
-                    ask_px_e9,
-                    last_px_e9: (bid_px_e9 + ask_px_e9) / 2,
-                    exch_ts_ns: entry.at_ms * 1_000_000,
-                    div_per_share_e9: 0,
-                });
-            }
-            "gap" => {
-                let (Some(symbol), Some(to_mid)) = (&entry.instrument, entry.to_mid) else {
-                    bail!("gap at {}ms missing instrument/to_mid", entry.at_ms);
-                };
-                let id = resolve(&universe, symbol, entry.at_ms)?;
-                let px_e9 = to_fixed_e9(to_mid);
-                market_data.ingest(&FeedTick {
-                    instrument_id: id,
-                    bid_px_e9: px_e9,
-                    ask_px_e9: px_e9,
-                    last_px_e9: px_e9,
-                    exch_ts_ns: entry.at_ms * 1_000_000,
-                    div_per_share_e9: 0,
-                });
-            }
-            "dividend" => {
-                let (Some(symbol), Some(amount)) = (&entry.instrument, entry.amount_per_share)
-                else {
-                    bail!(
-                        "dividend at {}ms missing instrument/amount_per_share",
-                        entry.at_ms
-                    );
-                };
-                let id = resolve(&universe, symbol, entry.at_ms)?;
-                let div_per_share_e9 = to_fixed_e9(amount);
-                // Credits every book holding `id`, not just tracker books --
-                // same all-or-nothing overflow discipline as any other
-                // keeper mutation (root CLAUDE.md #2): a `None` here must
-                // not pass silently.
-                if keeper.credit_dividend(id, div_per_share_e9).is_none() {
-                    bail!(
-                        "dividend at {}ms instrument={:?} amount_per_share={amount}: credit_dividend overflowed, cash NOT applied",
-                        entry.at_ms,
-                        id
-                    );
-                }
-            }
-            // exo_book_event / anything else: no EXO book or order path in
-            // M1 — nothing to do yet.
-            _ => {}
-        }
-    }
+    let (ticks, _skipped) = crate::emit::expand(&scenario, &universe)?;
+    apply_ticks(&ticks, &mut market_data, &mut keeper)?;
 
     print_book(&universe, &market_data, &keeper);
+    Ok(())
+}
+
+/// Apply expanded ticks in order: price into `market_data`, and any dividend
+/// carried on the tick into every holding book's cash. Credits every book
+/// holding the instrument, not just tracker books -- same all-or-nothing
+/// overflow discipline as any other keeper mutation (root CLAUDE.md #2): a
+/// `None` must not pass silently.
+fn apply_ticks(
+    ticks: &[FeedTick],
+    market_data: &mut MarketData,
+    keeper: &mut PositionKeeper,
+) -> Result<()> {
+    for tick in ticks {
+        market_data.ingest(tick);
+        if tick.div_per_share_e9 != 0
+            && keeper
+                .credit_dividend(tick.instrument_id, tick.div_per_share_e9)
+                .is_none()
+        {
+            bail!(
+                "dividend at {}ns instrument={:?} div_per_share_e9={}: credit_dividend overflowed, cash NOT applied",
+                tick.exch_ts_ns,
+                tick.instrument_id,
+                tick.div_per_share_e9
+            );
+        }
+    }
     Ok(())
 }
 
@@ -160,5 +124,39 @@ fn print_book(universe: &Universe, market_data: &MarketData, keeper: &PositionKe
             let cash = keeper.cash(tracker.book).unwrap_or(0);
             println!("{:<10} {:>20}", format!("{:?}", tracker.book), cash);
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)] // tests: unwrap_used is a hot-path-only ban (delta-one/CLAUDE.md)
+mod tests {
+    use super::*;
+    use d1_core::{BookId, Side};
+
+    #[test]
+    fn dividend_tick_drops_stored_price_and_credits_cash() {
+        let (book, inst) = (BookId(1), InstrumentId(1001));
+        let mut md = MarketData::new(&[inst]);
+        let mut keeper = PositionKeeper::new(&[book], &[inst]);
+        keeper.seed_cash(book, 0).unwrap();
+        keeper
+            .apply_fill(book, inst, Side::Buy, 10_000, 0) // 100.00 shares at px 0: cash stays 0
+            .unwrap();
+        let px = |p: i64, div: i64, ts: u64| FeedTick {
+            instrument_id: inst,
+            bid_px_e9: p,
+            ask_px_e9: p,
+            last_px_e9: p,
+            exch_ts_ns: ts,
+            div_per_share_e9: div,
+        };
+        let ticks = [
+            px(176_000_000_000, 0, 1),
+            px(175_750_000_000, 250_000_000, 2),
+        ];
+        apply_ticks(&ticks, &mut md, &mut keeper).unwrap();
+        assert_eq!(md.quote(inst).unwrap().last_px_e9, 175_750_000_000);
+        // 100 shares * 0.25 = 25.00 -> 25e9
+        assert_eq!(keeper.cash(book), Some(25_000_000_000));
     }
 }

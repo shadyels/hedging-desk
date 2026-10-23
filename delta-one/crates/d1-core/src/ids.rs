@@ -24,8 +24,7 @@ impl ClOrdId {
 
     /// Monotonic id from a sequence counter: right-aligned decimal ASCII,
     /// zero-padded. ponytail: caller owns the counter (no atomic generator
-    /// here yet) — a real one lands with whichever gateway mints `ClOrdID`s
-    /// (Slice 2).
+    /// here yet) — owner undecided.
     #[must_use]
     pub fn from_seq(seq: u64) -> Self {
         let mut bytes = [b'0'; 20];
@@ -45,12 +44,8 @@ pub struct ExecId(pub [u8; 20]);
 
 impl ExecId {
     /// Wrap raw bytes (e.g. a FIX `ExecID` once decoded).
-    // ponytail: FIX `ExecID` (tag 17) is a variable-length String with no
-    // 20-byte cap. The Slice 2 converter hashes oversize IDs (never truncates)
-    // — two distinct ExecIDs colliding to the same 20 bytes would be deduped
-    // as a replay and silently drop a real fill. Oversize IDs are hashed via
-    // DefaultHasher into a 160-bit digest to make collision astronomically
-    // unlikely compared to dropping a fill outright (see convert.rs).
+    // FIX `ExecID` (tag 17) has no 20-byte cap; the FIX converter hashes
+    // oversize IDs rather than truncating (see `exec_id_from_fix`).
     #[must_use]
     pub fn from_bytes(bytes: [u8; 20]) -> Self {
         Self(bytes)

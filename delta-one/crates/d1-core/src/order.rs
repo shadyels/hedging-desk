@@ -25,12 +25,12 @@ pub enum OrderStatus {
     /// Canceled. Terminal.
     Canceled,
     /// A cancel request is in flight.
-    // ponytail: not driven in Slice 1 — FIX 35=F (OrderCancelRequest) lands
-    // with the FIX gateway (Slice 2).
+    // ponytail: not driven — FIX 35=F (OrderCancelRequest) lands with the
+    // P3.M2 kill switch, its first real consumer.
     PendingCancel,
     /// A cancel/replace request is in flight.
-    // ponytail: not driven in Slice 1 — FIX 35=G (OrderCancelReplaceRequest)
-    // lands with the FIX gateway (Slice 2).
+    // ponytail: not driven — FIX 35=G (OrderCancelReplaceRequest) lands with
+    // the P3.M2 kill switch, its first real consumer.
     PendingReplace,
 }
 
@@ -430,6 +430,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "overfill")]
     fn overfill_trips_invariant_in_debug() {
         // last_qty exceeds order_qty -> leaves would go negative. The

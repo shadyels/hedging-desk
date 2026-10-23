@@ -621,6 +621,15 @@ fn run_core(
                     "d1: target for unconfigured book={:?} instrument={:?}, rejecting (not in this process's position universe)",
                     target.book, target.instrument
                 ),
+                // Rejected whole, before `on_target`: it builds residual
+                // weights from ALL crosses, so dropping one cross mid-cycle
+                // would unbalance books.
+                Some(_) if !has_positive_ref_px(&market_data, target.instrument) => eprintln!(
+                    "d1: target book={:?} instrument={:?} ref_px_e9={}, rejecting (non-positive reference price)",
+                    target.book,
+                    target.instrument,
+                    arrival_mid_px_e9(&market_data, target.instrument)
+                ),
                 Some(_) => {
                     let ref_px_e9 = arrival_mid_px_e9(&market_data, target.instrument);
                     match session.on_target(target, &mut keeper, ref_px_e9) {
@@ -743,6 +752,15 @@ fn run_core(
                 eprintln!(
                     "d1: transfer for unconfigured book/instrument from_book={:?} to_book={:?} instrument={:?}, rejecting (not in this process's position universe)",
                     transfer.from_book, transfer.to_book, transfer.instrument
+                );
+            } else if !has_positive_ref_px(&market_data, transfer.instrument) {
+                // Same whole-reject-before-`on_transfer` rule as targets.
+                eprintln!(
+                    "d1: transfer from_book={:?} to_book={:?} instrument={:?} ref_px_e9={}, rejecting (non-positive reference price)",
+                    transfer.from_book,
+                    transfer.to_book,
+                    transfer.instrument,
+                    arrival_mid_px_e9(&market_data, transfer.instrument)
                 );
             } else {
                 let ref_px_e9 = arrival_mid_px_e9(&market_data, transfer.instrument);
@@ -1036,12 +1054,20 @@ fn push_posttrade(tx: &mut rtrb::Producer<PostTradeEvent>, event: PostTradeEvent
     }
 }
 
+/// `true` if `instrument`'s reference price is usable (`> 0`); `run_core`
+/// rejects a target/transfer otherwise rather than book crosses at a zero or
+/// negative price.
+fn has_positive_ref_px(market_data: &MarketData, instrument: InstrumentId) -> bool {
+    arrival_mid_px_e9(market_data, instrument) > 0
+}
+
 /// Cross/order reference price for a netting cycle (ADR-005 §4 default:
 /// arrival mid). Falls back to `last_px_e9` if either side of the book is
 /// unpriced (e.g. a two-sided quote hasn't ticked yet), and to `0` if the
-/// instrument has never ticked at all -- `d1-netting::net` itself has no
-/// opinion on price validity, so an unpriced instrument nets at 0 rather
-/// than blocking the cycle.
+/// instrument has never ticked at all. `d1-netting::net` itself has no
+/// opinion on price validity, so this function does not reject; `run_core`
+/// does -- it drops any target/transfer whose reference price is `<= 0`
+/// (`has_positive_ref_px`) before `on_target`/`on_transfer`.
 ///
 /// `pub` (not `pub(crate)`) because it is the cross/order reference-price
 /// read shared by the live loop (`run_core`, above) and the in-repo
@@ -1241,5 +1267,29 @@ fn refresh_constituent_mids(
         if let Some(slot) = prev_mids_e9.get_mut(idx) {
             *slot = mid_now_e9;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_positive_ref_px_is_not_usable() {
+        let (zero, good, never) = (InstrumentId(1), InstrumentId(2), InstrumentId(3));
+        let mut md = MarketData::new(&[zero, good, never]);
+        let tick = |instrument_id, px| FeedTick {
+            instrument_id,
+            bid_px_e9: px,
+            ask_px_e9: px,
+            last_px_e9: px,
+            exch_ts_ns: 1,
+            div_per_share_e9: 0,
+        };
+        md.ingest(&tick(zero, 0)); // reachable via a `--feed-ticks` zero-priced tick
+        md.ingest(&tick(good, 150_000_000_000));
+        assert!(!has_positive_ref_px(&md, zero));
+        assert!(!has_positive_ref_px(&md, never)); // never ticked -> 0
+        assert!(has_positive_ref_px(&md, good));
     }
 }
