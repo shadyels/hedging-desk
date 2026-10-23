@@ -26,7 +26,7 @@ Threading model: one pinned thread per hot-path stage, communicating over bounde
 - Core thread validates all inbound targets (via NATS wildcard subscription) against `protocol/refdata/universe.json` before netting; out-of-universe (book, instrument) pairs are **rejected** (root invariant #2 — nowhere to book the position).
 
 **Execution & idempotency (P1.M2–M3):**
-- Every `ExecEvent` carries an `ExecId` (`[u8; 20]`), used to dedupe replayed `ExecutionReport`s (root invariant #4). Collisions are impossible: FIX `ExecID`s ≤ 20 bytes are right-aligned; oversize IDs are **hashed** via `DefaultHasher` (never truncated), yielding a 160-bit digest that makes collision astronomically unlikely compared to a dropped fill.
+- Every `ExecEvent` carries an `ExecId` (`[u8; 20]`), used to dedupe replayed `ExecutionReport`s (root invariant #4). Short (≤20-byte) FIX `ExecID`s are right-aligned and padded with SOH (0x01); a FIX `String` cannot contain SOH, so short IDs map injectively (`"123"` ≠ `"0123"`). Longer IDs are **hashed** via `hash20` (three salted `DefaultHasher`/SipHash passes, never truncated). That is a 20-byte dedupe key, not a cryptographic digest: accidental collision is very unlikely but not impossible, and the hashed value is stable only within one toolchain. The post-trade `exec_id` is the venue's ID verbatim for ≤20-byte IDs.
 - `ExecOutcome { Duplicate, Applied(Option<Fill>) }` distinguishes replay (already seen) from fill-carrying or terminal-only (reject/cancel/expire) audits, wiring both to the post-trade ledger correctly.
 
 **Ring topology (P1.M2–M5):**
