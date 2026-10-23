@@ -3,8 +3,9 @@
 //! expands the timeline via `emit::expand` (the single scenario -> tick
 //! reading, shared with `--mode emit-ticks`), applies each tick to
 //! `MarketData::ingest`/`PositionKeeper::credit_dividend` in order, and
-//! prints the resulting book plus per-book cash. The demoable M1 output (docs/ROADMAP.md P1.M1), extended for per-book cash + dividends
-//! in P1.M5 Slice 1.
+//! prints the resulting book plus per-book cash. The demoable M1 output
+//! (docs/ROADMAP.md P1.M1), extended for per-book cash + dividends in P1.M5
+//! Slice 1.
 //!
 //! `quote`/`gap`/`dividend` semantics (fixed-point conversion at the boundary,
 //! `gap` as bid=ask=last, the ex-div price drop) live in `emit::expand`; a
@@ -19,8 +20,16 @@ use d1_refdata::Universe;
 
 use crate::scenario;
 
-pub(crate) fn to_fixed_e9(px: f64) -> i64 {
-    (px * 1_000_000_000.0).round() as i64
+/// Decimal price -> fixed-point x10^9. Errors on NaN/+-inf (YAML 1.1 allows
+/// `.inf`/`.nan`) and on values outside `i64`, rather than letting the
+/// `f64 as i64` cast saturate (inf -> `i64::MAX`) or zero (NaN) them into a
+/// plausible-looking price.
+pub(crate) fn to_fixed_e9(px: f64) -> Result<i64> {
+    let scaled = (px * 1_000_000_000.0).round();
+    if !scaled.is_finite() || scaled >= i64::MAX as f64 || scaled <= i64::MIN as f64 {
+        bail!("price {px} is not a finite value representable as fixed-point x10^9");
+    }
+    Ok(scaled as i64)
 }
 
 /// Run a scenario file end to end and print the resulting market-data book.
@@ -134,29 +143,42 @@ mod tests {
     use d1_core::{BookId, Side};
 
     #[test]
-    fn dividend_tick_drops_stored_price_and_credits_cash() {
+    fn to_fixed_e9_rejects_non_finite_and_out_of_range() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1e300] {
+            assert!(to_fixed_e9(bad).is_err(), "{bad} must be rejected");
+        }
+        assert_eq!(to_fixed_e9(175.75).unwrap(), 175_750_000_000);
+    }
+
+    #[test]
+    fn replayed_quote_gap_dividend_drops_price_and_credits_cash() {
+        use crate::emit::tests::{dividend_entry, quote_entry, test_universe};
+        use crate::scenario::Scenario;
+
         let (book, inst) = (BookId(1), InstrumentId(1001));
+        let mut gap = quote_entry(5_000, "AAPL", 0.0, 0.0);
+        gap.action = Some("gap".to_string());
+        gap.to_mid = Some(176.0);
+        let scenario = Scenario {
+            scenario: "t".to_string(),
+            seed: 1,
+            universe: "universe.json".to_string(),
+            timeline: vec![
+                quote_entry(0, "AAPL", 187.50, 187.52),
+                gap,
+                dividend_entry(9_000, "AAPL", 0.25),
+            ],
+        };
+        let (ticks, _) = crate::emit::expand(&scenario, &test_universe()).unwrap();
+
         let mut md = MarketData::new(&[inst]);
         let mut keeper = PositionKeeper::new(&[book], &[inst]);
         keeper.seed_cash(book, 0).unwrap();
-        keeper
-            .apply_fill(book, inst, Side::Buy, 10_000, 0) // 100.00 shares at px 0: cash stays 0
-            .unwrap();
-        let px = |p: i64, div: i64, ts: u64| FeedTick {
-            instrument_id: inst,
-            bid_px_e9: p,
-            ask_px_e9: p,
-            last_px_e9: p,
-            exch_ts_ns: ts,
-            div_per_share_e9: div,
-        };
-        let ticks = [
-            px(176_000_000_000, 0, 1),
-            px(175_750_000_000, 250_000_000, 2),
-        ];
+        // 100.00 shares at px 0: position set up without moving cash.
+        keeper.apply_fill(book, inst, Side::Buy, 10_000, 0).unwrap();
         apply_ticks(&ticks, &mut md, &mut keeper).unwrap();
+
         assert_eq!(md.quote(inst).unwrap().last_px_e9, 175_750_000_000);
-        // 100 shares * 0.25 = 25.00 -> 25e9
-        assert_eq!(keeper.cash(book), Some(25_000_000_000));
+        assert_eq!(keeper.cash(book), Some(25_000_000_000)); // 100 sh * 0.25
     }
 }

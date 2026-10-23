@@ -272,14 +272,14 @@ fn assert_scenario_nets() {
 }
 
 /// TIMED region: the four ADR-004 §1 stages, in `run_core`'s live order
-/// (`crates/d1/src/lib.rs:445-618`), stopping at the order-emit boundary --
+/// (`crates/d1/src/lib.rs`, `run_core`), stopping at the order-emit boundary --
 /// see the module doc's "Exclusions from the timed region" section for what
 /// (and why) is left out:
-/// 1. feed ingest (`market_data.ingest`, `lib.rs:447`)
-/// 2. ref-price read (`arrival_mid_px_e9`, `lib.rs:568`)
+/// 1. feed ingest (`market_data.ingest`, `lib.rs:504`)
+/// 2. ref-price read (`arrival_mid_px_e9`, `lib.rs:619`)
 /// 3. position/risk check + netting + order build (`session.on_target`,
-///    `lib.rs:569` -> `cycle.rs:168-335`)
-/// 4. order emit (`fix_outbound_tx.push`, `lib.rs:618`)
+///    `lib.rs:633` -> `cycle.rs:168-335`)
+/// 4. order emit (`fix_outbound_tx.push`, `lib.rs:682`)
 ///
 /// Takes `&mut SampleState` (not by value -- same teardown reasoning as
 /// before) AND returns `Option<CycleOutput>` rather than dropping it here:

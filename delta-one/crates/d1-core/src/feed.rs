@@ -14,7 +14,9 @@ pub struct FeedTick {
     pub ask_px_e9: i64,
     /// Last/reference price, fixed-point ×10⁹.
     pub last_px_e9: i64,
-    /// Exchange timestamp, nanoseconds since session start (0); both producers (the synthetic walk and `sim --mode emit-ticks` tick files) count from there, not from the Unix epoch.
+    /// Exchange timestamp, nanoseconds since session start (0); both
+    /// producers (the synthetic walk and `sim --mode emit-ticks` tick files)
+    /// count from there, not from the Unix epoch.
     pub exch_ts_ns: u64,
     /// Per-share cash dividend, fixed-point ×10⁹; `0` on ordinary ticks.
     /// Riding the same tick stream as the price update (rather than a

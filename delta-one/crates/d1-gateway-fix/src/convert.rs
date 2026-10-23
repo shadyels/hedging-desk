@@ -157,8 +157,8 @@ fn clordid_from_fix(s: &str) -> Result<ClOrdId, FixError> {
 /// see `clordid_from_fix` above). Silently truncating an oversize `ExecID`
 /// would risk two distinct execs colliding to the same 20-byte dedupe key
 /// (`d1-core::OrderStore::apply_exec` dedupes purely on `ExecId` equality,
-/// `ids.rs:48`) -- a truncated collision would look like a replay and
-/// silently drop a real fill.
+/// `ExecId`, built via `ExecId::from_bytes`) -- a truncated collision would
+/// look like a replay and silently drop a real fill.
 ///
 /// For `s.len() <= 20` this is unambiguous: right-align into the 20-byte
 /// array, same as `clordid_from_fix`. Above 20 bytes -- **hash** rather than
@@ -183,17 +183,20 @@ pub fn exec_id_from_fix(s: &str) -> Result<ExecId, FixError> {
 
 /// Digest an arbitrary-length string into 20 bytes: three independently
 /// salted `DefaultHasher` passes (deterministic -- fixed seed, not
-/// `RandomState` -- so the same input always maps to the same `ExecId`
-/// within and across process runs), each contributing 8 bytes, truncated to
-/// fill the array. ~160 bits of digest, not just a single 64-bit hash, so
-/// two ExecIDs that happen to share a 64-bit hash don't collide either.
+/// `RandomState` -- so the same input maps to the same `ExecId` across
+/// process runs of one toolchain), each contributing 8 bytes, truncated to
+/// fill the array. The passes share one 64-bit SipHash primitive with a
+/// known key, so this is a 20-byte dedupe key that makes accidental
+/// collisions very unlikely, NOT a 160-bit cryptographic digest.
 ///
 /// ponytail: `DefaultHasher`'s algorithm is not guaranteed stable across Rust
 /// releases, so the same venue ExecID can map to a different `ExecId` after a
-/// toolchain upgrade ("across process runs" above holds for one toolchain
-/// only). Harmless while dedup state is in-memory only. Trigger: before any
-/// dedup/`ExecId` state is persisted or compared across processes. Upgrade
-/// path: owner undecided (a hash with a specified, stable algorithm).
+/// toolchain upgrade. In-memory dedup is unaffected, but `ExecId` is already
+/// persisted as `exec_id` on `posttrade.trades`/`posttrade.allocations`, so
+/// ledger values for OVERSIZE ExecIDs are stable only within one toolchain.
+/// Trigger: any consumer that correlates ledger `exec_id` across deploys or
+/// against venue IDs. Upgrade path: owner undecided (a hash with a specified,
+/// stable algorithm).
 fn hash20(s: &str) -> [u8; 20] {
     let mut buf = [0u8; 20];
     let mut offset = 0usize;
