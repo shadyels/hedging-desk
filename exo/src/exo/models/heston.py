@@ -10,8 +10,8 @@ built now would make that unimplementable in M2 without rewriting this module,
 which the M2 payoff-abstraction rule forbids.
 
 ponytail: retaining the full (n_paths, n_steps+1) `S` and `v` matrices as float64 holds ~810 MB
-steady-state at 200k paths x 252 steps (two such matrices) -- but the measured PEAK is ~2.02 GB, not 810
-MB and not the ~1.62 GB an earlier correction claimed (corrected AGAIN 2026-09-06, second
+steady-state at 200k paths x 252 steps (two such matrices) -- but the measured PEAK is ~2.02 GB, 
+not 810 MB and not the ~1.62 GB an earlier correction claimed (corrected AGAIN 2026-09-06, second
 code-review round -- see `studies/scheme_convergence.py`'s `_BYTES_PER_PATH_STEP` comment for
 the measured breakdown): `simulate()` allocates `S`, `v`, and two draw matrices up front (QE:
 `u`, `z`; euler-ft: `z_variance`, `z_spot`) -- four arrays -- but `rng.py`'s antithetic
