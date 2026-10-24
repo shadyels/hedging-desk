@@ -27,3 +27,19 @@ Matching-pair order when >2 books: largest-opposite-first, deterministic tie-bre
 - Easier: audit and compliance story ("every risk transfer is a booked trade"); per-book P&L stays exact; the demo's flagship narrative.
 - Harder: netting engine is genuinely stateful (in-flight tracking, partial fills against netted parents) — this is the hardest correctness surface in Phase 1; mandatory property tests (`Σ book positions == firm position` under arbitrary fill/cancel interleavings) per `delta-one/CLAUDE.md`.
 - Open question deliberately deferred: cross timing vs external execution (cross at cycle start vs after external completes). Demo: cross at cycle start at arrival mid. Revisit with the desk's compliance function before any production use.
+
+## Amendment (2026-10-24, ADR-014 §11) — where the no-trade band comes from
+
+§2's "(or none if inside the instrument's no-trade band)" is replaced by:
+
+> 2. `net_external = Σ_b demand_b` → one external order, or none if `|net_external| ≤ band`, where
+> `band = min(band_b)` over the books with non-zero demand this cycle and `band_b` is book b's
+> `TargetPosition.band_qty_e2` — the no-trade band half-width each target's producer declares. The band
+> gates the external order only, never the crosses.
+
+Reason: no instrument-level band was ever defined in `protocol/refdata/universe.json`; `docs/ROADMAP.md`
+(P1.M3 slice 1) and `d1-netting` already implement the per-target band; `exo/CLAUDE.md` rule 4 called the
+field informational. This amendment makes the implemented rule the documented one and `exo/CLAUDE.md` rule 4
+is corrected to match. `min` remains a deliberate ceiling (it can only over-trade, never skip a needed trade);
+the per-book-indifference rule is the upgrade if over-trading cost ever matters (`d1-netting/src/lib.rs`
+marker).

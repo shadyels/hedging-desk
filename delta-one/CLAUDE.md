@@ -30,7 +30,7 @@ Threading model: one pinned thread per hot-path stage, communicating over bounde
 - `ExecOutcome { Duplicate, Applied(Option<Fill>), Overfilled { fill, excess_qty_e2 } }` distinguishes replay (already seen) from fill-carrying or terminal-only (reject/cancel/expire) audits, wiring both to the post-trade ledger. A fill above leaves books only `leaves`, ends the order `Filled` (unless the venue reported a terminal status) and returns the unbooked excess, which the core loop logs and flags in the order-audit `detail`. A negative fill quantity is `OrderError::NegativeFillQty`, returned before any mutation.
 
 **Ring topology (P1.M2–M5):**
-- Core thread drains 8 `rtrb` SPSC rings: FIX pair (outbound `Order`, inbound `ExecEvent`), NATS pair (inbound `Target`, outbound `ExecReport`), feed-ingest ring (`FeedTick`), crosses pair (outbound `CrossRecord`, inbound `TransferRequest`), and Kafka pair (outbound `PostTradeEvent`, consumed by the producer thread).
+- Core thread drains 9 `rtrb` SPSC rings: FIX pair (outbound `Order`, inbound `ExecEvent`), NATS pair (inbound `Target`, outbound `ExecReport`), feed-ingest ring (`FeedTick`), crosses pair (outbound `CrossRecord`, inbound `TransferRequest`), Kafka pair (outbound `PostTradeEvent`, consumed by the producer thread), and the tracker ring (outbound `TrackerRecord`). ADR-014 adds two more rings (marks, position mirror); P2.M4 Slice 3 adds them and bumps this count to 11.
 
 **Ordered shutdown (P1.M4–M5):**
 - Signal core shutdown flag → join core thread (the *only* pusher onto the `PostTradeEvent` ring) → signal producer shutdown → join producer thread.

@@ -678,7 +678,7 @@ At q = 0 and r ∈ {0.02, 0.05}, the discounted form of both identities holds to
 
 ## Amendment 8 (2026-10-24) — P2.M3: FX products
 
-P2.M3 adds the two FX products, TARF and PTARF, on EURUSD under Heston-FX with two rates. It adds no engine and no new parameter type: FX rides `HestonParams` under a documented alias. Status: Proposed. The desk lead has not yet approved this amendment; the approval record is to be added when it is given. §1 states the alias and its consumers. §2 gives the term sheets. §3 gives the discounting and state rules and their identities. §4 records the illustrative parameter set. §5 records the characteristic-function truncation finding and the change it forced. §6 lists the gate set.
+P2.M3 adds the two FX products, TARF and PTARF, on EURUSD under Heston-FX with two rates. It adds no engine and no new parameter type: FX rides `HestonParams` under a documented alias. Status: Accepted. Approved by the desk lead on 2026-10-24. §1 states the alias and its consumers. §2 gives the term sheets. §3 gives the discounting and state rules and their identities. §4 records the illustrative parameter set. §5 records the characteristic-function truncation finding and the change it forced. §6 lists the gate set.
 
 ### 1. FX under Heston: `r` is the domestic rate, `q` is the foreign rate
 
@@ -689,7 +689,7 @@ Consumers of `q`:
 - **Simulation drift:** yes. `models/heston.py` reads `params.q` for the spot drift.
 - **Characteristic function:** yes. `models/heston_cf.py` uses `q` in the forward and the `exp(−qT)` spot term.
 - **LSM Jensen continuation floor:** not applicable. There is no American FX product. The floor in `models/lsm.py` uses `r − q` for a constant rate pair; a term structure would need the forward over `[t, t+D]` (ledger row `lsm.py`).
-- **P2.M4 Greeks:** a bump of `q` is EUR rho for TARF and PTARF, but dividend sensitivity for equities (ADR-008), and ADR-009's demo rho aggregation has a single USD bucket only. The labelling and bucketing are undecided; the marker is in `exo/src/exo/products/tarf.py` and the ledger row is in `docs/PONYTAIL-DEBT.md`.
+- **P2.M4 Greeks:** a bump of `q` is EUR rho for TARF and PTARF, but dividend sensitivity for equities (ADR-008), and ADR-009's demo rho aggregation has a single USD bucket only. The labelling and bucketing are undecided; the marker is in `exo/src/exo/products/tarf.py` and the ledger row is in `docs/PONYTAIL-DEBT.md`. *Annotation (Amendment 9, P2.M4):* labelling is decided in Amendment 9 §4; bucketing remains undecided (P4.M1).
 
 ### 2. Term sheets
 
@@ -797,4 +797,246 @@ All gates are in `exo/tests/test_validation_gates_fx.py`, on seeds 601–606. Ev
 - **No proto change.** `"tarf"` and `"ptarf"` already appear in `protocol/proto/live.proto` as `ProductLine.product_type` values.
 - **No universe change.** EURUSD is `instrument_id` 4001 in `protocol/refdata/universe.json`.
 - **Three ledger rows** are added in `docs/PONYTAIL-DEBT.md`: two in `tarf.py` (lines 22 and 39) and one for the 4-step QE marker in `test_validation_gates_fx.py` (line 72). The `heston_cf.py` row is updated for the new limit.
-- **P2.M4 inherits** the `q := r_f` labelling caveat of §1. The Greek labelling and bucketing are undecided.
+- **P2.M4 inherits** the `q := r_f` labelling caveat of §1. The Greek labelling and bucketing are undecided. *Annotation (Amendment 9, P2.M4):* labelling is decided in Amendment 9 §4; bucketing remains undecided.
+
+## Amendment 9 (2026-10-24) — P2.M4: published numbers, Greeks, the persisted book
+
+P2.M4 is the first milestone whose prices reach the bus. This amendment records the estimator decisions behind
+every published number. Status: Proposed. Decided by the desk lead on 2026-10-24: the sampler (§1), `bump_spot_rel = 0.01` (§2), the
+`q`-bump labelling (§4), the dirty-tree policy (§6) and publishing the storyline Greeks flagged at 20,000 paths
+(§7); the remaining text awaits approval. Wire units are fixed by
+ADR-014 §9; this amendment fixes how they are estimated. It builds on Amendment 8 §1 (`q := r_f`).
+
+### 1. Sampler for published numbers: pseudo-random + antithetic, no control variate
+
+Decision (desk lead): every published PV, SE and Greek uses `PseudoRandomSource(seed, antithetic=True)` with
+`EngineConfig(antithetic=True)`. There is no Sobol and no control variate. Amendment 6 §8's "the switch is
+P2.M4's to make" is answered: **not switched**. The service refuses to start if `exo.toml [models] antithetic`
+is false. No sampler knob is added to `EngineConfig` or `exo.toml`.
+
+Why, beyond the decision itself:
+
+- **Theta coupling.** The theta estimator of §2 couples the aged run to the base run by dropping the first
+  step's draws. Under Sobol the net's dimension `D = 2·n_steps` changes when `n_steps` drops by one, so the
+  aged run would get a different net and no CRN (Amendment 6 §2). Pseudo-random streams are column-sliceable;
+  nets are not.
+- **SE calibration.** The pair-mean SE is valid at any configuration. The RQMC SE's calibration is
+  unquantified outside the two measured regimes (Amendment 6 §4).
+- **Control-variate bias.** The control variate transfers `β·(E_disc − E_exact)` (Amendment 6 §6). A published
+  number must not silently absorb discretization bias.
+
+Cost, stated against the baseline a caller would actually switch from. Amendment 6 §5 measured `rqmc+bridge`
+at 1.21×–3.57× lower RMSE than `pseudo+antithetic`, so equal accuracy costs **1.46×–12.7× more paths**
+(the squares). On two cells that advantage was not resolvable at T = 32.
+
+Debt consequences. These triggers did **not** fire; each is re-ownered to "first published RQMC or
+control-variate number":
+- `models/estimator.py:206` (RQMC SE uncorrected);
+- `models/control_variate.py:34` and `:42`;
+- `products/pricer.py:54` (beta);
+- `products/pricer.py:166` (RQMC American);
+- `models/rng.py:308` (Sobol matrix memory);
+- `studies/qmc_variance_reduction.py:46` (variance ratios at Feller 0.231).
+
+### 2. CRN bump-and-revalue
+
+**Seed.** One seed and one path count per book (`book.toml`). Every leg of every product in that book is
+simulated from a fresh `PseudoRandomSource(seed, antithetic=True)`. Streams are keyed by name and the source is
+stateless (`models/rng.py`), so legs of the same shape receive bitwise-identical draws. Only `HestonParams`
+(and, for theta, the grid and the term sheet) differs between legs.
+
+**Legs.** Per product: base, then S±, σ±, r±, q±, then aged. That is 10 `simulate` calls, run sequentially
+and never concurrently. Each leg is reduced at once to its `(n_paths,)` discounted vector,
+`discount(payoff.cashflows(bundle, r=r), r=r)` (`products/pricer.py`). Only the base bundle is retained
+(`mc_estimate` needs its pairing). Each Greek is `mc_estimate(base_bundle, combination_of_vectors)`, so its SE
+is the antithetic pair-mean SE of the per-path difference. That is what makes the SE valid for a difference
+of correlated legs.
+
+| Greek | Legs | Per-path estimator |
+|---|---|---|
+| delta | s0·(1±h_S) | (d₊ − d₋) / (2·h_S·s0) |
+| gamma | base, s0·(1±h_S) | (d₊ − 2d₀ + d₋) / (h_S·s0)², reported × 0.01·s0 |
+| vega | √v0 ± h_σ and √θ ± h_σ together (v0' = (√v0±h_σ)², θ' = (√θ±h_σ)²) | (d₊ − d₋) / (2h_σ) |
+| rho | r ± h_r (moves drift **and** discount; Amendment 7 §4: `r` is threaded, never stored) | (d₊ − d₋) / (2h_r) |
+| q-sensitivity | q ± h_q | (d₊ − d₋) / (2h_q); labelled per §4 |
+| theta | aged run: `n_steps − 1` steps, `expiry − dt`, every term-sheet time − dt, rng = `DropLeadingStepsSource(rng, 1)` | (d_aged − d₀) / dt |
+
+`dt = expiry / n_steps`, with `n_steps = round(expiry · n_steps_per_year)`, which must be ≥ 2.
+
+`DropLeadingStepsSource` (`greeks/`) is a `RandomSource` that answers `normals((n, m))` with
+`base.normals((n, m+1))[:, 1:]`, and likewise `uniforms`. The aged path therefore reuses the base path's
+increments from step 2 onward, from the same (S0, v0): a coupled one-step "time passes, nothing else moves"
+estimator. It raises on a low-discrepancy base.
+
+Bump sizes live in `exo.toml [greeks]`: `bump_spot_rel = 0.01`, `bump_vol_abs = 0.005`,
+`bump_rate_abs = 0.001`, `bump_div_abs = 0.001`, `theta_days_per_year = 365`, `max_rel_std_error = 0.02`.
+`bump_vol_abs < min(√v0, √θ)` is enforced. `theta_days_per_year` is EXO configuration, not a market
+convention: the P2 model clock is unconventioned year fractions, and the per-calendar-day conversion is
+the operator's choice (same posture as Amendment 4 §1).
+
+**Ageing** is a table in `greeks/` mapping each loadable product class to its time fields:
+- `Autocallable`: `observations`, `expiry`;
+- `BarrierOption`: `expiry`, `observations`;
+- `ReverseConvertible`: `coupon_times`, `expiry`, `observations`;
+- `BonusCertificate`: `expiry`, `observations`;
+- `Warrant`: `expiry`;
+- `Tarf` and `Ptarf`: `fixings`, `expiry`.
+
+A test asserts that every dataclass field of each class is either in the table or in an explicit non-time
+list, so a new time field cannot be silently left unaged.
+
+**Flagging.** A Greek is flagged when `se > max_rel_std_error · |value|`; a zero value is always flagged. It
+is still published (`exo/CLAUDE.md` rule 6), and its name goes in `ProductLine.flagged_greeks`.
+
+### 3. Validation gates (blocking)
+
+**G-GK1 (call) and G-GK2 (put).**
+- Fixture: a European warrant, ratio 1, K = S0 = 100, T = 1, on the BS-degenerate fixture already used by the
+  product gates (`_DEGENERATE` in `tests/test_validation_gates_products.py`: σ = 0.2, r = 0.02, q = 0.01,
+  ξ = 1e-4, κ = 1.5, ρ = 0).
+- Engine: QE, 50 steps, 40,000 antithetic paths, production bump sizes.
+- Every Greek, theta included, is compared with the **same finite difference of the Black–Scholes closed form**
+  (`bs_call_price`/`bs_put_price` evaluated at the bumped inputs; for theta, at T − dt). It is not compared with
+  analytic Black–Scholes Greeks: the estimator is unbiased for the finite difference, so this reference removes
+  bump bias from the comparison by construction.
+- Assertions: `|est − ref| < 3·se` and `0 < se < tol_abs`, where `tol_abs` is 1.1 × the largest SE of the
+  implementation's own 20-seed sweep (seeds 500–519), recorded in the docstring.
+
+Prototype (not the implementation), at this configuration over seeds 500–519:
+- Maximum |z|: 2.37 over 240 draws (6 Greeks × 2 options × 20 seeds). The expected maximum of 240 independent
+  |N(0,1)| draws is ≈ 2.87.
+- Mean z for every Greek: within [−0.24, +0.34].
+- Mutants (put, seeds 500–504), z on each mutant's own SE unless stated:
+  - vega bumping v0 only: −208;
+  - rho bumping only the discount, with paths simulated at base r: +1,294;
+  - one-sided delta: about +17;
+  - gamma missing its S scale: about −3,500;
+  - theta ≡ 0: `se = 0`, so the `0 < se` conjunct raises; against the honest SE it would sit at about +8.4 (put) and +7.7 (call), so the gate is sharp against a missing theta.
+- An **un**coupled theta (independent draws for the aged run) **passes** the 3-SE conjunct (|z| ≤ 1.1). Only
+  G-CRN below catches it.
+
+The fixture is deliberately degenerate so that a closed form exists. It pins the estimator machinery: scaling,
+leg pairing, joint v0/θ vega, rho moving drift and discount, and ageing through `DropLeadingStepsSource`. It
+says **nothing** about SE at the published book's configuration; §7 measures that separately.
+
+**G-CRN.**
+- Same fixture and seeds.
+- For delta, vega, rho and theta, the ratio `se_indep / se_crn` must be at least 10, 10, 100 and 3
+  respectively.
+- `se_indep` is the SE of the same estimator at the same path count per leg, but with the two legs drawn from
+  independent seeds (s and s + 10,000): what a caller would get without CRN. That is the denominator
+  deliberately, since it is exactly what CRN replaces.
+- Degenerate cases raise rather than pass: `se_crn == 0` or `se_indep == 0` raises.
+- Prototype minima over the sweep: 31.7 (delta), 23.2 (vega), 347 (rho), 5.8 (theta) for the put; 42.3, 23.2,
+  539 and 6.4 for the call. A mutant with CRN broken sits at ratio ≈ 1.
+
+**G-LBL (FX labelling).**
+- EQUITY/INDEX/ETF underlyings: `div_sens = 0.01·∂PV/∂q` and `rho_foreign = 0`.
+- FX_SPOT underlyings: `rho_foreign = 1e-4·∂PV/∂q` and `div_sens = 0`.
+
+This is a unit test on the labelling function, not a new MC gate. The estimator is shared code and class-blind,
+so an FX mirror of G-GK cannot cover more than G-GK does.
+
+### 4. The `q` bump's label (closes `products/tarf.py:22`)
+
+The raw sensitivity ∂PV/∂q is computed once. For an `EQUITY`/`INDEX`/`ETF` underlying it is published as
+`div_sens_e9` (per +1%). For `FX_SPOT` it is published as `rho_foreign_e9` (per +1bp of the foreign, base-ccy
+rate), with `div_sens_e9 = 0`. Any other class is a load error. Domestic rho (the `r` bump) is `rho_e9` for
+every product. ADR-009's single USD bucket aggregates `rho_e9` only; foreign rho is monitored, not limited,
+until P4.M1 buckets rates.
+
+### 5. Reproducibility record of a published number
+
+- **Manifest per cycle.** Each revaluation of a book writes one `RunManifest` to `[valuation] manifest_dir`
+  (`run-manifests/live/`, **git-ignored**). Without that, the second cycle would refuse to publish under §6.
+  The manifest carries:
+  - `model_id = "heston-<scheme>-pseudo-antithetic-v1"`;
+  - `params` = `{symbol: HestonParams}` for every underlying valued, each with `s0 =` that cycle's mark mid;
+  - `params_hash = params_hash(params)`;
+  - the book's `seed` and `n_paths`;
+  - `git_sha`.
+- **Schema v3.** `RunManifest` goes to schema v3: `EngineSettings` gains `n_steps_per_year: int | None`. A book
+  manifest sets it and writes `n_steps = 0`, because each product's step count is `round(expiry · n_steps_per_year)`.
+  Exactly one of `n_steps > 0` or `n_steps_per_year` set is required. Versions 1 and 2 still read.
+- **Wire.** `to_valuation_meta(manifest)` is copied field by field onto the snapshot and every target of that
+  cycle.
+- **What the manifest omits.** It does not store term sheets or bump sizes. On a clean tree they are recovered
+  from `git_sha` (`exo/book.toml`, `exo/exo.toml`); that is why §6 refuses dirty trees by default. Manifests
+  are written only on real revaluations, not on interval republishes. Unbounded growth of the directory is a
+  ledger row.
+
+### 6. Dirty tree (desk lead, 2026-10-24; closes `provenance.py:76`)
+
+- **Refusal.** `git_sha()` is evaluated at the start of every revaluation cycle. If it ends in `-dirty` and
+  `exo.toml [provenance] allow_dirty` is false, the cycle does not run and nothing is published.
+  `exo.health` then reports `ok=false` with `detail.publish = "refused: dirty tree (set [provenance] allow_dirty = true)"`.
+- **Opt-in.** With `allow_dirty = true`, numbers publish with the `-dirty` sha. The suffix is never stripped.
+- **Override.** An `EXO_GIT_SHA` override is returned verbatim, as today. It is an operator assertion, and an
+  override value ending in `-dirty` is refused like any other dirty sha.
+
+### 7. Persisted book, its loader, and the published-book SE (closes `base.py:98`, `params.py:95`, `params.py:34`, `memory.py:33`)
+
+**Loader.**
+- `exo/book.toml` is loaded by a strict loader that is the term-sheet trust boundary:
+  - bool is rejected where a float is expected;
+  - int is accepted as float;
+  - lists become tuples;
+  - unknown and missing keys are errors;
+  - there are no loader defaults (Amendment 4 §3).
+- Each product's `underlying` must exist in both `universe.json` and `exo.toml [models]`, and selects that
+  `HestonParams`. Each `[models.<SYM>]` key must be a `universe.json` symbol.
+- `HestonParams` gains `allow_inf_nan=False`. `mc_estimate` raises on a non-finite PV or SE.
+
+**Loadable types and exclusions.** Loadable types are those with an exact time-ageing and a wire home:
+`autocallable`, `barrier`, `rc`, `brc`, `bonus`, `warrant_call`/`warrant_put` (European only), `tarf`,
+`ptarf`. Two types are excluded, each with a reason:
+- **American warrants.** LSM is low-biased and `ProductLine` has no low-bias tag (`pricer.py:120`).
+- **Mini futures.** A static term sheet cannot age the accruing financing level, so theta is undefined, and
+  there is no dividend pass-through (`mini_future.py:41`).
+
+**Load-time checks.**
+- Each product runs a full Greek dry run at 4 paths. This catches grid misalignment and ageing that would
+  date an observation at t ≤ 0.
+- Memory: `GREEKS_PEAK_ARRAY_RATIO × n_paths × (n_steps + 1) × 8` must not exceed `[valuation] max_job_bytes`
+  (1e9). The ratio is a new constant in `models/memory.py`, measured with `tracemalloc` around the real
+  `compute_greeks` for every loadable class at two sizes, warm-up call outside the trace, committed at most 6%
+  above the worst measured ratio. The prototype measured 9.03 for the autocallable at 20k × 252 (365 MB).
+
+**Pool.** Valuation runs in a `ProcessPoolExecutor(max_workers=1)`. Products are valued sequentially, so the
+peak is the maximum over products, not the sum.
+
+**Pricer guard.** `pricer.py:70` (the exact `bundle.t[-1] == payoff.expiry` guard) is **kept**. Every product
+gets its own bundle with `expiry = payoff.expiry`, so the shared-bundle use case never arises. Decided, not
+deferred.
+
+Published-book SE, measured.
+- Configuration: storyline autocallable of `exo/book.toml` on `[models.AAPL]`, desk-signed, 20,000 antithetic
+  paths, 252 steps, QE, seed 4242, production bumps.
+- Relative SEs:
+  - delta 7.2% / 5.3% (S = 187.51 / 176.00);
+  - vega 6.6% / 5.2%;
+  - rho 6.2% / 7.9%;
+  - div 19% / 14%;
+  - theta 31% / 53%;
+  - gamma 422% / 147%.
+- Every Greek is therefore published flagged at `max_rel_std_error = 0.02`. Bringing delta to 2% needs about
+  13× the paths.
+- Recorded honestly rather than tuned away (desk lead, 2026-10-24).
+
+## Consequences (Amendment 9)
+
+- **No new dependency.** UUIDv7 is generated in `bus/convert.py` (Python 3.13's `uuid` has no v7).
+- `models/` changes:
+  - `HestonParams` gains `allow_inf_nan=False`;
+  - `mc_estimate` gains a finiteness check;
+  - the measured `GREEKS_PEAK_ARRAY_RATIO` constant is added (Amendment 7 §1's carve-out for measured
+    constants).
+
+  No dynamics change and no payoff touches `models/`.
+- **Re-ownered rather than closed:**
+  - `models/heston.py:12` (full path retention): the guard now *enforces* the ceiling. Trigger: a book entry
+    the guard refuses (P4.M5 enrichment at scale).
+  - `products/base.py:299` (bridge peak 10.2): same guard and same trigger.
+  - `products/pricer.py:120` (low-bias tag): trigger is "first American warrant in the persisted book"; owner
+    undecided.
+  - `products/mini_future.py:41`: trigger is "first mini future in the persisted book"; owner undecided.

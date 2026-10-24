@@ -18,7 +18,7 @@ timeline:
     instrument: AAPL
     to_mid: 176.00                  # gaps through autocall barrier proximity zone
   - at_ms: 5100
-    expect: exo_targets_republished # EXO delta jumps, new targets on exo.targets.EXO-SP.AAPL
+    expect: exo_targets_republished # EXO delta jumps, new targets on exo.targets.3.1001
   - at_ms: 5200
     expect: internal_cross          # netting: D1-CORE demand vs EXO-SP demand -> explicit cross
   - at_ms: 5300
@@ -28,7 +28,7 @@ timeline:
     instrument: AAPL
     amount_per_share: 0.25
   - at_ms: 15000
-    expect: tracker_analytics      # d1.tracker.D1-CORE publishes TE/TD/cash-drag
+    expect: tracker_analytics      # d1.tracker.1 publishes TE/TD/cash-drag
 fill_model:
   mode: partial
   slices: 3

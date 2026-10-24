@@ -33,7 +33,10 @@ message ExecutionReport {
   hedging.common.v1.Meta meta = 1;
   string cl_ord_id = 2;
   string exec_id = 3;
-  uint32 book_id = 4;              // 0 = firm-level parent order pre-allocation
+  uint32 book_id = 4;              // 0 = firm-level netting parent (pre-allocation); != 0 on a netting parent's
+                                   // cl_ord_id = one per-book ALLOCATION report (last_qty_e2 = this book's share;
+                                   // status/cum/leaves are the PARENT's), ADR-014 §5. Fill consumers dedupe on
+                                   // (exec_id, book_id).
   hedging.common.v1.InstrumentRef instrument = 5;
   hedging.common.v1.Side side = 6;
   OrdStatus status = 7;
@@ -86,9 +89,22 @@ message RiskLimitAlert {
     GREEK_RHO = 3;
   }
   Greek greek = 3;
-  sint64 value_e9 = 4;              // current firm-level exposure (vega/rho: ccy; gamma: qty_e2 semantics noted in text)
-  sint64 limit_e9 = 5;
+  sint64 value_e9 = 4;              // firm exposure for VEGA/RHO (ccy*1e9); 0 for GAMMA (see value_qty_e2)
+  sint64 limit_e9 = 5;              // VEGA/RHO limit crossed (ccy*1e9); 0 for GAMMA
   bool breached = 6;                // false = warning threshold, true = hard limit
+  sint64 value_qty_e2 = 7;          // GAMMA only: firm dDelta per +1% spot, qty_e2 (ADR-014 §4)
+  sint64 limit_qty_e2 = 8;          // GAMMA only: limit crossed, qty_e2
+  string text = 9;                  // human-readable, with units; for display, never parsed
+  bool cleared = 10;                // true = exposure back inside warn (level OK); breached is then false
+}
+
+// Delta One -> EXO / UI: marks (ADR-014 §2). Subject d1.marks.<instrument>.
+message MarkPrice {
+  hedging.common.v1.Meta meta = 1;
+  hedging.common.v1.InstrumentRef instrument = 2;
+  sint64 mid_px_e9 = 3;             // Delta One's arrival mid (cross reference price rule), > 0
+  uint64 feed_ts_ns = 4;            // D1 feed clock: ns since feed-session start, NOT epoch -- declared exception
+                                    // to protocol/CLAUDE.md rule 4 (ADR-014 s2). Lineage only; order on Meta.sent_ns
 }
 
 message InternalCrossNotice {
@@ -157,12 +173,22 @@ message ValuationSnapshot {
     hedging.common.v1.InstrumentRef underlying = 3;
     sint64 pv_e9 = 4;               // in product ccy
     sint64 pv_std_err_e9 = 5;       // MC standard error; mandatory (exo/CLAUDE.md rule 6)
-    sint64 delta_qty_e2 = 6;
-    sint64 vega_e9 = 7;
-    sint64 gamma_qty_e2 = 8;
+    sint64 delta_qty_e2 = 6;        // desk-position dPV/dS, units of underlying x1e2 (ADR-014 §9)
+    sint64 vega_e9 = 7;             // ccy per +1 vol point (0.01; sqrt(v0), sqrt(theta) together)
+    sint64 gamma_qty_e2 = 8;        // dDelta per +1% spot, qty_e2
     sint64 rho_e9 = 9;              // ccy per +1bp parallel rate shift
     sint64 theta_e9 = 10;           // ccy per calendar day (expected carry)
     sint64 div_sens_e9 = 11;        // ccy per +1% absolute div-yield change
+    sint64 delta_std_err_qty_e2 = 12;   // MC standard errors (exo/CLAUDE.md rule 6), same units as the Greek
+    sint64 vega_std_err_e9 = 13;
+    sint64 gamma_std_err_qty_e2 = 14;
+    sint64 rho_std_err_e9 = 15;
+    sint64 theta_std_err_e9 = 16;
+    sint64 div_sens_std_err_e9 = 17;
+    sint64 rho_foreign_e9 = 18;         // FX_SPOT underlyings: ccy per +1bp foreign (base-ccy) rate, q := r_f
+                                        // (ADR-006 A8 s1, A9 s4); 0 otherwise
+    sint64 rho_foreign_std_err_e9 = 19;
+    repeated string flagged_greeks = 20; // names whose SE > max_rel_std_error*|value| ("delta","gamma",...)
   }
   repeated ProductLine lines = 5;
   sint64 book_pv_e9 = 6;
@@ -254,5 +280,5 @@ message Tick {
   sint64 bid_px_e9 = 3;
   sint64 ask_px_e9 = 4;
   sint64 last_px_e9 = 5;
-  uint64 exch_ts_ns = 6;
+  uint64 exch_ts_ns = 6;            // ponytail: clock undecided (epoch vs feed-session, cf. MarkPrice.feed_ts_ns, ADR-014 s2); first sim Tick publisher decides
 }
