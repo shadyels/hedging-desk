@@ -1,9 +1,9 @@
 # ADR-014: EXO ↔ Delta One loop contracts (P2.M4)
 
-**Status:** Proposed
+**Status:** Accepted (desk lead, 2026-10-25)
 **Date:** 2026-10-24
 **Deciders:** desk lead, 2026-10-24 (D1 republishes marks; harness-published tracker flow; pseudo-random +
-antithetic sampler; dirty-tree refusal; recon halt clears only on agreement or restart); acceptance of this text pending
+antithetic sampler; dirty-tree refusal; recon halt clears only on agreement or restart); text accepted by the desk lead, 2026-10-25
 
 ## Context
 
