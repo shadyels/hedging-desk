@@ -33,19 +33,22 @@ d1 book="1" instrument="1001" side="buy" qty="10000" px="0":
 d1-release:
     cd delta-one && cargo build --release
 
-# Feed d1 from a scenario timeline instead of feed.rs's synthetic walk.
-# NOTE: d1.toml's [tracker].sampling_interval_s = 60 vs a 9s scenario means
-# ZERO tracker samples on this path -- see docs/PONYTAIL-DEBT.md.
-# Run `just sim-acceptor` in another terminal first.
+# Feed d1 from a scenario timeline instead of feed.rs's synthetic walk, with
+# d1.scenario.toml (1 s tracker sampling). Run `just sim-acceptor` in another terminal first.
 d1-scenario scenario="tracker-flow" book="1" instrument="1001" side="buy" qty="10000" px="0":
     cd delta-one && cargo run -p sim -- --mode emit-ticks --scenario ../sim/scenarios/{{scenario}}.yaml --out target/ticks/{{scenario}}.ticks
-    cd delta-one && cargo run -p d1 -- --book {{book}} --instrument {{instrument}} --side {{side}} --qty {{qty}} --px {{px}} --feed-ticks target/ticks/{{scenario}}.ticks
+    cd delta-one && cargo run -p d1 -- --book {{book}} --instrument {{instrument}} --side {{side}} --qty {{qty}} --px {{px}} --config d1.scenario.toml --feed-ticks target/ticks/{{scenario}}.ticks
 
 bench:
     # Redirect stdout: cycle.rs's per-parent-order println! emits ~245 MB per
     # run and buries the HDR report lines (docs/PONYTAIL-DEBT.md). Read the
     # p50/p99/p99.9 back out of bench.log.
     cd delta-one && cargo bench > target/bench.log 2>&1; grep -E 'p50=|NOTE:' target/bench.log   # release profile enforced by criterion config; HDR histograms to target/bench
+
+# P2.M4 storyline: needs `just up` (NATS) and a synced exo/.venv (uv); spawns
+# sim acceptor, d1 and exo itself. CI never runs it.
+storyline:
+    cd delta-one && cargo test -p d1 --test storyline -- --ignored --nocapture
 
 # --- exo (Python) --------------------------------------------------------
 exo:
@@ -77,4 +80,4 @@ lint:
 
 # --- the showcase ---------------------------------------------------------
 demo:
-    ./scripts/demo.sh   # up -> provision posttrade topics -> run 3 round-trip tests -> down (sim tracker-flow replay and UI deferred to Phase 3)
+    ./scripts/demo.sh   # up -> provision posttrade topics -> run 3 round-trip tests + the P2.M4 storyline -> down (UI deferred to Phase 3)

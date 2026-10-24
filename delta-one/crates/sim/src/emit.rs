@@ -26,8 +26,9 @@ use crate::scenario::{self, Scenario};
 
 /// Load `scenario_path`, expand its timeline into a tick file, and write it
 /// to `out_path` (creating parent directories as needed). Loads the
-/// scenario/universe the same way `replay::run` does.
-pub fn run(scenario_path: &Path, out_path: &Path) -> Result<()> {
+/// scenario/universe the same way `replay::run` does. With `script_out`, also
+/// writes the non-feed entries as a harness script (see [`script_lines`]).
+pub fn run(scenario_path: &Path, out_path: &Path, script_out: Option<&Path>) -> Result<()> {
     let scenario = scenario::load(scenario_path)
         .with_context(|| format!("loading scenario {}", scenario_path.display()))?;
 
@@ -67,7 +68,90 @@ pub fn run(scenario_path: &Path, out_path: &Path) -> Result<()> {
     std::fs::write(out_path, out)
         .with_context(|| format!("writing tick file to {}", out_path.display()))?;
 
+    if let Some(script_path) = script_out {
+        let mut script = script_lines(&scenario, &universe)?.join("\n");
+        script.push('\n');
+        std::fs::write(script_path, script)
+            .with_context(|| format!("writing script to {}", script_path.display()))?;
+    }
+
     Ok(())
+}
+
+/// One line per non-feed timeline entry, ids resolved through the universe, so
+/// the storyline harness never parses YAML (ADR-014 §10):
+/// `<at_ms> book_event <book_id>`,
+/// `<at_ms> tracker_flow <book_id> <instrument_id> <target_qty_e2> <band_qty_e2> <note>`
+/// (the note runs to the end of the line; `scenario::parse` guarantees it is
+/// non-empty and single-line, so it cannot inject script lines),
+/// `<at_ms> expect <kind>`, and `<at_ms> action <gap|dividend>` for the non-quote
+/// FEED actions (they are expect triggers, ADR-014 §10; quotes never are).
+/// `scenario::parse` has already guaranteed the
+/// required fields, but they are re-checked here rather than unwrapped.
+pub(crate) fn script_lines(scenario: &Scenario, universe: &Universe) -> Result<Vec<String>> {
+    let book_id = |code: &str, at_ms: u64| -> Result<u32> {
+        universe
+            .book_code_to_id
+            .get(code)
+            .map(|b| b.0)
+            .with_context(|| format!("unknown book code '{code}' at {at_ms}ms"))
+    };
+    let mut lines = Vec::new();
+    for entry in &scenario.timeline {
+        let at = entry.at_ms;
+        if let Some(kind) = &entry.expect {
+            lines.push(format!("{at} expect {kind}"));
+            continue;
+        }
+        match entry.action.as_deref() {
+            Some("exo_book_event") => {
+                let Some(book) = &entry.book else {
+                    bail!("exo_book_event at {at}ms missing book");
+                };
+                lines.push(format!("{at} book_event {}", book_id(book, at)?));
+            }
+            Some("tracker_flow") => {
+                let (Some(book), Some(symbol), Some(target), Some(band), Some(note)) = (
+                    &entry.book,
+                    &entry.instrument,
+                    entry.target_qty,
+                    entry.band_qty,
+                    &entry.note,
+                ) else {
+                    bail!(
+                        "tracker_flow at {at}ms missing book/instrument/target_qty/band_qty/note"
+                    );
+                };
+                if note.contains(['\n', '\r']) {
+                    bail!("tracker_flow at {at}ms: note must be single-line");
+                }
+                let instrument = resolve(universe, symbol, at)?;
+                let target_e2 = to_fixed_e2(target)
+                    .with_context(|| format!("tracker_flow at {at}ms target_qty"))?;
+                let band_e2 = to_fixed_e2(band)
+                    .with_context(|| format!("tracker_flow at {at}ms band_qty"))?;
+                lines.push(format!(
+                    "{at} tracker_flow {} {} {target_e2} {band_e2} {}",
+                    book_id(book, at)?,
+                    instrument.0,
+                    note.trim()
+                ));
+            }
+            Some(kind @ ("gap" | "dividend")) => lines.push(format!("{at} action {kind}")),
+            _ => {}
+        }
+    }
+    Ok(lines)
+}
+
+/// Decimal quantity -> fixed-point x10^2, with `to_fixed_e9`'s discipline:
+/// non-finite or out-of-range input is an error, never a saturated value.
+fn to_fixed_e2(qty: f64) -> Result<i64> {
+    let scaled = (qty * 100.0).round();
+    if !scaled.is_finite() || scaled >= i64::MAX as f64 || scaled <= i64::MIN as f64 {
+        bail!("quantity {qty} is not a finite value representable as fixed-point x10^2");
+    }
+    Ok(scaled as i64)
 }
 
 /// Expand a scenario's timeline into an ordered `FeedTick` sequence, plus a
@@ -315,6 +399,10 @@ pub(crate) mod tests {
             tracker_books: Vec::new(),
             cash_yield_annual_e9: 0,
             symbol_to_id: HashMap::from([("AAPL".to_string(), id)]),
+            book_code_to_id: HashMap::from([
+                ("D1-CORE".to_string(), d1_core::BookId(1)),
+                ("EXO-SP".to_string(), d1_core::BookId(3)),
+            ]),
             id_to_symbol: HashMap::from([(id, "AAPL".to_string())]),
             id_to_currency: HashMap::from([(id, "USD".to_string())]),
             cross_px_policy: "ARRIVAL_MID".to_string(),
@@ -329,8 +417,7 @@ pub(crate) mod tests {
             instrument: Some(symbol.to_string()),
             bid: Some(bid),
             ask: Some(ask),
-            to_mid: None,
-            amount_per_share: None,
+            ..Default::default()
         }
     }
 
@@ -339,10 +426,8 @@ pub(crate) mod tests {
             at_ms,
             action: Some("dividend".to_string()),
             instrument: Some(symbol.to_string()),
-            bid: None,
-            ask: None,
-            to_mid: None,
             amount_per_share: Some(amount_per_share),
+            ..Default::default()
         }
     }
 
@@ -463,5 +548,80 @@ pub(crate) mod tests {
             ])
             .contains("ex-div price")
         );
+    }
+
+    #[test]
+    fn script_lines_resolve_ids_and_scale_quantities() {
+        let entry = |at_ms: u64| TimelineEntry {
+            at_ms,
+            ..Default::default()
+        };
+        let scenario = Scenario {
+            scenario: "t".to_string(),
+            seed: 1,
+            universe: "universe.json".to_string(),
+            timeline: vec![
+                quote_entry(0, "AAPL", 187.50, 187.52),
+                TimelineEntry {
+                    action: Some("gap".to_string()),
+                    instrument: Some("AAPL".to_string()),
+                    to_mid: Some(176.0),
+                    ..entry(5_000)
+                },
+                dividend_entry(6_000, "AAPL", 0.25),
+                TimelineEntry {
+                    action: Some("exo_book_event".to_string()),
+                    book: Some("EXO-SP".to_string()),
+                    ..entry(10_000)
+                },
+                TimelineEntry {
+                    action: Some("tracker_flow".to_string()),
+                    book: Some("D1-CORE".to_string()),
+                    instrument: Some("AAPL".to_string()),
+                    target_qty: Some(10_000.0),
+                    band_qty: Some(10_000.0),
+                    note: Some("index redemption: sell 10,000 AAPL".to_string()),
+                    ..entry(11_000)
+                },
+                TimelineEntry {
+                    expect: Some("internal_cross".to_string()),
+                    ..entry(24_000)
+                },
+            ],
+        };
+        assert_eq!(
+            script_lines(&scenario, &test_universe()).unwrap(),
+            [
+                "5000 action gap",
+                "6000 action dividend",
+                "10000 book_event 3",
+                "11000 tracker_flow 1 1001 1000000 1000000 index redemption: sell 10,000 AAPL",
+                "24000 expect internal_cross",
+            ]
+        );
+    }
+
+    #[test]
+    fn script_unknown_book_code_is_an_error() {
+        let scenario = Scenario {
+            scenario: "t".to_string(),
+            seed: 1,
+            universe: "universe.json".to_string(),
+            timeline: vec![TimelineEntry {
+                action: Some("exo_book_event".to_string()),
+                book: Some("NOPE".to_string()),
+                ..Default::default()
+            }],
+        };
+        let err = script_lines(&scenario, &test_universe()).unwrap_err();
+        assert!(format!("{err:#}").contains("unknown book code 'NOPE'"));
+    }
+
+    #[test]
+    fn to_fixed_e2_rejects_non_finite_and_out_of_range() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1e300] {
+            assert!(to_fixed_e2(bad).is_err(), "{bad} must be rejected");
+        }
+        assert_eq!(to_fixed_e2(10_000.0).unwrap(), 1_000_000);
     }
 }

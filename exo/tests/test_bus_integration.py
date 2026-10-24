@@ -74,6 +74,16 @@ def _config(tmp_path: Path) -> ExoConfig:
     )
 
 
+async def _first(queue: asyncio.Queue[Any], mine: Callable[[Any], bool], timeout: float) -> Any:  # noqa: ANN401
+    """First message satisfying `mine`. A shared broker may carry another EXO / D1 (a running
+    storyline) publishing the same subjects; this test only accepts ITS OWN book's output."""
+    async with asyncio.timeout(timeout):
+        while True:
+            msg = await queue.get()
+            if mine(msg):
+                return msg
+
+
 def _meta(msg: live_pb2.PositionSnapshot | live_pb2.MarkPrice) -> None:
     msg.meta.msg_id = uuid7()
     msg.meta.producer = "it-fake-d1"
@@ -106,7 +116,7 @@ async def test_marks_in_targets_and_valuations_out_then_recon_halt(
     service = asyncio.create_task(main(cfg, stop))
     try:
         # EXO subscribes before its first heartbeat, so a heartbeat means we may publish.
-        await asyncio.wait_for(health.get(), 180)
+        await _first(health, lambda h: h.detail.get("git_sha") == "a" * 40, 180)
 
         pos = live_pb2.PositionSnapshot(book_id=BOOK)  # empty: flat book
         _meta(pos)
@@ -116,8 +126,9 @@ async def test_marks_in_targets_and_valuations_out_then_recon_halt(
         _meta(mark)
         await nc.publish(f"d1.marks.{AAPL}", mark.SerializeToString())
 
-        target = await asyncio.wait_for(targets.get(), 120)
-        snapshot = await asyncio.wait_for(valuations.get(), 60)
+        own = lambda m: m.valuation.seed == 7 and m.valuation.n_paths == 4000  # noqa: E731
+        target = await _first(targets, own, 120)
+        snapshot = await _first(valuations, own, 60)
         assert target.book_id == BOOK and target.instrument.instrument_id == AAPL
         assert (
             target.target_qty_e2 > 0 and target.target_qty_e2 % 100 == 0
@@ -136,7 +147,9 @@ async def test_marks_in_targets_and_valuations_out_then_recon_halt(
             _meta(div)
             await nc.publish(f"d1.positions.{BOOK}", div.SerializeToString())
             await asyncio.sleep(0.5)
-        alert = await asyncio.wait_for(recon.get(), 10)
+        alert = await _first(
+            recon, lambda a: a.publishing_halted and a.d1_view_qty_e2 == 12_300, 10
+        )
         assert alert.publishing_halted and alert.book_id == BOOK
         assert (alert.exo_view_qty_e2, alert.d1_view_qty_e2) == (0, 12_300)
     finally:

@@ -7,11 +7,12 @@
 # P1.M4 slice 3 added the Kafka posttrade golden-file diff (the same
 # crosses/transfers storyline, driven with a real Kafka broker wired in,
 # diffed against sim/golden/).
-# Deferred pieces, by milestone -- not implemented here, not pretended:
 # A later follow-up added Confluent Schema Registry framing (ADR-002), so the
 # registry must be up before golden_posttrade runs -- waited on below.
-#   - sim tracker-flow scenario replay (sim's replay.rs is still M1-scoped
-#     and never feeds d1) and UI left running (Phase 3): both land later.
+# P2.M4 slice 5 added the storyline test (sim tracker-flow replay -> d1 <-> EXO
+# loop, EXO spawned by the test via `uv run`, so uv + a synced exo/.venv are
+# prerequisites).
+# Deferred, not implemented here, not pretended: UI left running (Phase 3).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -94,6 +95,7 @@ cd delta-one
 cargo test -p d1 --test nats_round_trip -- --ignored --nocapture
 cargo test -p d1 --test crosses_round_trip -- --ignored --nocapture
 cargo test -p d1 --test golden_posttrade -- --ignored --nocapture
+cargo test -p d1 --test storyline -- --ignored --nocapture
 cd ..
 
 just down

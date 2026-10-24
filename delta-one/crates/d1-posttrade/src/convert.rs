@@ -482,6 +482,7 @@ mod tests {
             cash_yield_annual_e9: 40_000_000,
             symbol_to_id,
             id_to_symbol,
+            book_code_to_id: HashMap::new(),
             id_to_currency,
             cross_px_policy: "ARRIVAL_MID".to_string(),
             venue_counterparty: "SIM".to_string(),
