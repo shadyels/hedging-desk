@@ -9,9 +9,11 @@ the whole characteristic-function/quadrature pipeline, not just a unit test.
 import math
 from dataclasses import dataclass
 
+import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from exo.models import heston_cf
 from exo.models.analytic import bs_call_price
 from exo.models.heston_cf import (
     _EPSABS,
@@ -60,16 +62,17 @@ def test_cf_matches_bs_in_degenerate_bs_limit() -> None:
 def test_cf_quadrature_error_estimate_is_within_requested_tolerance() -> None:
     """Amendment A5: a quadrature that silently failed to converge would still return a
     plausible-looking wrong price -- the same failure mode as the branch-cut bug. Assert
-    `quad_vec`'s own `abserr` is bounded by the `epsabs` this module requests, so the fixed
-    integration limits' ponytail marker is backed by a checked error estimate, not hope.
+    `quad_vec`'s own `abserr` is bounded by the `epsabs` this module requests. NOTE: `abserr`
+    covers only the integration over [U_MIN, U_MAX]; it is blind to truncation of the infinite
+    range at `_U_MAX`, which `test_cf_upper_limit_truncation_is_negligible` pins separately.
 
     Uses ordinary (non-degenerate) Heston parameters, not the xi=1e-6 BS-limit case above:
     measured directly, that degenerate case's `a/xi**2` prefactor (a = kappa*theta, with xi near
     machine-epsilon relative to it) amplifies floating-point rounding to an ~7e-6 noise floor that
     no amount of tightening `epsabs`/`epsrel` improves -- confirmed by sweeping epsabs from 1e-4 to
     1e-10 and observing abserr stay pinned in the same 1e-6-ish band throughout. That is a property
-    of the xi->0 corner itself (this module's ponytail marker already scopes fixed tolerances to
-    "the equity parameter ranges this slice"), not a quadrature that failed to converge on a
+    of the xi->0 corner itself (the small-xi ceiling in the heston_cf ponytail marker: abserr
+    floor about 1e-6 at xi=1e-6), not a quadrature that failed to converge on a
     realistic input -- which is what this assertion is meant to catch.
     """
     params = _Params(s0=100.0, r=0.02, q=0.01, v0=0.04, kappa=1.5, theta=0.04, xi=0.6, rho=-0.7)
@@ -122,3 +125,35 @@ def test_little_trap_stays_within_no_arbitrage_bounds_at_long_maturity() -> None
     discounted_strike = strike * math.exp(-params.r * expiry)
     assert not math.isnan(price)
     assert max(0.0, discounted_spot - discounted_strike) - 1e-6 <= price <= discounted_spot + 1e-6
+
+
+# --- upper-limit truncation guard: abserr is blind to it, so compare against a 5x larger U -------
+
+_EURUSD = _Params(s0=1.08, r=0.0425, q=0.02, v0=0.0081, kappa=1.5, theta=0.0081, xi=0.25, rho=-0.20)
+_SPX = _Params(
+    s0=5500.0, r=0.0425, q=0.0130, v0=0.0350, kappa=1.0, theta=0.0350, xi=0.55, rho=-0.75
+)
+
+
+@pytest.mark.parametrize(
+    ("params", "strike"),
+    [
+        (_EURUSD, 1.2 * _EURUSD.s0),
+        (_SPX, 1.1 * _SPX.s0),
+        # ABSOLUTE strike 1.20 (~1.111*S0, NOT 1.2*S0): the strike where the old U_MAX=200 gave
+        # a NEGATIVE price (-1.1173e-06 vs +1.1620e-06 converged), so the >= 0 check below bites.
+        (_EURUSD, 1.20),
+    ],
+    ids=["EURUSD", "SPX", "EURUSD-absolute-strike-1.20"],
+)
+def test_cf_upper_limit_truncation_is_negligible(
+    monkeypatch: pytest.MonkeyPatch, params: _Params, strike: float
+) -> None:
+    expiry = 1.0 / 12.0
+    default = heston_vanilla_price(params, strike=strike, expiry=expiry, is_call=True)
+    monkeypatch.setattr(heston_cf, "_U_MAX", heston_cf._U_MAX * 5)
+    wide = heston_vanilla_price(params, strike=strike, expiry=expiry, is_call=True)
+    assert abs(default - wide) <= 1e-10
+    if params is _EURUSD:
+        # OTM call price must stay non-negative (guards a sign/truncation error in the tail)
+        assert default >= 0.0

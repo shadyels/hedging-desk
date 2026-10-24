@@ -15,7 +15,8 @@ antithetic = true
 # Illustrative and UNCALIBRATED (ADR-006 Amendment 4 s1). Not market data. EXO is the sole
 # consumer of these Heston parameters -- they do NOT belong in protocol/refdata/universe.json,
 # which would lend uncalibrated numbers the shared authority real instrument conventions carry.
-# Underlyings: AAPL (1001), MSFT (1002), NESN (1003, CHF), SPX (2001) -- see universe.json.
+# Underlyings: AAPL (1001), MSFT (1002), NESN (1003, CHF), SPX (2001), EURUSD (4001) -- see
+# universe.json.
 
 # Feller-VIOLATING (2*kappa*theta/xi**2 = 2*1.50*0.0400/0.60**2 = 0.333 < 1): variance can
 # (in the continuous-time limit) reach zero. This is the regime QE and full-truncation Euler
@@ -68,6 +69,27 @@ kappa = 1.00
 theta = 0.0350
 xi = 0.55
 rho = -0.75
+
+# EURUSD (universe.json instrument_id 4001, FX_SPOT, quoted USD per EUR). FX under Heston rides the
+# EQUITY parameter type with a documented alias (ADR-006 Amendment 8 s1): r := r_d, the DOMESTIC (USD,
+# quote ccy) rate, which both drives and DISCOUNTS; q := r_f, the FOREIGN (EUR, base ccy) rate. The
+# spot drift r - q = r_d - r_f is Garman-Kohlhagen's. Rates are continuously compounded, flat.
+# ILLUSTRATIVE AND UNCALIBRATED (ADR-006 Amendment 4 s1): NOT fitted to any EURUSD smile (no risk
+# reversal / butterfly / ATM term structure was used). TARF/PTARF prices under this set demonstrate
+# mechanics and hedging behaviour only. Calibration caveat stands until P4.M4 calibrates Heston(-LV)
+# to SIM-GENERATED synthetic surfaces; live-market calibration is Phase 5.
+# Feller-VIOLATING (2*1.50*0.0081/0.25**2 = 0.389 < 1), inside the envelope QE was validated over
+# (0.333 in ADR-006 A4 s4, 0.231 by G-W1). G-T5 compares the Heston CF price with Monte Carlo at
+# FX vol, at T=1/12 and T=1, within a 3-SE band on a single seed per gate.
+[models.EURUSD]
+s0 = 1.0800
+r = 0.0425     # r_d, USD (same USD rate as the equity sets)
+q = 0.0200     # r_f, EUR
+v0 = 0.0081    # 9% instantaneous vol
+kappa = 1.50
+theta = 0.0081
+xi = 0.25
+rho = -0.20
 
 [rehedge]
 # no-trade band half-widths, per instrument class, in delta units (qty_e2)

@@ -1,9 +1,9 @@
 """Tests for `exo.toml`'s `[models]` section and its loader.
 
 Covers: the real `exo.toml` file parses into `(ModelDefaults, dict[str, HestonParams])`;
-the four equity underlyings from `protocol/refdata/universe.json` (AAPL, MSFT, NESN, SPX) are
-all present; feller_ratio is computed correctly; AT LEAST ONE configured set violates the
-Feller condition (2*kappa*theta/xi**2 < 1) and AT LEAST ONE satisfies it — a comment in
+the four equity underlyings and EURUSD from `protocol/refdata/universe.json` (AAPL, MSFT, NESN,
+SPX, EURUSD) are all present; feller_ratio is computed correctly; AT LEAST ONE configured set
+violates the Feller condition (2*kappa*theta/xi**2 < 1) and AT LEAST ONE satisfies it — a comment in
 exo.toml does not survive a well-meaning config tweak, a test does. Also re-checks (in this
 config-focused module) that pydantic rejects an invalid rho, a non-positive kappa, and an
 unknown scheme, per the P2.M1 slice 1 spec's explicit ask for TRACK C's own coverage of these.
@@ -23,8 +23,9 @@ from exo.models.params import ModelDefaults, load_models_section
 _EXO_TOML = Path(__file__).resolve().parents[1] / "exo.toml"
 
 # The equity underlyings this slice configures, per protocol/refdata/universe.json
-# instrument_ids 1001 (AAPL), 1002 (MSFT), 1003 (NESN, CHF) plus the SPX index (2001).
-_EXPECTED_SYMBOLS = {"AAPL", "MSFT", "NESN", "SPX"}
+# instrument_ids 1001 (AAPL), 1002 (MSFT), 1003 (NESN, CHF) plus the SPX index (2001) and
+# 4001 EURUSD (FX_SPOT).
+_EXPECTED_SYMBOLS = {"AAPL", "MSFT", "NESN", "SPX", "EURUSD"}
 
 
 def _load_real_models_section() -> tuple[ModelDefaults, dict[str, HestonParams]]:
@@ -38,7 +39,7 @@ def test_exo_toml_models_section_parses() -> None:
     assert set(params) == _EXPECTED_SYMBOLS
 
 
-def test_exo_toml_configures_all_four_universe_underlyings() -> None:
+def test_exo_toml_configures_every_expected_underlying() -> None:
     _, params = _load_real_models_section()
     for symbol in _EXPECTED_SYMBOLS:
         assert symbol in params, f"exo.toml [models.{symbol}] is missing"
