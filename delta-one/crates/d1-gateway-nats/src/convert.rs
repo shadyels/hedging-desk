@@ -207,7 +207,7 @@ pub fn positions_subject(book: BookId) -> String {
 #[must_use]
 pub fn mark_to_pb(mark: &MarkUpdate, msg_id: String, sent_ns: u64) -> MarkPrice {
     MarkPrice {
-        meta: Some(meta(msg_id, sent_ns)),
+        meta: Some(meta(msg_id, sent_ns, 1)),
         instrument: Some(InstrumentRef {
             instrument_id: mark.instrument.0,
             ..Default::default()
@@ -227,7 +227,7 @@ pub fn positions_to_pb(
     sent_ns: u64,
 ) -> PositionSnapshot {
     PositionSnapshot {
-        meta: Some(meta(msg_id, sent_ns)),
+        meta: Some(meta(msg_id, sent_ns, 1)),
         book_id: book.0,
         lines: lines
             .iter()
@@ -254,7 +254,7 @@ pub fn risk_limit_alert_to_pb(event: &AlertEvent, msg_id: String, sent_ns: u64) 
         Greek::Vega | Greek::Rho => (event.value, event.limit, 0, 0),
     };
     RiskLimitAlert {
-        meta: Some(meta(msg_id, sent_ns)),
+        meta: Some(meta(msg_id, sent_ns, 2)),
         underlying: Some(InstrumentRef {
             instrument_id: event.underlying.0,
             ..Default::default()
@@ -310,12 +310,14 @@ pub fn valuation_from_pb(msg: &ValuationSnapshot) -> Valuation {
     }
 }
 
-fn meta(msg_id: String, sent_ns: u64) -> Meta {
+/// `Meta` with this message type's `schema_version` (per type, not global:
+/// 2 for `RiskLimitAlert`, whose fields 7-10 were added in P2.M4, ADR-014 §4).
+fn meta(msg_id: String, sent_ns: u64, schema_version: u32) -> Meta {
     Meta {
         msg_id,
         producer: "delta-one".to_string(),
         sent_ns,
-        schema_version: 1,
+        schema_version,
     }
 }
 
@@ -604,6 +606,24 @@ mod tests {
         assert_eq!((vega.value_e9, vega.limit_e9), (62, 50));
         assert_eq!((vega.value_qty_e2, vega.limit_qty_e2), (0, 0));
         assert!(vega.breached && !vega.cleared);
+    }
+
+    #[test]
+    fn schema_version_is_per_message_type() {
+        let alert = risk_limit_alert_to_pb(&event(Greek::Vega, Level::Warn), "m".into(), 1);
+        assert_eq!(alert.meta.unwrap().schema_version, 2);
+        let mark = mark_to_pb(
+            &MarkUpdate {
+                instrument: InstrumentId(1001),
+                mid_px_e9: 1,
+                feed_ts_ns: 0,
+            },
+            "m".into(),
+            1,
+        );
+        assert_eq!(mark.meta.unwrap().schema_version, 1);
+        let snap = positions_to_pb(BookId(1), &[], "m".into(), 1);
+        assert_eq!(snap.meta.unwrap().schema_version, 1);
     }
 
     #[test]

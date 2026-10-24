@@ -40,7 +40,6 @@ _I64_MAX = 2**63 - 1
 MAX_TEXT_BYTES = 256
 MAX_SNAPSHOT_LINES = 1024
 MAX_FLAGGED_GREEKS = 8
-_SCHEMA_VERSION = 1
 _PRODUCER = "exo"
 
 
@@ -110,12 +109,12 @@ def uuid7() -> str:
 # --- builders ---------------------------------------------------------------------------------
 
 
-def meta_pb(sent_ns: int, msg_id: str | None = None) -> common_pb2.Meta:
+def meta_pb(sent_ns: int, msg_id: str | None = None, schema_version: int = 1) -> common_pb2.Meta:
     return common_pb2.Meta(
         msg_id=msg_id if msg_id is not None else uuid7(),
         producer=_PRODUCER,
         sent_ns=sent_ns,
-        schema_version=_SCHEMA_VERSION,
+        schema_version=schema_version,
     )
 
 
@@ -208,7 +207,9 @@ def valuation_snapshot_pb(
         )
     total_pv_e9 = sum(ln.pv_e9 for ln in pb_lines)
     return live_pb2.ValuationSnapshot(
-        meta=meta_pb(sent_ns),  # always a FRESH msg_id: a reused one would be deduped by D1
+        # always a FRESH msg_id (a reused one would be deduped by D1); schema 2: ProductLine
+        # fields 12-20 (Meta.schema_version is per message type, ADR-014 s4)
+        meta=meta_pb(sent_ns, schema_version=2),
         book_id=book_id,
         as_of_ns=as_of_ns,
         valuation=valuation_meta_pb(valuation),

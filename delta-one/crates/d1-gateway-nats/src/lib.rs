@@ -675,7 +675,7 @@ mod tests {
                     msg_id: msg_id.to_string(),
                     producer: "exo".to_string(),
                     sent_ns: 1,
-                    schema_version: 1,
+                    schema_version: 2,
                 })
             },
             book_id: book,

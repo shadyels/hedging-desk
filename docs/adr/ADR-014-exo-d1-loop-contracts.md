@@ -132,6 +132,11 @@ ccy × 1e9. The message gains:
 The field-4 comment's "qty_e2 semantics noted in text" is replaced. There is still no `book_id`: Tier-1
 limits are firm-level per underlying (ADR-008).
 
+`Meta.schema_version` is per message type: 1 for a new message, incremented by one for each additive change to
+that message's schema, including nested messages. In P2.M4, `ValuationSnapshot` (via `ProductLine` fields 12–20)
+and `RiskLimitAlert` (fields 7–10) publish 2, and every other message publishes 1. Consumers never reject a
+message on its version.
+
 ### 5. Per-book fills: allocation `ExecutionReport`s on `d1.exec.<book>.<instrument>`
 
 - **Report types.** For a netting parent order, Delta One keeps publishing the firm-level report on

@@ -178,7 +178,7 @@ def test_valuation_snapshot_pb_units_and_book_pv_is_sum_of_rounded_lines() -> No
     assert pb.book_pv_e9 == pb.lines[0].pv_e9 + pb.lines[1].pv_e9
     assert pb.valuation.seed == 2**64 - 1
     assert pb.meta.producer == "exo"
-    assert pb.meta.schema_version == 1
+    assert pb.meta.schema_version == 2  # ValuationSnapshot grew (ProductLine 12-20)
     assert uuid.UUID(pb.meta.msg_id).version == 7
     round_trip = live_pb2.ValuationSnapshot()
     round_trip.ParseFromString(pb.SerializeToString())
@@ -220,6 +220,7 @@ def test_target_position_pb_caps_reason_and_copies_valuation_meta() -> None:
     assert pb.target_qty_e2 == -804_500
     assert pb.valuation == valuation_meta_pb(META)
     assert pb.instrument.instrument_class == common_pb2.INSTRUMENT_CLASS_EQUITY
+    assert pb.meta.schema_version == 1  # only ValuationSnapshot / RiskLimitAlert publish 2
 
 
 def test_recon_alert_and_health_builders() -> None:
@@ -228,8 +229,9 @@ def test_recon_alert_and_health_builders() -> None:
         sent_ns=1,
     )  # fmt: skip
     assert ra.publishing_halted and ra.d1_view_qty_e2 == 2
+    assert ra.meta.schema_version == 1
     hp = health_pb(ok=False, detail={"k": "é" * 300}, sent_ns=1)
-    assert hp.component == "exo" and not hp.ok
+    assert hp.component == "exo" and not hp.ok and hp.meta.schema_version == 1
     assert len(hp.detail["k"].encode()) <= 256
 
 
