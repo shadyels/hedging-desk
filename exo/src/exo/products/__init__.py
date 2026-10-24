@@ -3,7 +3,7 @@
 Public re-exports for the payoff abstraction and the products built against it: the
 undiscounted dated cashflow ledger, the barrier-monitoring vocabulary, the Brownian-bridge
 survival weight, the MC pricer, and the term sheets (barrier option, autocallable, reverse
-convertible / BRC, bonus certificate, warrant, mini future).
+convertible / BRC, bonus certificate, warrant, mini future, TARF / PTARF).
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from exo.products.pricer import (
     price_from_bundle,
 )
 from exo.products.reverse_convertible import ReverseConvertible
+from exo.products.tarf import Ptarf, Tarf
 from exo.products.warrant import Warrant
 
 __all__ = [
@@ -42,8 +43,10 @@ __all__ = [
     "MiniFuture",
     "Monitoring",
     "Payoff",
+    "Ptarf",
     "ReverseConvertible",
     "ScheduleAlignmentError",
+    "Tarf",
     "Warrant",
     "barrier_survival",
     "bridge_step_survival",

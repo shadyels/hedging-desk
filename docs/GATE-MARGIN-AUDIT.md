@@ -81,11 +81,12 @@ pass count below 20/20.
    §4's convergence table for that scheme's first-passing step count at the relevant Feller ratio.
    Fix = raise `n_steps` to the ADR's own number, parametrized per scheme as G1 now does.
 2. **The reference pricer is the biased one.** `exo/src/exo/models/heston_cf.py` carries a ponytail
-   marker: fixed integration limits `_U_MAX=200.0`, `_EPSABS=_EPSREL=1e-10`, **no adaptive
-   fallback**, with its stated ceiling being "the equity parameter ranges this slice and P2.M2's
-   warrant gate exercise". A persistent small offset may be the characteristic-function quadrature,
-   not the Monte Carlo. Cross-check against a second reference (`bs_call_price` under a
-   BS-degenerate parameter set) before blaming the MC.
+   marker: fixed integration limits `_U_MAX=1000.0` (raised from 200.0 in P2.M3; see ADR-006
+   Amendment 8 §5), `_EPSABS=_EPSREL=1e-10`, **no adaptive fallback**, with two stated
+   ceilings: tail truncation (ceiling at 1000 for `v0*sqrt(1-rho^2)/xi >= 0.03`, see ADR-006
+   A8 §5) and the small-`xi` abserr floor. A persistent small offset may be the
+   characteristic-function quadrature, not the Monte Carlo. Cross-check against a second
+   reference (`bs_call_price` under a BS-degenerate parameter set) before blaming the MC.
 3. **The payoff or fixture is subtly wrong.** Least likely — slice 2's gates were reviewed hard —
    but check the term sheet against the reference's assumptions (continuous vs discrete monitoring
    is the classic one; ADR-006 Amendment 5 §2 records that trap costing 4.01 SE).

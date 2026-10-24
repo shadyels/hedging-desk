@@ -580,6 +580,8 @@ instead. **Owner: P2.M2/P2.M3** — the mini future's daily financing accrual an
 fixings are the first payoffs that routinely produce simultaneously-dated non-zero columns, and the
 first for which this stops being harmless.
 
+*Annotation (Amendment 8, P2.M3):* Closed in P2.M2 by G-RC1 (`test_validation_gates_equity.py`); the stochastic multi-column twin is G-T3, see Amendment 8 §6.
+
 The exclusion reasoning was also a category error worth naming: it worried that "a poor variance
 ratio is a finding, not a red CI". But **G3b gates bias**, and scrambled RQMC is unbiased — a poor
 variance ratio cannot redden a 3-SE bias conjunct at all. It could only have reddened the
@@ -673,3 +675,126 @@ At q = 0 and r ∈ {0.02, 0.05}, the discounted form of both identities holds to
 - **RQMC American pricing is not built.** `price_american` raises `NotImplementedError` for a low-discrepancy pilot or valuation source. RQMC American pricing is owned by P2.M4.
 - **The wire representation of the low-bias tag is deferred to P2.M4/P3.**
 - **Andersen–Broadie upper bounds remain out of scope,** as Amendment 3 records.
+
+## Amendment 8 (2026-10-24) — P2.M3: FX products
+
+P2.M3 adds the two FX products, TARF and PTARF, on EURUSD under Heston-FX with two rates. It adds no engine and no new parameter type: FX rides `HestonParams` under a documented alias. Status: Proposed. The desk lead has not yet approved this amendment; the approval record is to be added when it is given. §1 states the alias and its consumers. §2 gives the term sheets. §3 gives the discounting and state rules and their identities. §4 records the illustrative parameter set. §5 records the characteristic-function truncation finding and the change it forced. §6 lists the gate set.
+
+### 1. FX under Heston: `r` is the domestic rate, `q` is the foreign rate
+
+FX spot rides `HestonParams` under a documented alias: `r := r_d` (USD, the quote currency) both drives the simulation and discounts; `q := r_f` (EUR, the base currency). The spot drift `r − q = r_d − r_f` is Garman–Kohlhagen's. No new parameter type is introduced, and the only `models/` change this amendment records is the `heston_cf` upper-limit fix in §5.
+
+Consumers of `q`:
+
+- **Simulation drift:** yes. `models/heston.py` reads `params.q` for the spot drift.
+- **Characteristic function:** yes. `models/heston_cf.py` uses `q` in the forward and the `exp(−qT)` spot term.
+- **LSM Jensen continuation floor:** not applicable. There is no American FX product. The floor in `models/lsm.py` uses `r − q` for a constant rate pair; a term structure would need the forward over `[t, t+D]` (ledger row `lsm.py`).
+- **P2.M4 Greeks:** a bump of `q` is EUR rho for TARF and PTARF, but dividend sensitivity for equities (ADR-008), and ADR-009's demo rho aggregation has a single USD bucket only. The labelling and bucketing are undecided; the marker is in `exo/src/exo/products/tarf.py` and the ledger row is in `docs/PONYTAIL-DEBT.md`.
+
+### 2. Term sheets
+
+Notation: `N` is the notional in EUR per fixing; `K`, `K_lo`, `P` and `K_hi` are strikes and the pivot in USD per EUR; `G` is the target in USD; `S_j` is EURUSD spot at fixing `t_j`. Amounts are USD. The sign convention is client-side: positive means the client receives, and desk PV is the negation.
+
+**TARF.** Per fixing, `g_j = N·max(S_j − K, 0)` and `l_j = L·N·max(K − S_j, 0)`, with leverage `L = 2` in the worked configuration. The state starts at `A_0 = 0` and `alive_0 = True`. Then:
+
+- `breach_j = alive_{j−1} and (A_{j−1} + g_j ≥ G)`
+- `c_j = alive_{j−1} · ((breach_j ? G − A_{j−1} : g_j) − l_j)`
+- `A_j = breach_j ? G : (alive_{j−1} ? A_{j−1} + g_j : A_{j−1})`
+- `alive_j = alive_{j−1} and not breach_j`
+
+Only gains accumulate. Losses never count toward the target and never knock out. The breach uses `≥`. The breaching fixing pays the capped remainder `G − A_{j−1}`, so total gains equal the target exactly, and every later column is zero.
+
+**PTARF (market pivot, `0 < K_lo < P < K_hi`).** Below the pivot (`S_j < P`) the client buys at `K_lo`: gain `N·max(S_j − K_lo, 0)`, loss `L·N·max(K_lo − S_j, 0)`. At or above the pivot (`S_j ≥ P`; a tie goes to the upper regime) the client sells at `K_hi`: gain `N·max(K_hi − S_j, 0)`, loss `L·N·max(S_j − K_hi, 0)`. Gains from both regimes count toward one target, the leverage `L` applies on both losing sides, and the same accumulation and knock-out rules as TARF apply. Asymmetric strikes are allowed, and the payoff may jump at `P`.
+
+Worked examples, both taken from `exo/tests/test_tarf.py`:
+
+- **Example A** (`test_u1_capped_partial_last_fixing`): TARF with `N = 10^6`, `K = 1.08`, `L = 2`, `G = 40,000`, fixings `1/12 … 4/12`, path `S = 1.10, 1.07, 1.11, 1.12`. Ledger `[20000, −20000, 20000, 0]`. PV at `r_d = 0.0425` is 19,859.082984.
+- **Example B** (`test_u2_ptarf_worked_example`): PTARF with `K_lo = 1.05`, `P = 1.08`, `K_hi = 1.11`, `N = 10^6`, `L = 2`, `G = 40,000`, fixings `1/12 … 5/12`, path `S = 1.07, 1.10, 1.04, 1.13, 1.09`. Ledger `[20000, 10000, −20000, −40000, 10000]`. PV is −19,542.768979.
+
+### 3. Discounting and state
+
+The ledger column for fixing `j` is dated at `t_j`, the fixing date, and the payoff is undiscounted. `Tarf.cashflows` and `Ptarf.cashflows` accept `r` and ignore it. `pricer.discount` applies `e^{−r_d t_j}` per column. The cashflows are dated at the fixing, not at the fixing plus the 2-day FX settlement lag in refdata; that simplification is recorded in the ledger (`tarf.py`).
+
+The following identities hold and are the basis of the gates in §6:
+
+- **(I1)** `PV = Σ_j e^{−r_d t_j} E[c_j]`. This is the definition of the discounting above.
+- **(I2)** With `G` large, `PV = N · Σ_j [C(K, t_j) − L·P(K, t_j)]`, where `C` and `P` are time-0 vanilla prices, already discounted. This is G-T1.
+- **(I3)** With `G` large and `L = 1`, `PV = N · Σ_j (S_0 e^{−r_f t_j} − K e^{−r_d t_j})`. This holds in expectation because `E[S_t] = S_0 e^{(r_d − r_f)t}`. This is G-T3.
+- **(I4)** If every path knocks out at fixing 1 with payment `G`, `PV = G e^{−r_d t_1}`. This is G-T2a.
+
+The state loop in `tarf.py` carries three float-drift guards, and all three are load-bearing:
+
+- **(a)** The knock-out state is the `alive` boolean. It is never re-derived from `acc ≥ target`.
+- **(b)** On breach, `acc` is assigned the literal target, not `acc + paid`.
+- **(c)** The breach test and the accumulation use the same expression, `acc + g`, so `alive` implies `acc < target`.
+
+### 4. Parameter set and calibration caveat
+
+The `[models.EURUSD]` set in `exo/exo.toml`, verbatim:
+
+```toml
+[models.EURUSD]
+s0 = 1.0800
+r = 0.0425     # r_d, USD (same USD rate as the equity sets)
+q = 0.0200     # r_f, EUR
+v0 = 0.0081    # 9% instantaneous vol
+kappa = 1.50
+theta = 0.0081
+xi = 0.25
+rho = -0.20
+```
+
+The Feller ratio `2κθ/ξ²` is 0.389, which violates the condition. That is inside the envelope QE was validated over: 0.333 in ADR-006 Amendment 4 §4 and 0.231 for `[models.SPX]` by G-W1.
+
+**Caveat.** This set is illustrative and uncalibrated (ADR-006 Amendment 4 §1). It is not fitted to any EURUSD smile: no risk-reversal, butterfly or ATM term structure was used. TARF and PTARF prices under this set demonstrate mechanics and hedging behaviour only. Calibration is P4.M4, against simulated surfaces; live-market calibration is Phase 5.
+
+### 5. Characteristic-function truncation
+
+The integration upper limit `_U_MAX` in `exo/src/exo/models/heston_cf.py` was 200 and is now 1000. The marker there names two ceilings:
+
+1. **Tail truncation.** `quad_vec`'s `abserr` covers `[U_MIN, U_MAX]` only and is blind to truncation of the infinite range. At 1000 every configured set is converged to ≤ 4e-10 at T = 1/12, measured against U = 20000.
+2. **Small `ξ`.** The `a/ξ²` prefactor amplifies floating-point noise (an abserr floor of about 1e-6 at ξ = 1e-6).
+
+The trigger is a parameter set with `v0·√(1−ρ²)/ξ < 0.03`. EURUSD sits at 0.0317, just above that trigger.
+
+The regression test `test_cf_upper_limit_truncation_is_negligible` compares `_U_MAX = 1000` against `5 × _U_MAX` for EURUSD (strike 1.2·S0), SPX (strike 1.1·S0), and EURUSD at absolute strike 1.20, and asserts an absolute difference ≤ 1e-10.
+
+Measured truncation effect of the old limit, from a mutation run performed in the P2.M3 working session (not a committed artifact) against `test_cf_upper_limit_truncation_is_negligible`, at T = 1/12:
+
+- **EURUSD**, call, K = 1.2·S0: price at U = 200 is 2.7259e-06; at U = 1000 it is 1.136e-10. The difference is 2.7258e-06.
+- **SPX**, call, K = 1.1·S0: 0.73782 at U = 200 against 0.73705 at U = 1000. The difference is 7.699e-04.
+
+The regression assertion is |diff| ≤ 1e-10 at U = 1000 against 5 × U = 1000 (the test's own limit). Both differences exceed that bound by orders of magnitude. The mutation run applied the old limit (200) to the same test; the test as committed compares 1000 against 5000, so it does not itself exercise U = 200.
+
+The regression test is in the repository; the figures above come from the P2.M3 working-session mutation run (not a committed artifact; the run is reproducible from the test as committed) and were not re-derived in this document.
+
+**Reconciliation with the earlier spec's figures.** The two sets of EURUSD figures are not contradictory measurements of one quantity; they are different strikes. Measured in the P2.M3 working session (EURUSD parameters, T = 1/12, call, Heston characteristic function, value at each U):
+
+| Strike | U=200 | U=500 | U=1000 | U=20000 |
+|---|---|---|---|---|
+| K = 1.20 absolute (= 1.111·S0) | -1.1173e-06 | 1.1620e-06 | 1.1620e-06 | 1.1620e-06 |
+| K = 1.296 (= 1.2·S0) | 2.7259e-06 | 1.0737e-10 | 1.1360e-10 | 1.1366e-10 |
+
+The earlier spec's label "K = 1.2·S0" was applied to the absolute strike 1.20 in one prototype run. At K = 1.20 the old limit (U = 200) returned a **negative** call price, -1.1173e-06, against a converged value of +1.1620e-06; the price difference is 2.2793e-06. This is the strongest evidence for the change. At K = 1.296 (the test's `1.2·S0`), the old limit differs from the converged value by 2.7258e-06 and U = 500 is already within 1e-10 of U = 1000 and U = 20000. U_MAX = 1000 is kept as the configured limit.
+
+Across-set convergence at the configured limit: U=1000 vs U=20000, all five configured sets, K in {0.8,...,1.2}·S0, T=1/12: worst |U1000 − U20000| = 3.838e-10 (SPX at K = 0.8·S0; quadrature noise at that price scale). Measured in the P2.M3 working session; the script is not committed as a repository artifact.
+
+### 6. Gate set
+
+All gates are in `exo/tests/test_validation_gates_fx.py`, on seeds 601–606. Every 3-SE gate also carries a second conjunct bounding its own standard error, `0 < se < tol_abs`, where `tol_abs` is set just above the largest SE of a 20-seed sweep (seeds 500–519). Values below are as recorded in the gate docstrings.
+
+- **G-T1** (`test_g_t1_unreachable_target_tarf_matches_heston_strip_within_3se`, seed 601). TARF with `G = 10^15` on `[models.EURUSD]`, 12 monthly fixings, against the Heston CF strip `N·Σ_j [call − 2·put]`. Gate seed z = −0.478. The target never binds. Also asserts `abserr < 1e-10` at every fixing.
+- **G-T1b** (`test_g_t1b_unreachable_target_tarf_matches_garman_kohlhagen_within_3se`, seed 602). The same term sheet on the BS-degenerate FX model (σ = 0.09, ξ = 1e-4) against Garman–Kohlhagen. Gate seed z = −1.942, inside the 3-SE band.
+- **G-T2a / G-T2b** (`test_g_t2a_first_fixing_always_breaches_is_exact`, `test_g_t2b_paths_breaching_at_first_fixing_pay_exactly_g_then_zero`, seed 603). Exact knock-out identities: on every path of G-T2a the ledger is `[G, 0, …, 0]` and PV = `G·e^{−r_d/12}`, with SE at float noise. G-T2b checks the rows that breach at fixing 1, on a proper non-empty subset.
+- **G-T3** (`test_g_t3_deep_itm_tarf_pins_fixing_column_date_mapping_within_3se`, seed 604). The BS-degenerate FX model, TARF with `K = 0.54`, `L = 1`, `G = 10^15`. Every column is a non-zero forward on every path. Gate seed z = −0.237. `discount()` itself is pinned by G-RC1 (`test_validation_gates_equity.py`); G-T3 pins the Tarf fixing-to-column-to-date mapping and the `r_d`/`r_f` assignment on random non-zero columns. It is the stochastic multi-column twin of G-RC1 named in the Amendment 6 §9 annotation.
+- **G-T4a / G-T4b** (`test_g_t4a_ptarf_with_pivot_above_every_spot_equals_tarf_per_path`, `test_g_t4b_ptarf_with_pivot_below_every_spot_pays_upper_regime_forward`, seed 605). Exact per-path identities. 4a: a pivot above every spot makes PTARF equal TARF on the same bundle. 4b: a pivot below every spot pays `N·(K_hi − S_j)` on every path and column.
+- **G-T5** (`test_g_t5_eurusd_european_warrant_matches_heston_vanilla_within_3se`, seed 606). European warrants at `K` in {0.95, 1.0, 1.05}·S0, call and put, `T = 1/12` (4 steps) and `T = 1` (48 steps), against the Heston CF vanilla. Gate-seed z values are in the docstring. A targeted re-sweep of the one cell-seed with |z| > 3 on seeds 700–899 found no bias. Open observation: over seeds 700–899 the `T = 1/12` cells have mean z from −0.13 to +0.24 (SE about 0.07 each), and the ATM put is +0.24, about 3.6 SE. The single-seed gate cannot detect a small discretisation bias at 4 steps. Whether a finer-grid check is needed is undecided, and the ledger tracks it.
+- **Declined: mixed-regime PTARF closed-form gate.** Decision (user, 2026-10-24): the mixed-regime PTARF closed form is declined. Coverage is by G-T4a/b (per-path reduction to the gated TARF and pivot-degenerate identities) plus hand-path tests U2 and U9. This is a documented departure from `exo/CLAUDE.md`'s "analytic cross-check where one exists" rule for this instrument. Figures measured in the architect's P2.M3 spec prototype (not a committed artifact, not reproduced in the repository): `_DEGENERATE_FX`, `K_lo` 1.05 / `P` 1.08 / `K_hi` 1.11, `L` = 2, `G` = 1e15, 48 steps, 20k antithetic paths, seeds 500–519: reference −672,915.15, SE 6,840–7,112, mean z +0.19, max |z| 2.12. Why declined: a 50-pip pivot shift moves the closed form only +0.28 SE (the symmetric strikes make the payoff continuous at `P`), so the gate is blind to pivot location. The components it would pin are pinned exactly by G-T4a/b, U2 and U9. Implementing it would require a Black–Scholes digital pricer, which `models/analytic.py` does not have.
+
+## Consequences (Amendment 8)
+
+- **No new dependency.** No new engine, and no new parameter type.
+- **No proto change.** `"tarf"` and `"ptarf"` already appear in `protocol/proto/live.proto` as `ProductLine.product_type` values.
+- **No universe change.** EURUSD is `instrument_id` 4001 in `protocol/refdata/universe.json`.
+- **Three ledger rows** are added in `docs/PONYTAIL-DEBT.md`: two in `tarf.py` (lines 22 and 39) and one for the 4-step QE marker in `test_validation_gates_fx.py` (line 72). The `heston_cf.py` row is updated for the new limit.
+- **P2.M4 inherits** the `q := r_f` labelling caveat of §1. The Greek labelling and bucketing are undecided.
