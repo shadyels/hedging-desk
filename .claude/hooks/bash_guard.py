@@ -46,7 +46,9 @@ RULES = [
     ),
     (
         "block-push-to-main",
-        re.compile(r"git\s+push\b[^\n]*\b(?:main|master)\b|git\s+push\s+(?:-f|--force)", re.IGNORECASE),
+        # `[^\n;&|]*` stops at a shell separator, so `main` only counts when it is an
+        # argument of the push itself, not of a later `&& gh pr create --base main`.
+        re.compile(r"git\s+push\b[^\n;&|]*\b(?:main|master)\b|git\s+push\s+(?:-f|--force)", re.IGNORECASE),
         "Direct pushes to `main`/`master`, and force-pushes of any kind, are blocked.\n\n"
         "All changes must land on `main` via a `type/scope-description` branch and a reviewed PR. If you "
         "need to update a branch history, coordinate with the user before force-pushing anything.",
