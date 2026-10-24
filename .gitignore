@@ -21,3 +21,6 @@ ui/coverage/
 # Local env overrides
 .env
 .env.local
+
+# EXO live revaluation manifests (one per real revaluation; ADR-006 Amendment 9 s5)
+exo/run-manifests/live/

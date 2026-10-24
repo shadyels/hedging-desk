@@ -22,6 +22,8 @@ from exo.provenance import (
     ValuationMetaFields,
     git_sha,
     params_hash,
+    publish_allowed,
+    publish_status,
     to_valuation_meta,
 )
 
@@ -204,9 +206,9 @@ def test_manifest_read_rejects_unknown_schema_version(tmp_path: Path) -> None:
     manifest = _sample_manifest()
     path = tmp_path / "run.toml"
     manifest.write(path)
-    raw = path.read_text().replace("schema_version = 1", "schema_version = 3")
+    raw = path.read_text().replace("schema_version = 1", "schema_version = 4")
     path.write_text(raw)
-    with pytest.raises(ValueError, match="1 or 2"):
+    with pytest.raises(ValueError, match="1, 2 or 3"):
         RunManifest.read(path)
 
 
@@ -382,3 +384,138 @@ def test_git_sha_default_repo_is_this_package_not_cwd(
     monkeypatch.chdir(tmp_path)  # tmp_path is not inside a git repository
     sha = git_sha()
     assert len(sha) == 40 or len(sha) == 40 + len("-dirty")
+
+
+# --- P2.M4: schema_version 3 (book manifests), dirty-tree policy --------------------------------
+
+
+def _book_manifest() -> RunManifest:
+    return RunManifest(
+        schema_version=3,
+        run_id="2026-10-24T12-00-00Z-EXO-SP-000000001",
+        created_ns=1,
+        git_sha="a" * 40,
+        model_id="heston-qe-pseudo-antithetic-v1",
+        params_hash="b" * 64,
+        seed=20261024,
+        n_paths=20_000,
+        engine=EngineSettings(scheme="qe", n_steps=0, antithetic=True, n_steps_per_year=252),
+        params={"AAPL": {"s0": 187.51, "r": 0.0425}},
+    )
+
+
+def test_manifest_v3_book_round_trip(tmp_path: Path) -> None:
+    manifest = _book_manifest()
+    path = tmp_path / "run.toml"
+    manifest.write(path)
+    raw = tomllib.loads(path.read_text())
+    assert raw["schema_version"] == 3
+    assert raw["engine"]["n_steps_per_year"] == 252 and raw["engine"]["n_steps"] == 0
+    loaded = RunManifest.read(path)
+    assert loaded == manifest
+    assert loaded.engine.n_steps_per_year == 252
+
+
+def test_v2_manifest_still_reads_and_has_no_n_steps_per_year(tmp_path: Path) -> None:
+    manifest = RunManifest(
+        run_id="r", created_ns=1, git_sha="a" * 40, model_id="m", params_hash="b" * 64, seed=1,
+        n_paths=2, engine=EngineSettings(scheme="qe", n_steps=252, antithetic=True), params={},
+    )  # fmt: skip
+    assert manifest.schema_version == 2
+    path = tmp_path / "run.toml"
+    manifest.write(path)
+    assert "n_steps_per_year" not in tomllib.loads(path.read_text())["engine"]
+    assert RunManifest.read(path).engine.n_steps_per_year is None
+
+
+def test_exactly_one_of_n_steps_or_n_steps_per_year() -> None:
+    with pytest.raises(ValueError, match="exactly one"):
+        EngineSettings(scheme="qe", n_steps=252, antithetic=True, n_steps_per_year=252)
+    with pytest.raises(ValueError, match="exactly one"):
+        EngineSettings(scheme="qe", n_steps=0, antithetic=True)
+    with pytest.raises(ValueError, match="positive"):
+        EngineSettings(scheme="qe", n_steps=0, antithetic=True, n_steps_per_year=0)
+    with pytest.raises(ValueError, match="positive"):
+        EngineSettings(scheme="qe", n_steps=-1, antithetic=True, n_steps_per_year=252)
+
+
+def test_n_steps_per_year_requires_schema_version_3() -> None:
+    with pytest.raises(ValueError, match="schema_version 3"):
+        RunManifest(
+            schema_version=2, run_id="r", created_ns=1, git_sha="a" * 40, model_id="m",
+            params_hash="b" * 64, seed=1, n_paths=2,
+            engine=EngineSettings(scheme="qe", n_steps=0, antithetic=True, n_steps_per_year=252),
+            params={},
+        )  # fmt: skip
+
+
+def test_publish_allowed_dirty_tree_policy() -> None:
+    assert publish_allowed("abc-dirty", False) is False
+    assert publish_allowed("abc-dirty", True) is True
+    assert publish_allowed("abc", False) is True
+    assert publish_allowed("abc", True) is True
+    assert publish_allowed("deadbeef" * 5 + "-dirty", False) is False  # an EXO_GIT_SHA override too
+
+
+def test_live_manifest_dir_is_git_ignored_so_writing_a_manifest_cannot_dirty_the_tree() -> None:
+    repo = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        ["git", "check-ignore", "exo/run-manifests/live/x.toml"],
+        cwd=repo, capture_output=True, text=True, check=False,
+    )  # fmt: skip
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_publish_status_is_the_health_detail_string() -> None:
+    assert publish_status("abc", False) == "enabled"
+    assert publish_status("abc-dirty", True) == "enabled"
+    assert (
+        publish_status("abc-dirty", False)
+        == "refused: dirty tree (set [provenance] allow_dirty = true)"
+    )
+    for sha in ("abc", "abc-dirty"):
+        for allow in (True, False):
+            assert (publish_status(sha, allow) == "enabled") == publish_allowed(sha, allow)
+
+
+# --- EXO_GIT_SHA override shape, git timeout ---------------------------------------------------
+
+
+@pytest.mark.parametrize("value", ["abc1234", "a" * 40, "a" * 40 + "-dirty", "  abc1234-dirty\n"])
+def test_git_sha_override_is_stripped_and_accepted(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("EXO_GIT_SHA", value)
+    assert git_sha() == value.strip()
+
+
+@pytest.mark.parametrize(
+    "value", ["abc12", "ABCDEF1", "g" * 40, "a" * 41, "abc1234-DIRTY", "abc1234 -dirty", "x\ny"]
+)
+def test_git_sha_override_with_the_wrong_shape_is_refused(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("EXO_GIT_SHA", value)
+    with pytest.raises(ProvenanceError, match="EXO_GIT_SHA"):
+        git_sha()
+
+
+def test_a_trailing_newline_cannot_hide_a_dirty_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXO_GIT_SHA", "abc1234-dirty\n")
+    assert publish_allowed(git_sha(), False) is False
+
+
+def test_git_calls_have_a_timeout_that_maps_to_provenance_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("EXO_GIT_SHA", raising=False)
+    seen: list[object] = []
+
+    def hang(*args: object, **kwargs: object) -> object:
+        seen.append(kwargs.get("timeout"))
+        raise subprocess.TimeoutExpired(cmd="git", timeout=10)
+
+    monkeypatch.setattr(subprocess, "run", hang)
+    with pytest.raises(ProvenanceError, match="timed out"):
+        git_sha(repo=tmp_path)
+    assert seen == [10]

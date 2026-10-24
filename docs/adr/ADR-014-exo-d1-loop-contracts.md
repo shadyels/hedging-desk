@@ -237,14 +237,14 @@ would need a currency field and per-currency limits (P4.M5).
 |---|---|---|
 | `pv_e9` / `pv_std_err_e9` | MC price and its pair-mean SE | ccy × 1e9 |
 | `delta_qty_e2` | ∂PV/∂S | units of underlying × 1e2 (EUR for EURUSD) |
-| `gamma_qty_e2` | change in delta for +1% spot = Γ · 0.01 · S | units × 1e2 per +1% |
+| `gamma_qty_e2` | change in delta for +1% spot = Γ · 0.01 · S, with S = the mark the Greeks were computed at | units × 1e2 per +1% of the mark |
 | `vega_e9` | ∂PV/∂σ × 0.01, with σ = √v0 and √θ shifted together | ccy × 1e9 per +1 vol point |
 | `rho_e9` | ∂PV/∂r × 1e-4 (domestic, quote-ccy rate; moves drift and discount) | ccy × 1e9 per +1bp |
 | `div_sens_e9` | ∂PV/∂q × 0.01, for EQUITY/INDEX/ETF underlyings; 0 for FX | ccy × 1e9 per +1% yield |
 | `rho_foreign_e9` (new) | ∂PV/∂q × 1e-4, for FX_SPOT underlyings (q := r_f, Amendment 8 §1); 0 otherwise | ccy × 1e9 per +1bp foreign rate |
 | `theta_e9` | (PV aged one model step − PV) / (dt · `[greeks] theta_days_per_year`), with S and v held | ccy × 1e9 per calendar day |
 | `*_std_err_*` (new) | the pair-mean SE of each estimate, same unit | as the estimate |
-| `flagged_greeks` (new) | names of Greeks with `se > max_rel_std_error · abs(value)`; a 0 value is always flagged | — |
+| `flagged_greeks` (new) | names of Greeks with `se > max_rel_std_error · abs(value)`; a 0 value is always flagged; only Greeks applicable to the line are labelled (`div_sens` or `rho_foreign`, not both) | — |
 
 - **Hedge target.** For each (book, underlying), the target is `target_qty_e2 = −Σ_lines delta`, rounded
   once, half-even, to a multiple of the instrument's `lot_e2` from refdata.
@@ -255,7 +255,7 @@ would need a currency field and per-currency limits (P4.M5).
   - `|new − last_published| > band_qty_e2`, or
   - an un-halt occurred (§8).
 - `reason` states the trigger and lists flagged Greeks, for example
-  "rehedge: |Δtarget|=571,000 > band 50,000; mark 176.000000000; flagged: delta,gamma".
+  "rehedge: |Δtarget|=457,900 > band 50,000; mark 176.000000000; flagged: delta,gamma,vega,rho,theta,div_sens".
 - **Provenance.** `ValuationMeta` on the snapshot and on every target of the same book and cycle is the
   book's per-cycle run manifest (Amendment 9 §5). `model_id` is `heston-<scheme>-pseudo-antithetic-v1`, which
   closes Amendment 6's "sampler indistinguishable on the wire" gap for P2.M4. `git_sha` carries `-dirty` only

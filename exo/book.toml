@@ -1,0 +1,23 @@
+# exo/book.toml -- persisted EXO product book (ADR-006 Amendment 9 s7). Desk-issued; illustrative.
+# Strictly validated by portfolio/book.py: unknown or missing keys are errors, there are no
+# defaults, and bool is rejected where a number is expected. The underlying must be a universe
+# symbol with a [models.<SYMBOL>] block in exo.toml.
+[[book]]
+code = "EXO-SP"
+seed = 20261024
+n_paths = 20_000
+
+[[book.product]]
+product_id = "EXO-SP-AC-0001"
+type = "autocallable"
+desk_quantity = -1.0            # desk issued (is short) one note of the notional below
+underlying = "AAPL"
+notional = 10_000_000.0         # USD
+observations = [0.25, 0.5, 0.75, 1.0]   # quarterly; 63/126/189/252 steps at 252/yr
+autocall_trigger = 187.50       # 100% of initial
+coupon_barrier = 178.125        # 95% of initial
+coupon_rate = 0.02              # per quarter
+memory = true
+protection_barrier = 131.25     # 70% of initial, observed at maturity only
+initial_level = 187.50
+expiry = 1.0

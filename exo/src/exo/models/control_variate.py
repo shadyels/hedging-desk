@@ -37,7 +37,8 @@ class ControlVariate:
 # + K*exp(-r*T)`) makes a put control trivial; the autocallable needs a different control
 # entirely (no closed form for its coupon/redemption structure). The original trigger (a
 # put-barrier gate) fired in P2.M2 (G-BRC, G-BON) without needing a control at gate SEs.
-# Owner: P2.M4, with the control-variate decision.
+# P2.M4 decided no control variate for published numbers (ADR-006 Amendment 9 s1), so this did
+# not fire. Trigger: the first published RQMC/control-variate number.
 #
 # ponytail: `mean` is the EXACT (continuous-time CF) price, not the DISCRETIZED model's own
 # expectation of `payoff` -- see `estimate_beta`'s docstring for why this makes `apply_control`
@@ -47,8 +48,9 @@ class ControlVariate:
 # gives +0.07189 (z=+3.22), qe/400 gives -0.00278 (z=-0.13). Upgrade: none -- fixing this means
 # simulating the control on a disjoint sample to get a discretized-model mean, which is a
 # design change (see `estimate_beta`'s "Rejected alternatives"), not a remediation. Trigger:
-# P2.M4 publishing a controlled number, or any use of this control under a scheme/step count
-# not validated by ADR-006 Amendment 4 Section 4.
+# the first published RQMC/control-variate number (P2.M4 publishes neither, ADR-006 Amendment 9
+# s1), or any use of this control under a scheme/step count not validated by ADR-006
+# Amendment 4 Section 4.
 def vanilla_control(
     bundle: PathBundle,
     params: HestonParamsLike,

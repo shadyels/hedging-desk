@@ -316,8 +316,9 @@ class SobolRandomSource:
         at 200k paths x 252 steps) and `products/base.py`'s ~10.2 (`_BRIDGE_PEAK_ARRAY_RATIO
         = 11.0`) -- this module's eager (n_paths, D) point matrix is the largest of the
         three. Upgrade: generate per-stream blocks on demand instead of one eager
-        (n_paths, D) matrix. Trigger: P2.M4 RQMC American pricing, or a batch that will not fit
-        the study's --max-batch-bytes.
+        (n_paths, D) matrix. Trigger: the first published RQMC number (P2.M4 publishes pseudo-random
+        + antithetic, ADR-006 Amendment 9 s1), or a batch that will not fit the study's
+        --max-batch-bytes.
         """
         total_dims = sum(n_dims for _, n_dims in self.dims)
         seed_sequence = np.random.SeedSequence(

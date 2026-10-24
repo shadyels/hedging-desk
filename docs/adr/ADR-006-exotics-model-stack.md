@@ -847,19 +847,23 @@ stateless (`models/rng.py`), so legs of the same shape receive bitwise-identical
 
 **Legs.** Per product: base, then S±, σ±, r±, q±, then aged. That is 10 `simulate` calls, run sequentially
 and never concurrently. Each leg is reduced at once to its `(n_paths,)` discounted vector,
-`discount(payoff.cashflows(bundle, r=r), r=r)` (`products/pricer.py`). Only the base bundle is retained
-(`mc_estimate` needs its pairing). Each Greek is `mc_estimate(base_bundle, combination_of_vectors)`, so its SE
-is the antithetic pair-mean SE of the per-path difference. That is what makes the SE valid for a difference
+`discount(payoff.cashflows(bundle, r=r), r=r)` (`products/pricer.py`). The base bundle is not
+retained: it is cut to a one-column pairing stub (`dataclasses.replace(base, S=base.S[:, :1].copy(),
+v=base.v[:, :1].copy())`, `greeks/bump.py`). That keeps exactly what `mc_estimate` reads — `antithetic`,
+`n_pairs`, `low_discrepancy` and the leading dimension — and releases the `(n_paths, n_steps+1)` `S`/`v`
+matrices before the first bumped leg. The stub's `S`/`v` no longer describe the paths, so it must never be
+passed to anything but `mc_estimate`. Each Greek, PV included, is `mc_estimate(pairing, combination_of_vectors)`,
+so its SE is the antithetic pair-mean SE of the per-path difference. That is what makes the SE valid for a difference
 of correlated legs.
 
 | Greek | Legs | Per-path estimator |
 |---|---|---|
 | delta | s0·(1±h_S) | (d₊ − d₋) / (2·h_S·s0) |
-| gamma | base, s0·(1±h_S) | (d₊ − 2d₀ + d₋) / (h_S·s0)², reported × 0.01·s0 |
+| gamma | base, s0·(1±h_S), with s0 = the mark | (d₊ − 2d₀ + d₋) / (h_S·s0)², reported × 0.01·s0 (per +1% of the mark) |
 | vega | √v0 ± h_σ and √θ ± h_σ together (v0' = (√v0±h_σ)², θ' = (√θ±h_σ)²) | (d₊ − d₋) / (2h_σ) |
 | rho | r ± h_r (moves drift **and** discount; Amendment 7 §4: `r` is threaded, never stored) | (d₊ − d₋) / (2h_r) |
 | q-sensitivity | q ± h_q | (d₊ − d₋) / (2h_q); labelled per §4 |
-| theta | aged run: `n_steps − 1` steps, `expiry − dt`, every term-sheet time − dt, rng = `DropLeadingStepsSource(rng, 1)` | (d_aged − d₀) / dt |
+| theta | aged run: `n_steps − 1` steps, `expiry − dt`, every term-sheet time − dt, rng = `DropLeadingStepsSource(rng, 1)` | (d_aged − d₀) / (dt · theta_days_per_year): per calendar day, computed in `greeks/bump.py` (the aggregator only applies the desk quantity) |
 
 `dt = expiry / n_steps`, with `n_steps = round(expiry · n_steps_per_year)`, which must be ≥ 2.
 
@@ -885,8 +889,11 @@ the operator's choice (same posture as Amendment 4 §1).
 A test asserts that every dataclass field of each class is either in the table or in an explicit non-time
 list, so a new time field cannot be silently left unaged.
 
-**Flagging.** A Greek is flagged when `se > max_rel_std_error · |value|`; a zero value is always flagged. It
-is still published (`exo/CLAUDE.md` rule 6), and its name goes in `ProductLine.flagged_greeks`.
+**Flagging.** A Greek is flagged when `se > max_rel_std_error · |value|`; a zero value is always flagged. Only the Greeks applicable to the line are labelled (`div_sens` for an equity, index or ETF underlying; `rho_foreign` for FX). It
+is still published (`exo/CLAUDE.md` rule 6), and its name goes in `ProductLine.flagged_greeks`. Relative SE is
+uninformative near a zero estimate. A flag therefore means "not resolved by this run at this path count", never
+"suppressed" or "wrong". Consumers judge a flagged Greek by its absolute `*_std_err_*` field, which is always
+published beside it.
 
 ### 3. Validation gates (blocking)
 
@@ -902,18 +909,23 @@ is still published (`exo/CLAUDE.md` rule 6), and its name goes in `ProductLine.f
 - Assertions: `|est − ref| < 3·se` and `0 < se < tol_abs`, where `tol_abs` is 1.1 × the largest SE of the
   implementation's own 20-seed sweep (seeds 500–519), recorded in the docstring.
 
-Prototype (not the implementation), at this configuration over seeds 500–519:
-- Maximum |z|: 2.37 over 240 draws (6 Greeks × 2 options × 20 seeds). The expected maximum of 240 independent
-  |N(0,1)| draws is ≈ 2.87.
-- Mean z for every Greek: within [−0.24, +0.34].
-- Mutants (put, seeds 500–504), z on each mutant's own SE unless stated:
-  - vega bumping v0 only: −208;
-  - rho bumping only the discount, with paths simulated at base r: +1,294;
-  - one-sided delta: about +17;
-  - gamma missing its S scale: about −3,500;
-  - theta ≡ 0: `se = 0`, so the `0 < se` conjunct raises; against the honest SE it would sit at about +8.4 (put) and +7.7 (call), so the gate is sharp against a missing theta.
-- An **un**coupled theta (independent draws for the aged run) **passes** the 3-SE conjunct (|z| ≤ 1.1). Only
-  G-CRN below catches it.
+The implementation's own 20-seed sweep (seeds 500–519, this configuration) is recorded in the module docstring of
+`exo/tests/test_validation_gates_greeks.py`, together with the per-Greek signed mean z, max |z| and max SE from which
+`tol_abs` is derived:
+- Maximum |z|: 2.37 over 240 draws (6 Greeks × 2 options × 20 seeds; put theta). The expected maximum of 240
+  independent |N(0,1)| draws is ≈ 2.87.
+- Mean z per Greek: within [−0.24, +0.34] (vega put −0.24, theta call +0.34).
+- **Sharp against a missing theta.** Theta ≡ 0 has `se = 0`, so the `0 < se` conjunct raises. Against the
+  implementation's largest honest SE it would sit at |ref|/se ≈ 7.6 (call) and 8.3 (put).
+- **An uncoupled theta passes the z-test.** If the aged run consumes shifted increments without the dropped
+  leading step, the result is unbiased, so it passes the 3-SE conjunct. Its SE is, however, ≥ 6.48× (call) and
+  ≥ 5.89× (put) the coupled estimator's. Only G-CRN and the `tol_abs` conjunct catch it.
+- **Mutation figures.** These come from the architect's prototype in the P2.M4 working session: put, seeds
+  500–504, z on each mutant's own SE. They are not a committed artifact; the vega and rho mutants are re-run by `exo/tests/test_validation_gates_greeks_mutants.py`, which asserts that the gate fails but does not record z.
+  - vega bumping v0 only: ≈ −208;
+  - rho bumping the discount only, with paths at base r: ≈ +1,294;
+  - one-sided delta: ≈ +17;
+  - gamma missing its S scale: ≈ −3,500.
 
 The fixture is deliberately degenerate so that a closed form exists. It pins the estimator machinery: scaling,
 leg pairing, joint v0/θ vega, rho moving drift and discount, and ageing through `DropLeadingStepsSource`. It
@@ -927,8 +939,10 @@ says **nothing** about SE at the published book's configuration; §7 measures th
   independent seeds (s and s + 10,000): what a caller would get without CRN. That is the denominator
   deliberately, since it is exactly what CRN replaces.
 - Degenerate cases raise rather than pass: `se_crn == 0` or `se_indep == 0` raises.
-- Prototype minima over the sweep: 31.7 (delta), 23.2 (vega), 347 (rho), 5.8 (theta) for the put; 42.3, 23.2,
-  539 and 6.4 for the call. A mutant with CRN broken sits at ratio ≈ 1.
+- Minima over the implementation's sweep, call / put (gate docstring): delta 42.2 / 31.6, vega 23.2 / 37.4,
+  rho 539 / 347, theta 6.43 / 5.85. A mutant with CRN broken sits at a ratio of about 1.
+- A ratio above 1e5 also raises (`_MAX_PLAUSIBLE_RATIO`): a collapsed CRN SE is a degenerate estimator that
+  would pass trivially.
 
 **G-LBL (FX labelling).**
 - EQUITY/INDEX/ETF underlyings: `div_sens = 0.01·∂PV/∂q` and `rho_foreign = 0`.
@@ -1000,27 +1014,41 @@ until P4.M1 buckets rates.
 - Memory: `GREEKS_PEAK_ARRAY_RATIO × n_paths × (n_steps + 1) × 8` must not exceed `[valuation] max_job_bytes`
   (1e9). The ratio is a new constant in `models/memory.py`, measured with `tracemalloc` around the real
   `compute_greeks` for every loadable class at two sizes, warm-up call outside the trace, committed at most 6%
-  above the worst measured ratio. The prototype measured 9.03 for the autocallable at 20k × 252 (365 MB).
+  above the worst measured ratio. Committed: `GREEKS_PEAK_ARRAY_RATIO = 12.0`, 3.8% over the worst measured
+  ratio. The measurements are in `models/memory.py` and repeated by `tests/test_greeks_memory.py`:
+  - Every DISCRETE class (autocallable, discrete barrier, BRC and bonus, RC, warrant, TARF, PTARF): 5.09–5.18,
+    i.e. one `simulate()` transient, thanks to the §2 pairing stub.
+  - The CONTINUOUS_BRIDGE classes (barrier, BRC, bonus) bind at 11.4–11.56, from the `bridge_step_survival`
+    temporaries.
+  - At 20,000 paths × 250 steps: the autocallable peaks at 202 MB and a continuous barrier or BRC at 457–458 MB.
+
+  One constant covers all classes, so the guard over-estimates the discrete classes about 2.3×, which only makes
+  it conservative. An earlier prototype that retained the whole base bundle measured 9.03 for the autocallable;
+  that figure is superseded.
 
 **Pool.** Valuation runs in a `ProcessPoolExecutor(max_workers=1)`. Products are valued sequentially, so the
 peak is the maximum over products, not the sum.
 
-**Pricer guard.** `pricer.py:70` (the exact `bundle.t[-1] == payoff.expiry` guard) is **kept**. Every product
+**Pricer guard.** `price_from_bundle`'s exact `bundle.t[-1] == payoff.expiry` guard (`products/pricer.py`) is **kept**. Every product
 gets its own bundle with `expiry = payoff.expiry`, so the shared-bundle use case never arises. Decided, not
 deferred.
 
 Published-book SE, measured.
-- Configuration: storyline autocallable of `exo/book.toml` on `[models.AAPL]`, desk-signed, 20,000 antithetic
-  paths, 252 steps, QE, seed 4242, production bumps.
-- Relative SEs:
-  - delta 7.2% / 5.3% (S = 187.51 / 176.00);
-  - vega 6.6% / 5.2%;
-  - rho 6.2% / 7.9%;
-  - div 19% / 14%;
-  - theta 31% / 53%;
-  - gamma 422% / 147%.
+- Configuration: the storyline autocallable of `exo/book.toml` on `[models.AAPL]`, desk-signed, at the book's
+  own seed 20261024, with 20,000 antithetic paths, 252 steps, QE and production bumps. These figures are measured
+  by this implementation and recorded in `exo/tests/test_book_storyline_delta.py`, which pins them.
+- Relative SEs at S = 187.51 / 176.00:
+  - delta 7.5% / 5.5%;
+  - vega 7.0% / 5.2%;
+  - rho 5.4% / 7.3%;
+  - div_sens 21% / 15%;
+  - gamma 103% / 70%;
+  - theta 99% / 3,208%. Theta at 176.00 is near zero, the case §2's flagging sentence covers.
 - Every Greek is therefore published flagged at `max_rel_std_error = 0.02`. Bringing delta to 2% needs about
-  13× the paths.
+  (7.5 / 2)² ≈ 14× the paths.
+- The gap still moves the hedge materially. Client delta goes from 7,893 to 12,472 shares, a jump with z = 5.08
+  against the test's threshold of 4. The lot-rounded hedge target goes from 789,300 to 1,247,200 `qty_e2`,
+  against a 50,000 band.
 - Recorded honestly rather than tuned away (desk lead, 2026-10-24).
 
 ## Consequences (Amendment 9)
@@ -1036,7 +1064,8 @@ Published-book SE, measured.
 - **Re-ownered rather than closed:**
   - `models/heston.py:12` (full path retention): the guard now *enforces* the ceiling. Trigger: a book entry
     the guard refuses (P4.M5 enrichment at scale).
-  - `products/base.py:299` (bridge peak 10.2): same guard and same trigger.
+  - `products/base.py:296` (bridge peak: 10.2 for one call; 11.4–11.56 inside a Greek job, `models/memory.py`):
+    same guard and same trigger.
   - `products/pricer.py:120` (low-bias tag): trigger is "first American warrant in the persisted book"; owner
     undecided.
   - `products/mini_future.py:41`: trigger is "first mini future in the persisted book"; owner undecided.

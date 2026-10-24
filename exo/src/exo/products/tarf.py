@@ -19,10 +19,10 @@ exactly, and every later column is exactly 0. Losses never count toward the targ
 knock out. The ledger is UNDISCOUNTED and dated at the fixings `t_j`; discounting happens in
 `pricer.discount`.
 
-# ponytail: FX rides HestonParams with q := r_f (ADR-006 A8 s1). Ceiling: nothing in the type
-# marks q as a rate, so a P2.M4 bump of q is EUR (foreign) rho for TARF/PTARF but "div sens" for
-# equities (ADR-008), and ADR-009's demo rho aggregation has one USD bucket only. Upgrade: owner
-# P2.M4 (Greek publication); labelling/bucketing mechanism undecided. See docs/PONYTAIL-DEBT.md.
+FX rides HestonParams with q := r_f (ADR-006 A8 s1). The raw dPV/dq is labelled by the underlying's
+class in `portfolio/aggregate.py` (ADR-006 Amendment 9 s4): foreign rho (`rho_foreign`, per bp) for
+FX_SPOT, dividend sensitivity for equities. Bucketing foreign rho is P4.M1; it is monitored, not
+limited, until then.
 """
 
 from __future__ import annotations

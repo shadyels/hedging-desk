@@ -45,7 +45,9 @@ silently drift if `exo.toml` is later tweaked for an unrelated reason.
 
 # ponytail: fixture ceiling -- bridge and control-variate ratios are measured ONLY at Feller
 # ratios 0.333 (AAPL) and 1.633 (MSFT). QE bias at SPX's 0.231 is now recorded by P2.M2's G-W1;
-# variance ratios at 0.231 remain unmeasured. Trigger: P2.M4's sampler decision.
+# variance ratios at 0.231 remain unmeasured. P2.M4's sampler decision fired and chose pseudo-random
+# + antithetic (ADR-006 Amendment 9 s1); the residual's trigger is the first published
+# RQMC/control-variate number.
 
 **No new estimator, pricer, or payoff abstraction.** This module reuses `price`,
 `price_from_bundle`, `price_rqmc`, `vanilla_control`, `estimate_beta`, `RunManifest`, `git_sha`,
