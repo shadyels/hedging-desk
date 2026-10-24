@@ -307,8 +307,8 @@ than it (the minimum across books).
 
 ### 12. `exo.health`
 
-1 s heartbeat. `ok` is false when EXO is NATS-disconnected, refusing to publish (dirty tree), or has any book
-halted. `detail` keys:
+1 s heartbeat. `ok` is false when EXO is NATS-disconnected, refusing to publish (dirty tree), has any book
+halted, or has any book whose latest valuation attempt failed (§15). `detail` keys:
 - `git_sha`;
 - `publish` (`enabled` or `refused: dirty tree …`);
 - `book.<id>.state` (`awaiting_snapshot` | `awaiting_marks` | `publishing` | `halted:recon` | `halted:no-snapshot`);
@@ -347,6 +347,18 @@ Consumers treat every string and repeated field as untrusted display data.
   only for universe instruments × the three limited Greeks. Alerts for other instruments are logged and not
   stored, so the map is bounded by configuration, not by message content.
 - **Payload size.** `deploy/nats.conf` sets `max_payload: 1MB`. That is the server default, now stated explicitly.
+
+### 15. Revaluation pacing and failure (EXO)
+
+A book is revalued at most once per `[valuation] min_revaluation_gap_s` (default 1 s), measured from the end of
+its previous job on the monotonic clock, and later marks coalesce. A job running longer than `job_timeout_s`
+(default 30 s) is fatal: EXO reports `ok=false` once and exits, because a hung worker cannot be reclaimed safely,
+and the restart re-bootstraps under §8. A job that fails publishes nothing and is retried on the next changed
+mark or after `retry_after_s` (default 10 s), whichever is first. While a book's latest attempt has failed, its
+snapshot is **not** republished on the interval timer and `exo.health ok` is false. Delta One's §3 staleness
+therefore raises WARN instead of a stale number masquerading as current. Replay guards reject `sent_ns` more
+than `[bus] max_clock_skew_s` (default 60 s) ahead of local wall time. A band bypass owed by an un-halt (§8) is
+kept until a target publication actually goes out.
 
 ## Consequences
 

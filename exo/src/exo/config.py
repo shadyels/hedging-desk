@@ -40,6 +40,9 @@ class _Section(StrictNumbersModel):
 
 class BusConfig(_Section):
     nats_url: str = Field(min_length=1)
+    max_clock_skew_s: float = Field(
+        gt=0
+    )  # replay guards reject sent_ns this far ahead (ADR-014 s15)
 
 
 class ValuationConfig(_Section):
@@ -48,11 +51,22 @@ class ValuationConfig(_Section):
     refdata: Path
     manifest_dir: Path
     max_job_bytes: int = Field(gt=0)  # load-time memory guard (ADR-006 Amendment 9 s7)
+    min_revaluation_gap_s: float = Field(
+        gt=0
+    )  # per book, from the previous job's END (ADR-014 s15)
+    retry_after_s: float = Field(gt=0)  # a failed book is retried after this, or on a changed mark
+    job_timeout_s: float = Field(gt=0)  # a longer job is FATAL: EXO reports ok=false and exits
 
     @field_validator("book", "refdata", "manifest_dir")
     @classmethod
     def _root_relative(cls, value: Path) -> Path:
         return _resolve(value)
+
+    @model_validator(mode="after")
+    def _retry_not_faster_than_pacing(self) -> Self:
+        if self.retry_after_s < self.min_revaluation_gap_s:
+            raise ValueError("[valuation] retry_after_s must be >= min_revaluation_gap_s")
+        return self
 
 
 class ModelsConfig(_Section):
@@ -91,7 +105,8 @@ class ExoConfig(_Section):
     recon: ReconConfig
     provenance: ProvenanceConfig
     # ponytail: passthrough dicts, lax-mode (bool coerces to a number); nothing reads them in P2.M4.
-    # Upgrade: typed StrictNumbersModel sections when ADR-009's hedger / rho transfer (P4) consumes them.
+    # Upgrade: typed StrictNumbersModel sections when ADR-009's hedger / rho transfer (P4)
+    # consumes them.
     hedger: dict[str, int | float]
     rho_transfer: dict[str, int | float]
 
