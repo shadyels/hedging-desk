@@ -77,8 +77,9 @@ in `text`; it never clears and never goes quiet because data stopped arriving or
      interval republish repeats the same `as_of_ns` and content under a **fresh `msg_id`** (so it passes transport
      dedupe and refreshes receipt time), while a replayed older snapshot is rejected. `as_of_ns` is epoch UTC
      (protocol rule 4), read from EXO's wall clock when the revaluation starts, so it survives an EXO restart. A
-     forged far-future `as_of_ns` locks the genuine EXO out until D1 restarts; B is then invalid and WARN-forced,
-     so the lockout is loud, not silent.
+     forged far-future `as_of_ns` locks the genuine EXO out until D1 restarts; B is then invalid and WARN-forced
+     over its last accepted lines, so the lockout is loud. If the forged snapshot's lines are empty, nothing is
+     floored and the per-reject log line is the only signal (within the §13 suppression ceiling).
 - **Rejection is loud.**
   - Every rejection is logged with the reason, with strings truncated to 256 bytes and Debug-escaped, and counted
     per book (`u64`, printed at shutdown; surfaced on `d1.health` when that exists, P3.M1).

@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use config::TrackerConfig;
+use config::{LimitsConfig, TrackerConfig};
 use cycle::{NettingSession, allocate_fill};
 use d1_analytics::{Sample, TrackerRecord, TrackerWindow, analytics};
 use d1_core::{
@@ -24,16 +24,21 @@ use d1_core::{
     MarketData, Order, OrderStatus, OrderStore, PositionKeeper, Side, Target, TransferRequest,
 };
 use d1_gateway_fix::{FixCallbacks, FixError};
-use d1_gateway_nats::NatsError;
+use d1_gateway_nats::limits::TierOneLimits;
+use d1_gateway_nats::{GatewayConfig, GatewayRings, MarkUpdate, NatsError, PositionUpdate};
 use d1_netting::RefPxPolicy;
 use d1_posttrade::{AuditOrigin, NettingCycleId, PostTradeError, PostTradeEvent, Stamper};
 
 pub use d1_posttrade::PostTradeConfig;
 use d1_refdata::{TrackerBook, Universe};
 
-/// Ring capacity for every `rtrb` ring this binary owns (ADR-013). Generous
-/// for a demo-sized single session, matching `d1-gateway-fix`'s ring sizing.
+/// Ring capacity for every `rtrb` ring this binary owns (ADR-013) except the
+/// position-mirror ring. Generous for a demo-sized single session, matching
+/// `d1-gateway-fix`'s ring sizing.
 pub const RING_CAPACITY: usize = 64;
+/// Capacity of the position-mirror ring (ADR-014 §7): one `PositionUpdate`
+/// per configured book per event, so it needs more headroom than the rest.
+pub const POSITION_RING_CAPACITY: usize = 1024;
 /// Poll/backoff interval for the core thread's drain loop.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
@@ -122,70 +127,94 @@ enum FeedSource {
     TickFile(Vec<FeedTick>),
 }
 
+/// Everything `spawn` needs: the CLI startup order, the FIX/NATS/Kafka
+/// endpoints, the refdata universe and the parsed `d1.toml`. A struct, not a
+/// dozen loose arguments, so adding a knob does not touch every caller.
+pub struct SpawnConfig {
+    /// The CLI-driven startup order (see [`StartupOrder`]). Its
+    /// `book`/`instrument` must be in `book_ids`/`instrument_ids` for the
+    /// order to book anywhere -- the wildcard-target guard in `run_core`
+    /// already handles a pair that isn't configured, so `spawn` does not
+    /// re-validate that here.
+    pub startup: StartupOrder,
+    /// FIX session identity + settings file.
+    pub fix: FixConfig,
+    /// NATS server URL.
+    pub nats_url: String,
+    /// Keeper/market-data book universe (loaded from
+    /// `protocol/refdata/universe.json` via `d1-refdata` by the caller).
+    pub book_ids: Vec<BookId>,
+    /// Keeper/market-data instrument universe.
+    pub instrument_ids: Vec<InstrumentId>,
+    /// Cross reference-price policy (ADR-005 §4), parsed and validated by the
+    /// caller at startup.
+    pub policy: RefPxPolicy,
+    /// Handed whole to the Kafka producer thread, where
+    /// `d1_posttrade::Schemas::encode` resolves `symbol`/`currency` from it,
+    /// separately from `book_ids`/`instrument_ids` above (those feed the
+    /// keeper).
+    pub universe: Universe,
+    /// `d1.toml [tracker]`.
+    pub tracker: TrackerConfig,
+    /// `d1.toml [limits]` (ADR-008 Tier-1 caps).
+    pub limits: LimitsConfig,
+    /// `Some(PostTradeConfig { brokers, registry_url })` spawns the Kafka
+    /// producer thread, `None` skips it entirely -- tests pass `None` since
+    /// they run without a broker; the `posttrade` ring then simply fills and
+    /// the log-and-drop push helper in `run_core` drops harmlessly. Broker and
+    /// registry travel together because a producer that cannot resolve
+    /// Confluent schema ids would publish records no consumer can decode
+    /// (ADR-002), so "Kafka without a registry" is deliberately
+    /// unconstructable.
+    pub posttrade: Option<PostTradeConfig>,
+    /// Selects the golden-file reproducible path: `Stamper::Fixed` (instead of
+    /// `Stamper::Wall`) for ids/timestamps, and `0` feed drift (instead of
+    /// `feed::DRIFT_E9`) so every tick's mid stays pinned at
+    /// `feed::STARTING_PX_E9`. Two independent `Stamper`s are built from this
+    /// one flag -- one for `NettingSession` in the core thread (`cross_id`),
+    /// one moved into the Kafka producer thread
+    /// (`msg_id`/`trade_id`/etc). Their `next` bases are deliberately disjoint
+    /// (core starts at `1_000_000`, the producer at `1`) so a `cross_id` can
+    /// never collide with an unrelated `msg_id` in the golden fixtures -- a
+    /// `grep` for one id space should never spuriously hit the other.
+    pub deterministic: bool,
+    /// Selects the feed source: `None` runs `feed::run_feed_producer` (the
+    /// synthetic random walk), `Some(ticks)` runs
+    /// `feed::run_tick_file_producer` over an already-parsed scenario tick
+    /// file (`crates/d1/src/tickfile.rs`). A pre-parsed `Vec<FeedTick>` rather
+    /// than a `PathBuf`: file/parse errors then become a hard startup error in
+    /// `main.rs` alongside the `universe`/`tracker`/`policy` gates, instead of
+    /// dying silently inside a `JoinHandle<()>`, and it keeps `spawn` itself
+    /// I/O-free. `Some(_)` overrides `deterministic`'s feed drift entirely --
+    /// drift is meaningless when prices come from a file, not a running walk
+    /// -- and `run_core`'s t=0 prime still runs for EVERY instrument
+    /// regardless of feed source, so an instrument the tick file never
+    /// mentions still has a priced quote for crosses to reference.
+    pub feed_ticks: Option<Vec<FeedTick>>,
+}
+
 /// Build the `rtrb` rings (ADR-013) and spawn the core/FIX/NATS/feed
 /// threads. Blocks on nothing itself -- the caller decides how/when to flip
 /// `shutdown` and joins the returned handles. If a Kafka producer thread is
-/// spawned (`posttrade_cfg: Some`), it does NOT share `shutdown` -- see
+/// spawned (`cfg.posttrade: Some`), it does NOT share `shutdown` -- see
 /// `RunHandles::posttrade_shutdown` for the ordered-shutdown contract that
-/// protects the producer's final drain.
-///
-/// `book_ids`/`instrument_ids` are the keeper/market-data universe (P1.M3
-/// slice 1: loaded from `protocol/refdata/universe.json` via `d1-refdata` by
-/// the caller). `startup.book`/`startup.instrument` must be included in
-/// these lists for the startup order to book anywhere -- the wildcard-target
-/// guard in `run_core` already handles a startup pair that isn't configured,
-/// so `spawn` does not re-validate that here.
-///
-/// `universe` is handed whole to the Kafka producer thread (P1.M4 Slice 2):
-/// `d1_posttrade::Schemas::encode` resolves `symbol`/`currency` from it,
-/// separately from `book_ids`/`instrument_ids` above (those feed the keeper).
-/// `posttrade_cfg` is `Some(PostTradeConfig { brokers, registry_url })` to
-/// spawn the producer thread, `None` to skip it entirely -- tests pass `None`
-/// since they run without a broker; the `posttrade` ring then simply fills and
-/// the log-and-drop push helper in `run_core` drops harmlessly. Broker and
-/// registry travel together because a producer that cannot resolve Confluent
-/// schema ids would publish records no consumer can decode (ADR-002), so
-/// "Kafka without a registry" is deliberately unconstructable.
-///
-/// `deterministic` selects the golden-file reproducible path: `Stamper::Fixed`
-/// (instead of `Stamper::Wall`) for ids/timestamps, and `0` feed drift
-/// (instead of `feed::DRIFT_E9`) so every tick's mid stays pinned at
-/// `feed::STARTING_PX_E9`. Two independent `Stamper`s are built from this
-/// one flag -- one for `NettingSession` in the core thread (`cross_id`), one
-/// moved into the Kafka producer thread (`msg_id`/`trade_id`/etc). Their
-/// `next` bases are deliberately disjoint (core starts at `1_000_000`, the
-/// producer at `1`) so a `cross_id` can never collide with an unrelated
-/// `msg_id` in the golden fixtures -- a `grep` for one id space should never
-/// spuriously hit the other.
-///
-/// `feed_ticks` selects the feed source: `None` runs `feed::run_feed_producer`
-/// (today's synthetic random walk, unchanged), `Some(ticks)` runs
-/// `feed::run_tick_file_producer` over an already-parsed scenario tick file
-/// instead (`crates/d1/src/tickfile.rs`). A pre-parsed `Vec<FeedTick>` rather
-/// than a `PathBuf`: file/parse errors then become a hard startup error in
-/// `main.rs` alongside the `universe`/`tracker_cfg`/`policy` gates, instead
-/// of dying silently inside a `JoinHandle<()>`, and it keeps `spawn` itself
-/// I/O-free. `Some(_)` overrides `deterministic`'s feed drift entirely --
-/// drift is meaningless when prices come from a file, not a running walk --
-/// and `run_core`'s t=0 prime still runs for EVERY instrument regardless of
-/// feed source, so an instrument the tick file never mentions still has a
-/// priced quote for crosses to reference.
-#[allow(clippy::too_many_arguments)]
+/// protects the producer's final drain. See [`SpawnConfig`] for each input.
 #[must_use]
-pub fn spawn(
-    startup: StartupOrder,
-    fix_cfg: FixConfig,
-    nats_url: String,
-    book_ids: Vec<BookId>,
-    instrument_ids: Vec<InstrumentId>,
-    policy: RefPxPolicy,
-    universe: Universe,
-    tracker_cfg: TrackerConfig,
-    posttrade_cfg: Option<PostTradeConfig>,
-    deterministic: bool,
-    feed_ticks: Option<Vec<FeedTick>>,
-    shutdown: &Arc<AtomicBool>,
-) -> RunHandles {
+pub fn spawn(cfg: SpawnConfig, shutdown: &Arc<AtomicBool>) -> RunHandles {
+    let SpawnConfig {
+        startup,
+        fix: fix_cfg,
+        nats_url,
+        book_ids,
+        instrument_ids,
+        policy,
+        universe,
+        tracker: tracker_cfg,
+        limits,
+        posttrade: posttrade_cfg,
+        deterministic,
+        feed_ticks,
+    } = cfg;
     let (fix_outbound_tx, fix_outbound_rx) = rtrb::RingBuffer::<Order>::new(RING_CAPACITY);
     let (fix_inbound_tx, fix_inbound_rx) = rtrb::RingBuffer::<ExecEvent>::new(RING_CAPACITY);
     let (target_tx, target_rx) = rtrb::RingBuffer::<Target>::new(RING_CAPACITY);
@@ -197,6 +226,12 @@ pub fn spawn(
     // 9th ring (ADR-010, P1.M5 Slice 2): core -> NATS, one `TrackerRecord`
     // per tracker book per sample.
     let (tracker_tx, tracker_rx) = rtrb::RingBuffer::<TrackerRecord>::new(RING_CAPACITY);
+    // 10th ring (ADR-014 §2): core -> NATS, one `MarkUpdate` per in-universe
+    // feed tick; the gateway throttles and change-detects. 11th ring
+    // (ADR-014 §7): core -> NATS, absolute `PositionUpdate`s.
+    let (mark_tx, mark_rx) = rtrb::RingBuffer::<MarkUpdate>::new(RING_CAPACITY);
+    let (position_tx, position_rx) =
+        rtrb::RingBuffer::<PositionUpdate>::new(POSITION_RING_CAPACITY);
 
     // `next: 1_000_000` -- disjoint from the Kafka producer's `Stamper`
     // below (`next: 1`), see this function's doc comment.
@@ -248,6 +283,23 @@ pub fn spawn(
         })
         .collect();
     let tracker_sampling_interval_s = tracker_cfg.sampling_interval_s;
+    // Cloned before `book_ids`/`instrument_ids` move into the core thread.
+    let gateway_cfg = GatewayConfig {
+        url: nats_url,
+        book_ids: book_ids.clone(),
+        instrument_ids: instrument_ids.clone(),
+        tracker_benchmarks,
+        sampling_interval_s: tracker_sampling_interval_s,
+        limits: TierOneLimits {
+            vega_warn_e9: limits.defaults.vega_warn_e9,
+            vega_hard_e9: limits.defaults.vega_hard_e9,
+            gamma_warn_qty_e2: limits.defaults.gamma_warn_qty_e2,
+            gamma_hard_qty_e2: limits.defaults.gamma_hard_qty_e2,
+            rho_warn_e9: limits.defaults.rho_warn_e9,
+            rho_hard_e9: limits.defaults.rho_hard_e9,
+        },
+        valuation_max_age_s: limits.valuation_max_age_s,
+    };
 
     let core_shutdown = Arc::clone(shutdown);
     let core = thread::spawn(move || {
@@ -262,6 +314,8 @@ pub fn spawn(
             transfer_rx,
             posttrade_tx,
             tracker_tx,
+            mark_tx,
+            position_tx,
             book_ids,
             instrument_ids,
             policy,
@@ -289,14 +343,16 @@ pub fn spawn(
     let nats_shutdown = Arc::clone(shutdown);
     let nats = thread::spawn(move || {
         d1_gateway_nats::run_gateway(
-            &nats_url,
-            target_tx,
-            exec_report_rx,
-            cross_rx,
-            transfer_tx,
-            tracker_rx,
-            tracker_benchmarks,
-            tracker_sampling_interval_s,
+            gateway_cfg,
+            GatewayRings {
+                target_tx,
+                exec_rx: exec_report_rx,
+                cross_rx,
+                transfer_tx,
+                tracker_rx,
+                mark_rx,
+                position_rx,
+            },
             &nats_shutdown,
         )
     });
@@ -394,6 +450,8 @@ fn run_core(
     mut transfer_rx: rtrb::Consumer<TransferRequest>,
     mut posttrade_tx: rtrb::Producer<PostTradeEvent>,
     mut tracker_tx: rtrb::Producer<TrackerRecord>,
+    mut mark_tx: rtrb::Producer<MarkUpdate>,
+    mut position_tx: rtrb::Producer<PositionUpdate>,
     book_ids: Vec<BookId>,
     instrument_ids: Vec<InstrumentId>,
     policy: RefPxPolicy,
@@ -452,6 +510,13 @@ fn run_core(
     let mut next_sample_ns = sampling_interval_ns;
 
     let mut session = NettingSession::new(policy, 2, stamper); // seq 1 is the startup order below
+    // Marks the feed arm could not hand to the gateway (ring full). Counted
+    // with NO I/O on the tick->order path and printed once after the drain
+    // loop.
+    let mut marks_dropped: u64 = 0;
+    // Same for position-mirror updates the ring could not take (no I/O per
+    // event on the core thread).
+    let mut positions_dropped: u64 = 0;
 
     let cl_ord_id = ClOrdId::from_seq(1);
     let order = Order {
@@ -510,6 +575,27 @@ fn run_core(
                     "d1: quote instrument={:?} bid={} ask={} last={}",
                     tick.instrument_id, tick.bid_px_e9, tick.ask_px_e9, tick.last_px_e9
                 );
+                // Republish the mid D1 itself would cross at (ADR-014 §2):
+                // one implementation of the mid rule. `ingest` says "in
+                // universe", not "changed" -- the gateway change-detects, so
+                // this stays a plain push. A mid <= 0 is not a mark.
+                //
+                // ponytail: dropped silently on a full ring -- this is the
+                // tick->order path, so no I/O here, only the counter printed
+                // after the loop. Upgrade: a drop counter in telemetry
+                // (backpressure protocol).
+                let mid_px_e9 = arrival_mid_px_e9(&market_data, tick.instrument_id);
+                if mid_px_e9 > 0
+                    && mark_tx
+                        .push(MarkUpdate {
+                            instrument: tick.instrument_id,
+                            mid_px_e9,
+                            feed_ts_ns: tick.exch_ts_ns,
+                        })
+                        .is_err()
+                {
+                    marks_dropped = marks_dropped.saturating_add(1);
+                }
             }
 
             // Dividend credit (P1.M5 Slice 2): rides the same tick stream as
@@ -713,6 +799,13 @@ fn run_core(
                                     );
                                 }
                             }
+                            positions_dropped = positions_dropped.saturating_add(push_positions(
+                                &mut position_tx,
+                                &keeper,
+                                &session,
+                                target.instrument,
+                                &book_ids,
+                            ));
                         }
                         Err(err) => eprintln!("d1: netting cycle error: {err}"),
                     }
@@ -782,6 +875,13 @@ fn run_core(
                         record.cross_id
                     );
                 }
+                positions_dropped = positions_dropped.saturating_add(push_positions(
+                    &mut position_tx,
+                    &keeper,
+                    &session,
+                    transfer.instrument,
+                    &book_ids,
+                ));
             } else {
                 eprintln!(
                     "d1: transfer not booked (overflow) instrument={:?} from_book={:?} to_book={:?} qty_e2={} -- not published",
@@ -861,6 +961,36 @@ fn run_core(
                                         "d1: parent fill allocated book={book:?} instrument={instrument:?} qty_e2={qty_e2} px_e9={}",
                                         fill.px_e9
                                     );
+                                    // Per-book allocation report (ADR-014 §5),
+                                    // only for an allocation that BOOKED, so
+                                    // EXO never counts a fill D1 did not.
+                                    // Pushed before the parent's book-0 report
+                                    // below, on the same ring, so it publishes
+                                    // first.
+                                    //
+                                    // ponytail: carries the PARENT's
+                                    // status/cum/leaves and no allocation
+                                    // flag -- no per-book cumulative until
+                                    // P3.M1's blotter needs one.
+                                    if let Some(order) = current {
+                                        let report = ExecReport {
+                                            cl_ord_id: event.cl_ord_id,
+                                            exec_id: event.exec_id,
+                                            book,
+                                            instrument,
+                                            side,
+                                            status: order.status,
+                                            last_qty_e2: qty_e2,
+                                            last_px_e9: fill.px_e9,
+                                            cum_qty_e2: order.cum_qty_e2,
+                                            leaves_qty_e2: order.leaves_qty_e2,
+                                        };
+                                        if exec_report_tx.push(report).is_err() {
+                                            eprintln!(
+                                                "d1: NATS outbound ring full, dropping allocation ExecutionReport book={book:?}"
+                                            );
+                                        }
+                                    }
                                     push_posttrade(
                                         &mut posttrade_tx,
                                         posttrade::allocation_event(
@@ -1004,6 +1134,26 @@ fn run_core(
                             "d1: apply_exec succeeded but order is gone from the store, ExecutionReport not published"
                         ),
                     }
+                    // Fills move positions and inflight. Refresh the mirror
+                    // for this instrument on every applied exec.
+                    //
+                    // ponytail: a terminal (rejected/cancelled/expired)
+                    // netting parent is never retired from
+                    // `NettingSession::inflight` -- the session has no API to
+                    // retire a parent (`cycle.rs` `parent_mut`/`inflight`) --
+                    // so its unfilled share stays in inflight forever. That
+                    // distorts netting demand and, now, the published
+                    // `PositionSnapshot.inflight_qty_e2`. Pre-existing; upgrade:
+                    // retire the parent on a terminal ExecType.
+                    if let Some(order) = current {
+                        positions_dropped = positions_dropped.saturating_add(push_positions(
+                            &mut position_tx,
+                            &keeper,
+                            &session,
+                            order.instrument,
+                            &book_ids,
+                        ));
+                    }
                 }
                 Err(err) => eprintln!("d1: apply_exec error: {err}"),
             }
@@ -1012,6 +1162,15 @@ fn run_core(
         if !did_work {
             thread::sleep(POLL_INTERVAL);
         }
+    }
+
+    if positions_dropped > 0 {
+        eprintln!(
+            "d1: {positions_dropped} position update(s) dropped (ring full) during this session"
+        );
+    }
+    if marks_dropped > 0 {
+        eprintln!("d1: {marks_dropped} mark update(s) dropped (ring full) during this session");
     }
 
     // P1.M5 Slice 3 (ADR-010 §4): emit exactly one Kafka
@@ -1066,6 +1225,54 @@ fn push_posttrade(tx: &mut rtrb::Producer<PostTradeEvent>, event: PostTradeEvent
     if tx.push(event).is_err() {
         eprintln!("d1: posttrade ring full, dropping post-trade event");
     }
+}
+
+/// Push one absolute `PositionUpdate` per configured book for `instrument`
+/// (ADR-014 §7). Called after every core arm that can change a position or
+/// inflight on that instrument. Values are absolute, so a later update heals
+/// a dropped one. Returns how many updates the ring could not take; the caller
+/// counts them (no per-event I/O on the core thread) and prints the total once
+/// after the loop.
+///
+/// ponytail: a drop is counted, not resynced -- a full ring leaves the mirror
+/// stale until the next event on that instrument. The ring is sized 1024 to
+/// make that unlikely, not impossible. Upgrade: re-push the whole book when
+/// the counter is non-zero (the values are absolute, so one pass heals it),
+/// or the backpressure protocol.
+#[must_use]
+fn push_positions(
+    tx: &mut rtrb::Producer<PositionUpdate>,
+    keeper: &PositionKeeper,
+    session: &NettingSession,
+    instrument: InstrumentId,
+    book_ids: &[BookId],
+) -> u64 {
+    let mut dropped = 0u64;
+    for &book in book_ids {
+        let Some(position) = keeper.position(book, instrument) else {
+            continue; // not in this process's universe: nothing to mirror
+        };
+        let inflight_qty_e2 = match session.inflight(instrument, book) {
+            Ok(inflight) => inflight,
+            Err(err) => {
+                eprintln!(
+                    "d1: position mirror skipped book={book:?} instrument={instrument:?}: inflight {err}"
+                );
+                continue;
+            }
+        };
+        let update = PositionUpdate {
+            book,
+            instrument,
+            qty_e2: position.net_qty_e2,
+            avg_px_e9: position.avg_px_e9,
+            inflight_qty_e2,
+        };
+        if tx.push(update).is_err() {
+            dropped = dropped.saturating_add(1);
+        }
+    }
+    dropped
 }
 
 /// Cross/order reference price for a netting cycle (ADR-005 §4 default:
@@ -1299,5 +1506,55 @@ mod tests {
         assert!(arrival_mid_px_e9(&md, zero) <= 0);
         assert!(arrival_mid_px_e9(&md, never) <= 0); // never ticked -> 0
         assert!(arrival_mid_px_e9(&md, good) > 0);
+    }
+
+    /// ADR-014 §7: one absolute update per configured book, carrying the
+    /// keeper's position and the session's SIGNED inflight; an instrument
+    /// outside the universe pushes nothing.
+    #[test]
+    #[allow(clippy::unwrap_used)] // tests: unwrap_used/expect_used are hot-path-only bans (delta-one/CLAUDE.md)
+    fn push_positions_mirrors_keeper_position_and_signed_inflight() {
+        let (b1, b2, aapl) = (BookId(1), BookId(2), InstrumentId(1001));
+        let mut keeper = PositionKeeper::new(&[b1, b2], &[aapl]);
+        keeper
+            .apply_fill(b1, aapl, Side::Buy, 100, 150_000_000_000)
+            .unwrap();
+        let mut session = NettingSession::new(RefPxPolicy::ArrivalMid, 1, Stamper::Wall);
+        // Book 2 targets -1000: a Sell parent, so its inflight is NEGATIVE.
+        let target = Target {
+            book: b2,
+            instrument: aapl,
+            target_qty_e2: -1_000,
+            band_e2: 0,
+        };
+        session
+            .on_target(target, &mut keeper, 150_000_000_000)
+            .unwrap();
+
+        let (mut tx, mut rx) = rtrb::RingBuffer::<PositionUpdate>::new(8);
+        assert_eq!(
+            push_positions(&mut tx, &keeper, &session, aapl, &[b1, b2]),
+            0
+        );
+        let u1 = rx.pop().unwrap();
+        let u2 = rx.pop().unwrap();
+        assert!(rx.pop().is_err());
+        assert_eq!(
+            (u1.book, u1.qty_e2, u1.avg_px_e9),
+            (b1, 100, 150_000_000_000)
+        );
+        assert_eq!(u1.inflight_qty_e2, 0);
+        assert_eq!((u2.book, u2.qty_e2, u2.inflight_qty_e2), (b2, 0, -1_000));
+
+        let none = push_positions(&mut tx, &keeper, &session, InstrumentId(9999), &[b1, b2]);
+        assert_eq!(none, 0);
+        assert!(rx.pop().is_err(), "unconfigured instrument pushes nothing");
+
+        // A full ring drops and COUNTS (no I/O): capacity 1, two books -> 1 dropped.
+        let (mut tiny_tx, _tiny_rx) = rtrb::RingBuffer::<PositionUpdate>::new(1);
+        assert_eq!(
+            push_positions(&mut tiny_tx, &keeper, &session, aapl, &[b1, b2]),
+            1
+        );
     }
 }

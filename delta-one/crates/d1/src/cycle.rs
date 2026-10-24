@@ -372,7 +372,7 @@ impl NettingSession {
     /// `checked_*` throughout, matching `on_target`'s own overflow
     /// discipline: a saturated inflight would silently distort demand
     /// instead of surfacing `NettingError::Overflow` at the trust boundary.
-    fn inflight(&self, instrument: InstrumentId, book: BookId) -> Result<i64, NettingError> {
+    pub fn inflight(&self, instrument: InstrumentId, book: BookId) -> Result<i64, NettingError> {
         let mut total = 0i64;
         for parent in self.parents.values() {
             if parent.instrument != instrument {

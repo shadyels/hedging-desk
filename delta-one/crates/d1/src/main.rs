@@ -15,13 +15,13 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use d1::{FixConfig, PostTradeConfig, StartupOrder, spawn};
+use d1::{FixConfig, PostTradeConfig, SpawnConfig, StartupOrder, spawn};
 use d1_core::{BookId, InstrumentId, Side};
 
 /// Relative to `delta-one/`, this binary's cwd -- same convention as
 /// `DEFAULT_UNIVERSE` below, one level shallower since `d1.toml` lives
-/// directly in `delta-one/`. No `--config` CLI flag (YAGNI,
-/// `crates/d1/src/config.rs`'s own doc comment).
+/// directly in `delta-one/`. Override with `--config <path>` (for example
+/// `d1.scenario.toml`).
 const DEFAULT_D1_CONFIG: &str = "d1.toml";
 
 /// Must match `crates/d1-gateway-fix/initiator.cfg`'s `[SESSION]` block.
@@ -39,9 +39,19 @@ const DEFAULT_SCHEMA_REGISTRY: &str = "http://localhost:8081";
 const DEFAULT_UNIVERSE: &str = "../protocol/refdata/universe.json";
 const MAIN_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
+/// `--cfg` and `--config` are easy to swap: they take different file formats.
+const USAGE: &str = "usage: d1 --book <id> --instrument <id> --side buy|sell --qty <e2> [options]
+  --cfg <path>      FIX initiator settings (QuickFIX .cfg, NOT TOML); default crates/d1-gateway-fix/initiator.cfg
+  --config <path>   Delta One TOML ([tracker], [limits]); default d1.toml (e.g. d1.scenario.toml)
+  --px <e9>  --nats-url <url>  --universe <path>  --kafka-brokers <addr>  --schema-registry <url>
+  --feed-ticks <path>";
+
 struct Args {
     startup: StartupOrder,
     cfg: PathBuf,
+    /// `d1.toml`-shaped config (`[tracker]`, `[limits]`); distinct from `cfg`,
+    /// the FIX initiator settings.
+    config: PathBuf,
     nats_url: String,
     universe: PathBuf,
     kafka_brokers: String,
@@ -55,11 +65,10 @@ fn main() -> Result<()> {
     let args = parse_args()?;
 
     let universe = d1_refdata::load(&args.universe).context("loading universe refdata")?;
-    // Hard startup error on a missing file or missing `[tracker]` section
+    // Hard startup error on a missing file or missing `[tracker]`/`[limits]` section
     // (`crates/d1/src/config.rs`'s own doc comment) -- same fail-loud
     // posture as the policy gate below, never a silent sampling default.
-    let tracker_cfg =
-        d1::config::load(std::path::Path::new(DEFAULT_D1_CONFIG)).context("loading d1 config")?;
+    let d1_cfg = d1::config::load(&args.config).context("loading d1 config")?;
     // ADR-005 §4: the cross reference-price policy is compliance-visible and
     // must never be a silent default. Parse it at startup so a typo in refdata
     // kills the process here rather than mispricing internal risk transfers.
@@ -113,32 +122,35 @@ fn main() -> Result<()> {
     let book_ids = universe.book_ids.clone();
     let instrument_ids = universe.instrument_ids.clone();
     let handles = spawn(
-        args.startup,
-        FixConfig {
-            settings_path: args.cfg,
-            sender_comp_id: SENDER_COMP_ID.to_string(),
-            target_comp_id: TARGET_COMP_ID.to_string(),
+        SpawnConfig {
+            startup: args.startup,
+            fix: FixConfig {
+                settings_path: args.cfg,
+                sender_comp_id: SENDER_COMP_ID.to_string(),
+                target_comp_id: TARGET_COMP_ID.to_string(),
+            },
+            nats_url: args.nats_url,
+            book_ids,
+            instrument_ids,
+            policy,
+            universe,
+            tracker: d1_cfg.tracker,
+            limits: d1_cfg.limits,
+            posttrade: Some(PostTradeConfig {
+                brokers: args.kafka_brokers,
+                registry_url: args.schema_registry,
+            }),
+            // Deterministic/`Stamper::Fixed` mode is a test-only seam
+            // (`SpawnConfig::deterministic`, driven directly by
+            // `tests/golden_posttrade.rs`) -- deliberately not exposed as a
+            // CLI flag on this production binary. Fixed ids restart from 1 on
+            // every process start, which would collide with a prior session's
+            // `msg_id`s in any consumer that dedupes across restarts (root
+            // invariant #4), and `FIXED_BOOKED_NS` would stamp every record
+            // with the same fabricated timestamp on the compliance ledger.
+            deterministic: false,
+            feed_ticks,
         },
-        args.nats_url,
-        book_ids,
-        instrument_ids,
-        policy,
-        universe,
-        tracker_cfg,
-        Some(PostTradeConfig {
-            brokers: args.kafka_brokers,
-            registry_url: args.schema_registry,
-        }),
-        // Deterministic/`Stamper::Fixed` mode is a test-only seam
-        // (`d1::spawn`'s `deterministic` param, driven directly by
-        // `tests/golden_posttrade.rs`) -- deliberately not exposed as a CLI
-        // flag on this production binary. Fixed ids restart from 1 on every
-        // process start, which would collide with a prior session's
-        // `msg_id`s in any consumer that dedupes across restarts (root
-        // invariant #4), and `FIXED_BOOKED_NS` would stamp every record with
-        // the same fabricated timestamp on the compliance ledger.
-        false,
-        feed_ticks,
         &shutdown,
     );
 
@@ -194,6 +206,7 @@ fn parse_args() -> Result<Args> {
     let mut qty_e2: Option<i64> = None;
     let mut px_e9: i64 = 0;
     let mut cfg = PathBuf::from(DEFAULT_INITIATOR_CFG);
+    let mut config = PathBuf::from(DEFAULT_D1_CONFIG);
     let mut nats_url = DEFAULT_NATS_URL.to_string();
     let mut universe = PathBuf::from(DEFAULT_UNIVERSE);
     let mut kafka_brokers = DEFAULT_KAFKA_BROKERS.to_string();
@@ -241,7 +254,12 @@ fn parse_args() -> Result<Args> {
                     bail!("--px must be >= 0 (0 = market), got {px_e9}");
                 }
             }
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                std::process::exit(0);
+            }
             "--cfg" => cfg = PathBuf::from(next_arg(&mut args, "--cfg")?),
+            "--config" => config = PathBuf::from(next_arg(&mut args, "--config")?),
             "--nats-url" => nats_url = next_arg(&mut args, "--nats-url")?,
             "--universe" => universe = PathBuf::from(next_arg(&mut args, "--universe")?),
             "--kafka-brokers" => kafka_brokers = next_arg(&mut args, "--kafka-brokers")?,
@@ -264,6 +282,7 @@ fn parse_args() -> Result<Args> {
             px_e9,
         },
         cfg,
+        config,
         nats_url,
         universe,
         kafka_brokers,
