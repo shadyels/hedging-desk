@@ -35,7 +35,7 @@ Pinned threads connected by bounded SPSC rings; gateways on separate runtimes:
 ```
 [feed ingest] → [position/risk] → [netting] → [order emit] → (ring) → FIX gateway
       │                │                                        │
-      └──(rings, off-path)──▶ NATS gateway (targets in, exec/risk out)
+      └──(rings, off-path)──▶ NATS gateway (targets and valuations in; exec/risk, marks, positions and limit alerts out)
                                         └──▶ Kafka producer (post-trade)
 ```
 
@@ -75,7 +75,7 @@ Per-Greek treatment ladder (full rationale and sources in ADR-008): **delta** is
 
 ## Demo storyline (implemented as a `sim/` scenario)
 
-1. Underlying gaps down through an autocall barrier.
+1. The underlying gaps down from the structured product's autocall trigger (100% of initial, 187.50) to 176.00, below its 95% coupon barrier (178.125). Every barrier on the note is observed on its quarterly schedule only (the 70% protection barrier at maturity), so nothing knocks in at the gap: it reprices the observation-date coupon and autocall digitals, and the note's delta jumps (+58% in the illustrative book).
 2. EXO revalues; structured-product book delta jumps; publishes new targets.
 3. Delta One nets EXO demand against tracker-book demand → explicit internal cross (booked, visible in UI blotter) + small external residual.
 4. Residual executes over FIX against the sim acceptor; fills allocate pro-rata; post-trade events land in Kafka.

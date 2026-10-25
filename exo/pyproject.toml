@@ -56,7 +56,12 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Dump every thread's stack if one test runs > 120 s (a non-yielding async regression hangs, not fails).
+faulthandler_timeout = 120
 testpaths = ["tests"]
+markers = [
+  "infra: needs `just up` (NATS on 127.0.0.1:4222); auto-skipped when the broker is unreachable, so CI never runs it",
+]
 
 [build-system]
 requires = ["hatchling"]

@@ -197,17 +197,14 @@ pub fn net(
     // ADR-005 §2 puts the band on the *instrument*, but no such refdata
     // field exists (`protocol/refdata/universe.json` has none); docs/ROADMAP.md:12
     // says it comes from `TargetPosition.band_qty_e2`, per-book and
-    // per-message — what this engine implements; exo/CLAUDE.md:30 says that
-    // wire field is merely informational (display, "why a target moved"),
-    // not authoritative for trading decisions. ADR-005 §2's wording likely
-    // needs an amendment to reconcile these three sources. Until then, `min`
-    // is chosen because an over-wide band is a **risk** failure (the hedge
-    // silently doesn't happen) while an over-tight one is only a bounded
+    // per-message — what this engine implements. Provenance resolved by
+    // ADR-005's 2026-10-24 amendment (ADR-014 §11): the per-target band is
+    // authoritative. `min` is chosen because an over-wide band is a **risk**
+    // failure (the hedge silently doesn't happen) while an over-tight one is only a bounded
     // **cost** failure (extra spread); `min` is never wider than the
     // principled per-book-indifference rule, so it can only over-trade, not
-    // skip a needed trade. Upgrade path: once band provenance is resolved,
-    // replace with whatever the instrument-level (or reconciled) rule turns
-    // out to be.
+    // skip a needed trade. Upgrade path: the per-book-indifference rule, if
+    // over-trading cost ever matters.
     let mut band_e2: Option<i64> = None;
     for d in demands {
         if d.demand_e2 != 0 {

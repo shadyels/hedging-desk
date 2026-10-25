@@ -102,8 +102,13 @@ export interface ExecutionReport {
   meta: Meta | undefined;
   clOrdId: string;
   execId: string;
-  /** 0 = firm-level parent order pre-allocation */
+  /** 0 = firm-level netting parent (pre-allocation); != 0 on a netting parent's */
   bookId: number;
+  /**
+   * cl_ord_id = one per-book ALLOCATION report (last_qty_e2 = this book's share;
+   * status/cum/leaves are the PARENT's), ADR-014 §5. Fill consumers dedupe on
+   * (exec_id, book_id).
+   */
   instrument: InstrumentRef | undefined;
   side: Side;
   status: OrdStatus;
@@ -167,11 +172,20 @@ export interface RiskLimitAlert {
   meta: Meta | undefined;
   underlying: InstrumentRef | undefined;
   greek: RiskLimitAlert_Greek;
-  /** current firm-level exposure (vega/rho: ccy; gamma: qty_e2 semantics noted in text) */
+  /** firm exposure for VEGA/RHO (ccy*1e9); 0 for GAMMA (see value_qty_e2) */
   valueE9: bigint;
+  /** VEGA/RHO limit crossed (ccy*1e9); 0 for GAMMA */
   limitE9: bigint;
   /** false = warning threshold, true = hard limit */
   breached: boolean;
+  /** GAMMA only: firm dDelta per +1% spot, qty_e2 (ADR-014 §4) */
+  valueQtyE2: bigint;
+  /** GAMMA only: limit crossed, qty_e2 */
+  limitQtyE2: bigint;
+  /** human-readable, with units; for display, never parsed */
+  text: string;
+  /** true = exposure back inside warn (level OK); breached is then false */
+  cleared: boolean;
 }
 
 export enum RiskLimitAlert_Greek {
@@ -217,6 +231,18 @@ export function riskLimitAlert_GreekToJSON(object: RiskLimitAlert_Greek): string
     default:
       return "UNRECOGNIZED";
   }
+}
+
+/** Delta One -> EXO / UI: marks (ADR-014 §2). Subject d1.marks.<instrument>. */
+export interface MarkPrice {
+  meta: Meta | undefined;
+  instrument:
+    | InstrumentRef
+    | undefined;
+  /** Delta One's arrival mid (cross reference price rule), > 0 */
+  midPxE9: bigint;
+  /** D1 feed clock: ns since feed-session start, NOT epoch -- declared exception */
+  feedTsNs: bigint;
 }
 
 export interface InternalCrossNotice {
@@ -340,8 +366,11 @@ export interface ValuationSnapshot_ProductLine {
   pvE9: bigint;
   /** MC standard error; mandatory (exo/CLAUDE.md rule 6) */
   pvStdErrE9: bigint;
+  /** desk-position dPV/dS, units of underlying x1e2 (ADR-014 §9) */
   deltaQtyE2: bigint;
+  /** ccy per +1 vol point (0.01; sqrt(v0), sqrt(theta) together) */
   vegaE9: bigint;
+  /** dDelta per +1% spot, qty_e2 */
   gammaQtyE2: bigint;
   /** ccy per +1bp parallel rate shift */
   rhoE9: bigint;
@@ -349,6 +378,19 @@ export interface ValuationSnapshot_ProductLine {
   thetaE9: bigint;
   /** ccy per +1% absolute div-yield change */
   divSensE9: bigint;
+  /** MC standard errors (exo/CLAUDE.md rule 6), same units as the Greek */
+  deltaStdErrQtyE2: bigint;
+  vegaStdErrE9: bigint;
+  gammaStdErrQtyE2: bigint;
+  rhoStdErrE9: bigint;
+  thetaStdErrE9: bigint;
+  divSensStdErrE9: bigint;
+  /** FX_SPOT underlyings: ccy per +1bp foreign (base-ccy) rate, q := r_f */
+  rhoForeignE9: bigint;
+  /** (ADR-006 A8 s1, A9 s4); 0 otherwise */
+  rhoForeignStdErrE9: bigint;
+  /** names whose SE > max_rel_std_error*|value| ("delta","gamma",...) */
+  flaggedGreeks: string[];
 }
 
 export interface InternalTransferRequest {
@@ -467,6 +509,7 @@ export interface Tick {
   bidPxE9: bigint;
   askPxE9: bigint;
   lastPxE9: bigint;
+  /** ponytail: clock undecided (epoch vs feed-session, cf. MarkPrice.feed_ts_ns, ADR-014 s2); first sim Tick publisher decides */
   exchTsNs: bigint;
 }
 
@@ -1520,7 +1563,18 @@ export const RiskSnapshot_NetGreeks: MessageFns<RiskSnapshot_NetGreeks> = {
 };
 
 function createBaseRiskLimitAlert(): RiskLimitAlert {
-  return { meta: undefined, underlying: undefined, greek: 0, valueE9: 0n, limitE9: 0n, breached: false };
+  return {
+    meta: undefined,
+    underlying: undefined,
+    greek: 0,
+    valueE9: 0n,
+    limitE9: 0n,
+    breached: false,
+    valueQtyE2: 0n,
+    limitQtyE2: 0n,
+    text: "",
+    cleared: false,
+  };
 }
 
 export const RiskLimitAlert: MessageFns<RiskLimitAlert> = {
@@ -1548,6 +1602,24 @@ export const RiskLimitAlert: MessageFns<RiskLimitAlert> = {
     }
     if (message.breached !== false) {
       writer.uint32(48).bool(message.breached);
+    }
+    if (message.valueQtyE2 !== 0n) {
+      if (BigInt.asIntN(64, message.valueQtyE2) !== message.valueQtyE2) {
+        throw new globalThis.Error("value provided for field message.valueQtyE2 of type sint64 too large");
+      }
+      writer.uint32(56).sint64(message.valueQtyE2);
+    }
+    if (message.limitQtyE2 !== 0n) {
+      if (BigInt.asIntN(64, message.limitQtyE2) !== message.limitQtyE2) {
+        throw new globalThis.Error("value provided for field message.limitQtyE2 of type sint64 too large");
+      }
+      writer.uint32(64).sint64(message.limitQtyE2);
+    }
+    if (message.text !== "") {
+      writer.uint32(74).string(message.text);
+    }
+    if (message.cleared !== false) {
+      writer.uint32(80).bool(message.cleared);
     }
     return writer;
   },
@@ -1607,6 +1679,38 @@ export const RiskLimitAlert: MessageFns<RiskLimitAlert> = {
           message.breached = reader.bool();
           continue;
         }
+        case 7: {
+          if (tag !== 56) {
+            break;
+          }
+
+          message.valueQtyE2 = reader.sint64() as bigint;
+          continue;
+        }
+        case 8: {
+          if (tag !== 64) {
+            break;
+          }
+
+          message.limitQtyE2 = reader.sint64() as bigint;
+          continue;
+        }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.text = reader.string();
+          continue;
+        }
+        case 10: {
+          if (tag !== 80) {
+            break;
+          }
+
+          message.cleared = reader.bool();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1624,6 +1728,18 @@ export const RiskLimitAlert: MessageFns<RiskLimitAlert> = {
       valueE9: isSet(object.valueE9) ? BigInt(object.valueE9) : isSet(object.value_e9) ? BigInt(object.value_e9) : 0n,
       limitE9: isSet(object.limitE9) ? BigInt(object.limitE9) : isSet(object.limit_e9) ? BigInt(object.limit_e9) : 0n,
       breached: isSet(object.breached) ? globalThis.Boolean(object.breached) : false,
+      valueQtyE2: isSet(object.valueQtyE2)
+        ? BigInt(object.valueQtyE2)
+        : isSet(object.value_qty_e2)
+        ? BigInt(object.value_qty_e2)
+        : 0n,
+      limitQtyE2: isSet(object.limitQtyE2)
+        ? BigInt(object.limitQtyE2)
+        : isSet(object.limit_qty_e2)
+        ? BigInt(object.limit_qty_e2)
+        : 0n,
+      text: isSet(object.text) ? globalThis.String(object.text) : "",
+      cleared: isSet(object.cleared) ? globalThis.Boolean(object.cleared) : false,
     };
   },
 
@@ -1647,6 +1763,18 @@ export const RiskLimitAlert: MessageFns<RiskLimitAlert> = {
     if (message.breached !== false) {
       obj.breached = message.breached;
     }
+    if (message.valueQtyE2 !== 0n) {
+      obj.valueQtyE2 = message.valueQtyE2.toString();
+    }
+    if (message.limitQtyE2 !== 0n) {
+      obj.limitQtyE2 = message.limitQtyE2.toString();
+    }
+    if (message.text !== "") {
+      obj.text = message.text;
+    }
+    if (message.cleared !== false) {
+      obj.cleared = message.cleared;
+    }
     return obj;
   },
 
@@ -1663,6 +1791,134 @@ export const RiskLimitAlert: MessageFns<RiskLimitAlert> = {
     message.valueE9 = (object.valueE9 !== undefined && object.valueE9 !== null) ? BigInt(object.valueE9) : 0n;
     message.limitE9 = (object.limitE9 !== undefined && object.limitE9 !== null) ? BigInt(object.limitE9) : 0n;
     message.breached = object.breached ?? false;
+    message.valueQtyE2 = (object.valueQtyE2 !== undefined && object.valueQtyE2 !== null)
+      ? BigInt(object.valueQtyE2)
+      : 0n;
+    message.limitQtyE2 = (object.limitQtyE2 !== undefined && object.limitQtyE2 !== null)
+      ? BigInt(object.limitQtyE2)
+      : 0n;
+    message.text = object.text ?? "";
+    message.cleared = object.cleared ?? false;
+    return message;
+  },
+};
+
+function createBaseMarkPrice(): MarkPrice {
+  return { meta: undefined, instrument: undefined, midPxE9: 0n, feedTsNs: 0n };
+}
+
+export const MarkPrice: MessageFns<MarkPrice> = {
+  encode(message: MarkPrice, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.meta !== undefined) {
+      Meta.encode(message.meta, writer.uint32(10).fork()).join();
+    }
+    if (message.instrument !== undefined) {
+      InstrumentRef.encode(message.instrument, writer.uint32(18).fork()).join();
+    }
+    if (message.midPxE9 !== 0n) {
+      if (BigInt.asIntN(64, message.midPxE9) !== message.midPxE9) {
+        throw new globalThis.Error("value provided for field message.midPxE9 of type sint64 too large");
+      }
+      writer.uint32(24).sint64(message.midPxE9);
+    }
+    if (message.feedTsNs !== 0n) {
+      if (BigInt.asUintN(64, message.feedTsNs) !== message.feedTsNs) {
+        throw new globalThis.Error("value provided for field message.feedTsNs of type uint64 too large");
+      }
+      writer.uint32(32).uint64(message.feedTsNs);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): MarkPrice {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMarkPrice();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.meta = Meta.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.instrument = InstrumentRef.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.midPxE9 = reader.sint64() as bigint;
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.feedTsNs = reader.uint64() as bigint;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): MarkPrice {
+    return {
+      meta: isSet(object.meta) ? Meta.fromJSON(object.meta) : undefined,
+      instrument: isSet(object.instrument) ? InstrumentRef.fromJSON(object.instrument) : undefined,
+      midPxE9: isSet(object.midPxE9) ? BigInt(object.midPxE9) : isSet(object.mid_px_e9) ? BigInt(object.mid_px_e9) : 0n,
+      feedTsNs: isSet(object.feedTsNs)
+        ? BigInt(object.feedTsNs)
+        : isSet(object.feed_ts_ns)
+        ? BigInt(object.feed_ts_ns)
+        : 0n,
+    };
+  },
+
+  toJSON(message: MarkPrice): unknown {
+    const obj: any = {};
+    if (message.meta !== undefined) {
+      obj.meta = Meta.toJSON(message.meta);
+    }
+    if (message.instrument !== undefined) {
+      obj.instrument = InstrumentRef.toJSON(message.instrument);
+    }
+    if (message.midPxE9 !== 0n) {
+      obj.midPxE9 = message.midPxE9.toString();
+    }
+    if (message.feedTsNs !== 0n) {
+      obj.feedTsNs = message.feedTsNs.toString();
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<MarkPrice>, I>>(base?: I): MarkPrice {
+    return MarkPrice.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<MarkPrice>, I>>(object: I): MarkPrice {
+    const message = createBaseMarkPrice();
+    message.meta = (object.meta !== undefined && object.meta !== null) ? Meta.fromPartial(object.meta) : undefined;
+    message.instrument = (object.instrument !== undefined && object.instrument !== null)
+      ? InstrumentRef.fromPartial(object.instrument)
+      : undefined;
+    message.midPxE9 = (object.midPxE9 !== undefined && object.midPxE9 !== null) ? BigInt(object.midPxE9) : 0n;
+    message.feedTsNs = (object.feedTsNs !== undefined && object.feedTsNs !== null) ? BigInt(object.feedTsNs) : 0n;
     return message;
   },
 };
@@ -2744,6 +3000,15 @@ function createBaseValuationSnapshot_ProductLine(): ValuationSnapshot_ProductLin
     rhoE9: 0n,
     thetaE9: 0n,
     divSensE9: 0n,
+    deltaStdErrQtyE2: 0n,
+    vegaStdErrE9: 0n,
+    gammaStdErrQtyE2: 0n,
+    rhoStdErrE9: 0n,
+    thetaStdErrE9: 0n,
+    divSensStdErrE9: 0n,
+    rhoForeignE9: 0n,
+    rhoForeignStdErrE9: 0n,
+    flaggedGreeks: [],
   };
 }
 
@@ -2805,6 +3070,57 @@ export const ValuationSnapshot_ProductLine: MessageFns<ValuationSnapshot_Product
         throw new globalThis.Error("value provided for field message.divSensE9 of type sint64 too large");
       }
       writer.uint32(88).sint64(message.divSensE9);
+    }
+    if (message.deltaStdErrQtyE2 !== 0n) {
+      if (BigInt.asIntN(64, message.deltaStdErrQtyE2) !== message.deltaStdErrQtyE2) {
+        throw new globalThis.Error("value provided for field message.deltaStdErrQtyE2 of type sint64 too large");
+      }
+      writer.uint32(96).sint64(message.deltaStdErrQtyE2);
+    }
+    if (message.vegaStdErrE9 !== 0n) {
+      if (BigInt.asIntN(64, message.vegaStdErrE9) !== message.vegaStdErrE9) {
+        throw new globalThis.Error("value provided for field message.vegaStdErrE9 of type sint64 too large");
+      }
+      writer.uint32(104).sint64(message.vegaStdErrE9);
+    }
+    if (message.gammaStdErrQtyE2 !== 0n) {
+      if (BigInt.asIntN(64, message.gammaStdErrQtyE2) !== message.gammaStdErrQtyE2) {
+        throw new globalThis.Error("value provided for field message.gammaStdErrQtyE2 of type sint64 too large");
+      }
+      writer.uint32(112).sint64(message.gammaStdErrQtyE2);
+    }
+    if (message.rhoStdErrE9 !== 0n) {
+      if (BigInt.asIntN(64, message.rhoStdErrE9) !== message.rhoStdErrE9) {
+        throw new globalThis.Error("value provided for field message.rhoStdErrE9 of type sint64 too large");
+      }
+      writer.uint32(120).sint64(message.rhoStdErrE9);
+    }
+    if (message.thetaStdErrE9 !== 0n) {
+      if (BigInt.asIntN(64, message.thetaStdErrE9) !== message.thetaStdErrE9) {
+        throw new globalThis.Error("value provided for field message.thetaStdErrE9 of type sint64 too large");
+      }
+      writer.uint32(128).sint64(message.thetaStdErrE9);
+    }
+    if (message.divSensStdErrE9 !== 0n) {
+      if (BigInt.asIntN(64, message.divSensStdErrE9) !== message.divSensStdErrE9) {
+        throw new globalThis.Error("value provided for field message.divSensStdErrE9 of type sint64 too large");
+      }
+      writer.uint32(136).sint64(message.divSensStdErrE9);
+    }
+    if (message.rhoForeignE9 !== 0n) {
+      if (BigInt.asIntN(64, message.rhoForeignE9) !== message.rhoForeignE9) {
+        throw new globalThis.Error("value provided for field message.rhoForeignE9 of type sint64 too large");
+      }
+      writer.uint32(144).sint64(message.rhoForeignE9);
+    }
+    if (message.rhoForeignStdErrE9 !== 0n) {
+      if (BigInt.asIntN(64, message.rhoForeignStdErrE9) !== message.rhoForeignStdErrE9) {
+        throw new globalThis.Error("value provided for field message.rhoForeignStdErrE9 of type sint64 too large");
+      }
+      writer.uint32(152).sint64(message.rhoForeignStdErrE9);
+    }
+    for (const v of message.flaggedGreeks) {
+      writer.uint32(162).string(v!);
     }
     return writer;
   },
@@ -2904,6 +3220,78 @@ export const ValuationSnapshot_ProductLine: MessageFns<ValuationSnapshot_Product
           message.divSensE9 = reader.sint64() as bigint;
           continue;
         }
+        case 12: {
+          if (tag !== 96) {
+            break;
+          }
+
+          message.deltaStdErrQtyE2 = reader.sint64() as bigint;
+          continue;
+        }
+        case 13: {
+          if (tag !== 104) {
+            break;
+          }
+
+          message.vegaStdErrE9 = reader.sint64() as bigint;
+          continue;
+        }
+        case 14: {
+          if (tag !== 112) {
+            break;
+          }
+
+          message.gammaStdErrQtyE2 = reader.sint64() as bigint;
+          continue;
+        }
+        case 15: {
+          if (tag !== 120) {
+            break;
+          }
+
+          message.rhoStdErrE9 = reader.sint64() as bigint;
+          continue;
+        }
+        case 16: {
+          if (tag !== 128) {
+            break;
+          }
+
+          message.thetaStdErrE9 = reader.sint64() as bigint;
+          continue;
+        }
+        case 17: {
+          if (tag !== 136) {
+            break;
+          }
+
+          message.divSensStdErrE9 = reader.sint64() as bigint;
+          continue;
+        }
+        case 18: {
+          if (tag !== 144) {
+            break;
+          }
+
+          message.rhoForeignE9 = reader.sint64() as bigint;
+          continue;
+        }
+        case 19: {
+          if (tag !== 152) {
+            break;
+          }
+
+          message.rhoForeignStdErrE9 = reader.sint64() as bigint;
+          continue;
+        }
+        case 20: {
+          if (tag !== 162) {
+            break;
+          }
+
+          message.flaggedGreeks.push(reader.string());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2950,6 +3338,51 @@ export const ValuationSnapshot_ProductLine: MessageFns<ValuationSnapshot_Product
         : isSet(object.div_sens_e9)
         ? BigInt(object.div_sens_e9)
         : 0n,
+      deltaStdErrQtyE2: isSet(object.deltaStdErrQtyE2)
+        ? BigInt(object.deltaStdErrQtyE2)
+        : isSet(object.delta_std_err_qty_e2)
+        ? BigInt(object.delta_std_err_qty_e2)
+        : 0n,
+      vegaStdErrE9: isSet(object.vegaStdErrE9)
+        ? BigInt(object.vegaStdErrE9)
+        : isSet(object.vega_std_err_e9)
+        ? BigInt(object.vega_std_err_e9)
+        : 0n,
+      gammaStdErrQtyE2: isSet(object.gammaStdErrQtyE2)
+        ? BigInt(object.gammaStdErrQtyE2)
+        : isSet(object.gamma_std_err_qty_e2)
+        ? BigInt(object.gamma_std_err_qty_e2)
+        : 0n,
+      rhoStdErrE9: isSet(object.rhoStdErrE9)
+        ? BigInt(object.rhoStdErrE9)
+        : isSet(object.rho_std_err_e9)
+        ? BigInt(object.rho_std_err_e9)
+        : 0n,
+      thetaStdErrE9: isSet(object.thetaStdErrE9)
+        ? BigInt(object.thetaStdErrE9)
+        : isSet(object.theta_std_err_e9)
+        ? BigInt(object.theta_std_err_e9)
+        : 0n,
+      divSensStdErrE9: isSet(object.divSensStdErrE9)
+        ? BigInt(object.divSensStdErrE9)
+        : isSet(object.div_sens_std_err_e9)
+        ? BigInt(object.div_sens_std_err_e9)
+        : 0n,
+      rhoForeignE9: isSet(object.rhoForeignE9)
+        ? BigInt(object.rhoForeignE9)
+        : isSet(object.rho_foreign_e9)
+        ? BigInt(object.rho_foreign_e9)
+        : 0n,
+      rhoForeignStdErrE9: isSet(object.rhoForeignStdErrE9)
+        ? BigInt(object.rhoForeignStdErrE9)
+        : isSet(object.rho_foreign_std_err_e9)
+        ? BigInt(object.rho_foreign_std_err_e9)
+        : 0n,
+      flaggedGreeks: globalThis.Array.isArray(object?.flaggedGreeks)
+        ? object.flaggedGreeks.map((e: any) => globalThis.String(e))
+        : globalThis.Array.isArray(object?.flagged_greeks)
+        ? object.flagged_greeks.map((e: any) => globalThis.String(e))
+        : [],
     };
   },
 
@@ -2988,6 +3421,33 @@ export const ValuationSnapshot_ProductLine: MessageFns<ValuationSnapshot_Product
     if (message.divSensE9 !== 0n) {
       obj.divSensE9 = message.divSensE9.toString();
     }
+    if (message.deltaStdErrQtyE2 !== 0n) {
+      obj.deltaStdErrQtyE2 = message.deltaStdErrQtyE2.toString();
+    }
+    if (message.vegaStdErrE9 !== 0n) {
+      obj.vegaStdErrE9 = message.vegaStdErrE9.toString();
+    }
+    if (message.gammaStdErrQtyE2 !== 0n) {
+      obj.gammaStdErrQtyE2 = message.gammaStdErrQtyE2.toString();
+    }
+    if (message.rhoStdErrE9 !== 0n) {
+      obj.rhoStdErrE9 = message.rhoStdErrE9.toString();
+    }
+    if (message.thetaStdErrE9 !== 0n) {
+      obj.thetaStdErrE9 = message.thetaStdErrE9.toString();
+    }
+    if (message.divSensStdErrE9 !== 0n) {
+      obj.divSensStdErrE9 = message.divSensStdErrE9.toString();
+    }
+    if (message.rhoForeignE9 !== 0n) {
+      obj.rhoForeignE9 = message.rhoForeignE9.toString();
+    }
+    if (message.rhoForeignStdErrE9 !== 0n) {
+      obj.rhoForeignStdErrE9 = message.rhoForeignStdErrE9.toString();
+    }
+    if (message.flaggedGreeks?.length) {
+      obj.flaggedGreeks = message.flaggedGreeks;
+    }
     return obj;
   },
 
@@ -3017,6 +3477,31 @@ export const ValuationSnapshot_ProductLine: MessageFns<ValuationSnapshot_Product
     message.rhoE9 = (object.rhoE9 !== undefined && object.rhoE9 !== null) ? BigInt(object.rhoE9) : 0n;
     message.thetaE9 = (object.thetaE9 !== undefined && object.thetaE9 !== null) ? BigInt(object.thetaE9) : 0n;
     message.divSensE9 = (object.divSensE9 !== undefined && object.divSensE9 !== null) ? BigInt(object.divSensE9) : 0n;
+    message.deltaStdErrQtyE2 = (object.deltaStdErrQtyE2 !== undefined && object.deltaStdErrQtyE2 !== null)
+      ? BigInt(object.deltaStdErrQtyE2)
+      : 0n;
+    message.vegaStdErrE9 = (object.vegaStdErrE9 !== undefined && object.vegaStdErrE9 !== null)
+      ? BigInt(object.vegaStdErrE9)
+      : 0n;
+    message.gammaStdErrQtyE2 = (object.gammaStdErrQtyE2 !== undefined && object.gammaStdErrQtyE2 !== null)
+      ? BigInt(object.gammaStdErrQtyE2)
+      : 0n;
+    message.rhoStdErrE9 = (object.rhoStdErrE9 !== undefined && object.rhoStdErrE9 !== null)
+      ? BigInt(object.rhoStdErrE9)
+      : 0n;
+    message.thetaStdErrE9 = (object.thetaStdErrE9 !== undefined && object.thetaStdErrE9 !== null)
+      ? BigInt(object.thetaStdErrE9)
+      : 0n;
+    message.divSensStdErrE9 = (object.divSensStdErrE9 !== undefined && object.divSensStdErrE9 !== null)
+      ? BigInt(object.divSensStdErrE9)
+      : 0n;
+    message.rhoForeignE9 = (object.rhoForeignE9 !== undefined && object.rhoForeignE9 !== null)
+      ? BigInt(object.rhoForeignE9)
+      : 0n;
+    message.rhoForeignStdErrE9 = (object.rhoForeignStdErrE9 !== undefined && object.rhoForeignStdErrE9 !== null)
+      ? BigInt(object.rhoForeignStdErrE9)
+      : 0n;
+    message.flaggedGreeks = object.flaggedGreeks?.map((e) => e) || [];
     return message;
   },
 };

@@ -2,9 +2,8 @@
 
 `price_from_bundle` exists so several products can share one simulated `PathBundle` -- the
 same trick `studies/scheme_convergence.py` already uses for multi-strike pricing under one
-bundle -- which is what P2.M4's portfolio revaluation will need, and what this slice's own G4
-companion test uses to compare CONTINUOUS_BRIDGE vs DISCRETE monitoring on perfectly-correlated
-paths.
+bundle, and what the G4 companion test uses to compare CONTINUOUS_BRIDGE vs DISCRETE monitoring
+on perfectly-correlated paths. (P2.M4's book revaluation does NOT share bundles: one per product.)
 
 # ponytail (P2-4, P2.M1 slice 2): discounting is flat at one scalar rate, no term structure.
 # Ceiling: any product whose cashflow dates span enough of the curve is priced at a slightly
@@ -54,9 +53,10 @@ def price_from_bundle(
     # ponytail: `beta` is supplied from outside, never fitted on the priced sample, and
     # carries no degrees-of-freedom correction (none is valid under RQMC -- see
     # `estimate_beta`'s docstring). Ceiling: beta is only as good as whatever produced it --
-    # a poor beta costs variance, never bias. Upgrade: a larger pilot sample. TRIGGER FIRED
-    # (ADR-006 Amendment 6 §6: CV ratio 1.15x barrier/AAPL, 0.89x barrier/MSFT under RQMC),
-    # owner P2.M4.
+    # a poor beta costs variance, never bias. Upgrade: a larger pilot sample. Trigger: the first
+    # published control-variate number (ADR-006 Amendment 6 §6 measured CV ratio 1.15x
+    # barrier/AAPL, 0.89x barrier/MSFT under RQMC; P2.M4 publishes no control variate,
+    # Amendment 9 s1).
 
     Requires `bundle.t[-1] == payoff.expiry` EXACTLY, for the same reason `price()` requires
     `engine.expiry == payoff.expiry` exactly (see `price()`'s docstring) -- `bundle.t[-1]` is
@@ -67,12 +67,10 @@ def price_from_bundle(
     (not the bundle's last column), so a caller that calls `payoff.cashflows(bundle, r=...)`
     directly, bypassing this guard, is still priced correctly.
 
-    # ponytail (P2-8, P2.M1 slice 2): the exact `bundle.t[-1] != payoff.expiry` guard means this
-    # function cannot price a shorter-dated payoff against a shared longer bundle -- the use
-    # case this docstring's opening paragraph advertises for P2.M4's portfolio revaluation.
-    # Every current shorter-dated caller must bypass `price_from_bundle` and call
-    # `discount(payoff.cashflows(bundle, r=...), r=...)` directly. Trigger: P2.M4, whose portfolio
-    # revaluation decides whether to relax this guard. See docs/PONYTAIL-DEBT.md.
+    The guard is KEPT (decided, ADR-006 Amendment 9 s7): P2.M4's revaluation gives every product
+    its own bundle with `expiry = payoff.expiry` (`greeks/bump.py`), so the shared-bundle,
+    shorter-dated case never arises. A caller that does share a longer bundle must bypass this
+    function and call `discount(payoff.cashflows(bundle, r=...), r=...)` directly.
     """
     if bundle.t[-1] != payoff.expiry:
         raise ValueError(
@@ -118,7 +116,9 @@ def price(
 
 
 # ponytail: the low-bias tag lives only in this type. Ceiling: `ProductLine` has no field for it,
-# so the tag is lost at the wire. Trigger: P2.M4/P3, when EXO first publishes.
+# so the tag is lost at the wire; P2.M4 therefore refuses to load an American warrant (ADR-006
+# Amendment 9 s7). Trigger: the first American warrant in the persisted book, which needs an
+# additive `ProductLine` low-bias field. Owner undecided.
 @dataclass(frozen=True)
 class LowerBoundPriceResult:
     """An LSM price: a LOWER BOUND in expectation on the (Bermudan-on-the-grid) American value.
@@ -164,7 +164,8 @@ def price_american(
             "against the wrong contract horizon."
         )
     # ponytail: pseudo-random sources only. Ceiling: no RQMC variance reduction for American
-    # warrants. Trigger: P2.M4 RQMC American pricing (fixed external policy per ADR-006 A7 §2).
+    # warrants. Trigger: the first published RQMC number (fixed external policy per ADR-006 A7 §2;
+    # P2.M4 publishes pseudo-random + antithetic and loads no American warrant).
     if rng.low_discrepancy or pilot_rng.low_discrepancy:
         raise NotImplementedError(
             "price_american does not support low-discrepancy (RQMC) sources: RQMC American "

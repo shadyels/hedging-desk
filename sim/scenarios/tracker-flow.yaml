@@ -1,34 +1,40 @@
-# Flagship demo scenario (docs/ARCHITECTURE.md "Demo storyline").
-# Deterministic: same seed => byte-identical posttrade Kafka output (golden-file e2e test).
+# Flagship demo scenario (docs/ARCHITECTURE.md "Demo storyline"; ADR-014 s10).
+# Drives the storyline test (crates/d1/tests/storyline.rs) and `just d1-scenario`. Deterministic feed:
+# the same file always expands to the same ticks. (The posttrade golden files come from
+# golden_posttrade.rs's own scripted flow, not from this scenario.)
+# Subjects are numeric canonical ids (ADR-014 s1): EXO-SP = book 3, D1-CORE = book 1, AAPL = 1001.
+# An `expect:` entry's at_ms is its DEADLINE; its trigger is the last preceding non-quote action
+# (heartbeat quotes never trigger). Heartbeat quotes keep tracker sampling and marks flowing.
 scenario: tracker-flow
 seed: 42
 universe: ../../protocol/refdata/universe.json
 timeline:
-  - at_ms: 0
-    action: quote
-    instrument: AAPL
-    bid: 187.50
-    ask: 187.52
-  - at_ms: 1000
-    action: exo_book_event          # EXO portfolio loads: autocallable book short delta
-    book: EXO-SP
-    note: "structured product book initialised"
-  - at_ms: 5000
-    action: gap
-    instrument: AAPL
-    to_mid: 176.00                  # gaps through autocall barrier proximity zone
-  - at_ms: 5100
-    expect: exo_targets_republished # EXO delta jumps, new targets on exo.targets.EXO-SP.AAPL
-  - at_ms: 5200
-    expect: internal_cross          # netting: D1-CORE demand vs EXO-SP demand -> explicit cross
-  - at_ms: 5300
-    expect: external_residual_order # residual NewOrderSingle over FIX to sim acceptor
-  - at_ms: 9000
-    action: dividend               # feeds per-book cash -> cash drag (ADR-010)
-    instrument: AAPL
-    amount_per_share: 0.25
-  - at_ms: 15000
-    expect: tracker_analytics      # d1.tracker.D1-CORE publishes TE/TD/cash-drag
+  - {at_ms: 0, action: quote, instrument: AAPL, bid: 187.50, ask: 187.52}
+  - {at_ms: 2000, action: quote, instrument: AAPL, bid: 187.50, ask: 187.52}   # heartbeat
+  - {at_ms: 4000, action: quote, instrument: AAPL, bid: 187.50, ask: 187.52}
+  - {at_ms: 6000, action: quote, instrument: AAPL, bid: 187.50, ask: 187.52}
+  - {at_ms: 8000, action: quote, instrument: AAPL, bid: 187.50, ask: 187.52}
+  - {at_ms: 10000, action: quote, instrument: AAPL, bid: 187.50, ask: 187.52}
+  - {at_ms: 10000, action: exo_book_event, book: EXO-SP, note: "structured product book initialised"}   # checkpoint: valuation + initial hedge filled
+  - {at_ms: 11000, action: tracker_flow, book: D1-CORE, instrument: AAPL, target_qty: 10000, band_qty: 10000,
+     note: "index redemption: sell 10,000 AAPL, held for internal liquidity within band"}
+  - {at_ms: 12000, action: gap, instrument: AAPL, to_mid: 176.00}   # from the autocall trigger (100%) to below the 95% coupon barrier
+  - {at_ms: 14000, action: quote, instrument: AAPL, bid: 176.00, ask: 176.00}
+  - {at_ms: 16000, action: quote, instrument: AAPL, bid: 176.00, ask: 176.00}
+  - {at_ms: 18000, action: quote, instrument: AAPL, bid: 176.00, ask: 176.00}
+  - {at_ms: 20000, action: quote, instrument: AAPL, bid: 176.00, ask: 176.00}
+  - {at_ms: 22000, action: quote, instrument: AAPL, bid: 176.00, ask: 176.00}
+  - {at_ms: 24000, expect: exo_targets_republished}   # exo.targets.3.1001, |dtarget| > band
+  - {at_ms: 24000, expect: internal_cross}            # d1.crosses: buy 3 / sell 1 on 1001
+  - {at_ms: 24000, expect: external_residual_order}   # new parent on d1.exec.0.1001 for the residual
+  - {at_ms: 25000, action: dividend, instrument: AAPL, amount_per_share: 0.25}   # feeds per-book cash (ADR-010); ex-div tick 175.75
+  - {at_ms: 26000, action: quote, instrument: AAPL, bid: 175.75, ask: 175.75}
+  - {at_ms: 28000, action: quote, instrument: AAPL, bid: 175.75, ask: 175.75}
+  - {at_ms: 30000, action: quote, instrument: AAPL, bid: 175.75, ask: 175.75}
+  - {at_ms: 30000, expect: tracker_analytics}         # d1.tracker.1, window_end_ns >= 25e9
+# Parsed by nobody: sim ignores this block. The acceptor's fill model comes from its CLI
+# (`--fill-model partial`, which splits each order into 2 fills); slices/latency_ms/reject_rate
+# here are documentation of intent only.
 fill_model:
   mode: partial
   slices: 3

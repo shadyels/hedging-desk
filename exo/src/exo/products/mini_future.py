@@ -39,8 +39,10 @@ beyond `F_i`). Every residual is then provably non-negative (in the long sign; f
 A negative residual arises only when `F` has overtaken the level in force -- the guard's regime.
 
 # ponytail: no dividend pass-through into F (real issuers lower the financing level on ex-div).
-# Ceiling: with q > 0 the PV carries the holder's dividend leakage unhedged by F. Trigger:
-# P2.M4 dividend sensitivity (div_sens). See docs/PONYTAIL-DEBT.md.
+# Ceiling: with q > 0 the PV carries the holder's dividend leakage unhedged by F. P2.M4 does not
+# load mini futures (a static term sheet cannot age the accruing financing level, so theta is
+# undefined; ADR-006 Amendment 9 s7). Trigger: the first mini future in the persisted book.
+# Owner undecided. See docs/PONYTAIL-DEBT.md.
 # ponytail: no settlement lag (the residual is paid at the stop-out date). Ceiling: ignores the
 # few days a real issuer takes to unwind the hedge. Trigger: first real term sheet.
 # ponytail: stop-out is dated at the END of the grid step it falls in, not at the crossing time

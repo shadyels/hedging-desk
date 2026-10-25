@@ -1,11 +1,18 @@
 # EXO service configuration (single source; no env-var spelunking — exo/CLAUDE.md).
 [bus]
 nats_url = "nats://localhost:4222"
+max_clock_skew_s = 60              # replay guards reject sent_ns more than this ahead of local time (ADR-014 s15)
 
 [valuation]
-revaluation_interval_s = 5
-default_n_paths = 200_000
-seed_manifest = "run-manifests/"   # seeds come from manifests, never from time
+# Relative paths resolve against the EXO project root (exo/), not the CWD or this file's directory.
+revaluation_interval_s = 5          # interval REPUBLISH cadence of the last snapshot (no reprice; ADR-014 s9)
+book = "book.toml"                  # persisted product book; seed and n_paths live there per book
+refdata = "../protocol/refdata/universe.json"
+manifest_dir = "run-manifests/live/"   # one RunManifest per real revaluation; git-ignored
+max_job_bytes = 1_000_000_000       # load-time memory guard per Greek job (ADR-006 Amendment 9 s7)
+min_revaluation_gap_s = 1.0         # per book, measured from the previous job's end; marks coalesce (ADR-014 s15)
+retry_after_s = 10                  # a failed book retries after this, or on a changed mark (>= min gap)
+job_timeout_s = 30                  # a longer job is fatal: ok=false once, then exit non-zero (ADR-014 s15)
 
 [models]
 scheme = "qe"              # discretization scheme; set by docs/studies/p2m1-scheme-convergence.md
@@ -96,9 +103,21 @@ rho = -0.20
 band_equity_qty_e2 = 50_000
 band_fx_qty_e2 = 1_000_000
 
+[recon]
+tolerance_qty_e2 = 0       # |EXO ledger - D1 snapshot| above this is a divergence (ADR-014 s8)
+grace_ms = 1500            # a divergence must persist this long before the book halts
+max_snapshot_gap_ms = 5000 # no accepted PositionSnapshot for this long halts the book (no-snapshot)
+
+[provenance]
+allow_dirty = false        # true: publish numbers stamped "<sha>-dirty" (ADR-006 Amendment 9 s6)
+
 [greeks]
-bump_spot_rel = 0.001
-bump_vol_abs = 0.005
+# ADR-006 Amendment 9 s2. Absolute bumps are in the model's own units (vol, rate, yield: decimals).
+bump_spot_rel = 0.01       # relative: h_S = 0.01 * mark (desk lead, 2026-10-24)
+bump_vol_abs = 0.005       # on sqrt(v0) and sqrt(theta) together; must be < min(sqrt(v0), sqrt(theta))
+bump_rate_abs = 0.001      # on r
+bump_div_abs = 0.001       # on q (equity dividend yield, or FX foreign rate -- Amendment 9 s4)
+theta_days_per_year = 365  # EXO configuration, not a market convention (Amendment 9 s2)
 max_rel_std_error = 0.02   # Greeks above this SE are published flagged, never silently
 
 [hedger]                 # Tier-2 optimizer (ADR-009); desk-visible, never hardcoded

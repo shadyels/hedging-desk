@@ -54,6 +54,15 @@ pub enum RefdataError {
         /// The unresolvable benchmark symbol.
         symbol: String,
     },
+    /// Two books share a `code`. Scenario YAML names books by code, so a
+    /// silent last-wins would book a scripted flow into the wrong book.
+    #[error("universe refdata at {path:?}: book code {code:?} is used by more than one book")]
+    DuplicateBookCode {
+        /// Path with the duplicate.
+        path: PathBuf,
+        /// The repeated book code.
+        code: String,
+    },
     /// A benchmark constituent is not in the `instruments` universe, so it
     /// would have no `MarketData` slot and therefore no price to compute a
     /// return from — same fail-loud posture as `UnknownBenchmark`.
@@ -127,6 +136,10 @@ pub enum RefdataError {
 #[derive(Debug, Deserialize)]
 struct BookDef {
     book_id: u32,
+    /// Desk code (`D1-CORE`, `EXO-SP`, ...), the name scenario YAML uses.
+    /// Optional here (inline test fixtures omit it); `universe.json` always has it.
+    #[serde(default)]
+    code: Option<String>,
     /// Present only on tracker books; absent books simply have no analytics.
     #[serde(default)]
     benchmark_symbol: Option<String>,
@@ -212,6 +225,8 @@ pub struct Universe {
     /// post-trade encoding (`d1-posttrade::convert`) to resolve the wire
     /// `symbol` field from the id-only ring payload.
     pub id_to_symbol: HashMap<InstrumentId, String>,
+    /// Book code -> book id, for scenario YAML (which names books by code).
+    pub book_code_to_id: HashMap<String, BookId>,
     /// Instrument id -> settlement currency. Used by post-trade encoding
     /// (`d1-posttrade::convert`) to resolve the wire `currency` field from
     /// the id-only ring payload.
@@ -260,6 +275,19 @@ fn parse(path: &Path, raw: &str) -> Result<Universe, RefdataError> {
     }
 
     let book_ids = parsed.books.iter().map(|b| BookId(b.book_id)).collect();
+    let mut book_code_to_id = HashMap::new();
+    for b in &parsed.books {
+        let Some(code) = &b.code else { continue };
+        if book_code_to_id
+            .insert(code.clone(), BookId(b.book_id))
+            .is_some()
+        {
+            return Err(RefdataError::DuplicateBookCode {
+                path: path.to_path_buf(),
+                code: code.clone(),
+            });
+        }
+    }
     let instrument_ids = parsed
         .instruments
         .iter()
@@ -361,6 +389,7 @@ fn parse(path: &Path, raw: &str) -> Result<Universe, RefdataError> {
         cash_yield_annual_e9,
         symbol_to_id,
         id_to_symbol,
+        book_code_to_id,
         id_to_currency,
         cross_px_policy,
         venue_counterparty,
@@ -407,6 +436,26 @@ mod tests {
             universe.id_to_currency.get(&InstrumentId(1003)).cloned(),
             Some("CHF".to_string())
         );
+    }
+
+    #[test]
+    fn book_codes_resolve_to_ids() {
+        let universe = load(&universe_path()).unwrap();
+        assert_eq!(universe.book_code_to_id.get("D1-CORE"), Some(&BookId(1)));
+        assert_eq!(universe.book_code_to_id.get("EXO-SP"), Some(&BookId(3)));
+    }
+
+    #[test]
+    fn duplicate_book_code_is_an_error() {
+        let raw = r#"{
+            "books": [{"book_id": 1, "code": "A"}, {"book_id": 2, "code": "A"}],
+            "instruments": [{"instrument_id": 1001, "symbol": "AAPL", "currency": "USD"}],
+            "conventions": {"cross_px_policy_default": "ARRIVAL_MID", "venue_counterparty_default": "SIM", "cash_yield_annual_e9_DEMO_PLACEHOLDER": 40000000}
+        }"#;
+        assert!(matches!(
+            parse(Path::new("test.json"), raw).unwrap_err(),
+            RefdataError::DuplicateBookCode { ref code, .. } if code == "A"
+        ));
     }
 
     #[test]

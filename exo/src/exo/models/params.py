@@ -6,8 +6,8 @@ rules: these are LOADED, VALIDATED config, not internal value objects computed b
 the engine. Every model here is immutable (`frozen=True`) once constructed and
 rejects unknown keys (`extra="forbid"`, P2 code review 2026-09-06): without it, a
 typo'd `exo.toml` key (e.g. `rh0 = -0.7` instead of `rho = -0.7`) is silently
-DROPPED rather than raising -- the ponytail in `load_models_section` below covers
-only unrecognized SYMBOL sections, not typo'd keys within a recognized one.
+DROPPED rather than raising. (Unrecognized SYMBOL sections are caught separately, against the
+refdata universe, by `exo.config.load_config`.)
 """
 
 from __future__ import annotations
@@ -20,7 +20,27 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 Scheme = Literal["qe", "euler-ft"]
 
 
-class HestonParams(BaseModel):
+class StrictNumbersModel(BaseModel):
+    """Base for LOADED config models: a field annotated `int` or `float` rejects `bool` and `str`
+    input. Pydantic's lax mode would otherwise turn `theta_days_per_year = true` into 1.0 and
+    `max_job_bytes = "1000"` into 1000. A TOML int for a float field is still accepted (so this is
+    not `StrictFloat`). Fields of other types (`StrictBool`, `Path`, nested models) are untouched.
+    """
+
+    @model_validator(mode="before")
+    @classmethod
+    def _numbers_are_numbers(cls, data: object) -> object:
+        if isinstance(data, Mapping):
+            for name, field in cls.model_fields.items():
+                value = data.get(name)
+                if field.annotation in (int, float) and isinstance(value, bool | str):
+                    raise ValueError(
+                        f"{name}: expected a number, got {type(value).__name__} {value!r}"
+                    )
+        return data
+
+
+class HestonParams(StrictNumbersModel):
     """Heston (1993) model parameters for a single underlying.
 
     s0: spot. r, q: continuously-compounded risk-free rate and dividend yield
@@ -29,12 +49,11 @@ class HestonParams(BaseModel):
     rho: spot/variance correlation.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    # `allow_inf_nan=False` (ADR-006 Amendment 9 s7): NaN/Inf are rejected at construction, and
+    # `mc_estimate` independently raises on a non-finite PV/SE, so a bumped parameter built in
+    # code cannot reach the wire as a NaN `pv_e9`.
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
-    # ponytail: `r`/`q` are unconstrained and `s0` is only `gt=0`, so NaN/Inf can reach
-    # `mc_estimate`, which has no finiteness check -- `price()` then returns a NaN PV for payoffs
-    # that do not read `r`. Trigger: P2.M4, where bump-and-revalue first builds params in code
-    # and a PV first reaches the wire as `pv_e9`.
     s0: float = Field(gt=0)
     r: float
     q: float
@@ -52,7 +71,7 @@ class HestonParams(BaseModel):
         return 2.0 * self.kappa * self.theta / self.xi**2
 
 
-class EngineConfig(BaseModel):
+class EngineConfig(StrictNumbersModel):
     """Monte Carlo engine settings for one `simulate()` call."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -72,7 +91,7 @@ class EngineConfig(BaseModel):
         return self
 
 
-class ModelDefaults(BaseModel):
+class ModelDefaults(StrictNumbersModel):
     """The flat keys of `exo.toml`'s `[models]` table: engine defaults shared
     across underlyings, before any per-underlying `[models.<SYMBOL>]` override."""
 
@@ -92,12 +111,10 @@ def load_models_section(
     flat keys are engine defaults; each `Mapping`-valued key is a per-underlying
     `[models.<SYMBOL>]` subtable.
 
-    ponytail: subtable keys (the `<SYMBOL>` in `[models.<SYMBOL>]`) are not
-    cross-checked against `protocol/refdata/universe.json`, so a typo in exo.toml
-    (e.g. `[models.APPL]`) parses cleanly into a silently-unused HestonParams entry
-    that nothing in this slice ever looks up. Ceiling: no refdata cross-check.
-    Trigger: P2.M4, when ValuationSnapshot needs InstrumentRef (id, class, currency)
-    from refdata anyway — validate symbols against it there.
+    The subtable keys (the `<SYMBOL>` in `[models.<SYMBOL>]`) are NOT checked against
+    `protocol/refdata/universe.json` here: that cross-check lives in `exo.config.load_config`
+    (ADR-006 Amendment 9 s7), which has the universe in hand. Call this function directly only
+    in a context that does not need it.
     """
     flat = {key: value for key, value in models.items() if not isinstance(value, Mapping)}
     defaults = ModelDefaults.model_validate(flat)

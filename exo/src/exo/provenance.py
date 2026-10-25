@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import tomllib
 from collections.abc import Mapping
@@ -50,6 +51,8 @@ class ProvenanceError(RuntimeError):
 # regardless of the CALLER's current working directory (P1-4, code review 2026-09-06). `git`
 # discovers the repo root by walking UP from here, so this works from any commit depth.
 _PACKAGE_DIR = Path(__file__).resolve().parent
+_SHA_RE = re.compile(r"[0-9a-f]{7,40}(-dirty)?")
+_GIT_TIMEOUT_S = 10
 
 
 def git_sha(*, repo: Path | None = None) -> str:
@@ -73,13 +76,21 @@ def git_sha(*, repo: Path | None = None) -> str:
     `-dirty` case above already worries about. The parameter also makes this testable without
     `monkeypatch.chdir`.
 
-    ponytail: the ceiling here is the "-dirty" suffix itself, not a refusal to price on a dirty
-    tree. Trigger: P2.M4, the first milestone that PUBLISHES a number to the bus -- at that point a
-    dirty-tree number reaching Delta One needs an explicit policy decision, not just an honest
-    label.
+    Dirty-tree POLICY (ADR-006 Amendment 9 s6): this function only labels. Whether a labelled
+    number may be PUBLISHED is `publish_allowed` below: refused by default, allowed under the
+    explicit `exo.toml [provenance] allow_dirty` opt-in, and the suffix is never stripped. An
+    `EXO_GIT_SHA` override that ends in `-dirty` is treated exactly like a computed dirty sha.
     """
     override = os.environ.get("EXO_GIT_SHA")
     if override:
+        # An operator assertion, but it still goes on the wire and through the dirty-tree gate:
+        # strip whitespace (a trailing newline would defeat `endswith("-dirty")`) and require the
+        # shape of a git sha so nothing arbitrary or oversized is published.
+        override = override.strip()
+        if not _SHA_RE.fullmatch(override):
+            raise ProvenanceError(
+                "EXO_GIT_SHA must match [0-9a-f]{7,40}(-dirty)? (after stripping whitespace)"
+            )
         return override
     repo_dir = repo if repo is not None else _PACKAGE_DIR
     try:
@@ -89,6 +100,7 @@ def git_sha(*, repo: Path | None = None) -> str:
             check=True,
             text=True,
             cwd=repo_dir,
+            timeout=_GIT_TIMEOUT_S,
         ).stdout.strip()
         status = subprocess.run(
             ["git", "status", "--porcelain"],
@@ -96,13 +108,31 @@ def git_sha(*, repo: Path | None = None) -> str:
             check=True,
             text=True,
             cwd=repo_dir,
+            timeout=_GIT_TIMEOUT_S,
         ).stdout
-    except (OSError, subprocess.CalledProcessError) as exc:
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         raise ProvenanceError(
-            "no git repository found (via `git rev-parse HEAD`) and EXO_GIT_SHA is not set; "
-            "cannot establish provenance for this run"
+            "no git repository found (via `git rev-parse HEAD`, or git timed out) and "
+            "EXO_GIT_SHA is not set; cannot establish provenance for this run"
         ) from exc
     return f"{sha}-dirty" if status.strip() else sha
+
+
+def publish_allowed(sha: str, allow_dirty: bool) -> bool:
+    """Whether a number stamped with `sha` may reach the bus (ADR-006 Amendment 9 s6).
+
+    A sha ending in `-dirty` (computed, or an `EXO_GIT_SHA` override) is refused unless
+    `allow_dirty`; a clean sha is always allowed. It decides only; it never rewrites the sha.
+    """
+    return allow_dirty or not sha.endswith("-dirty")
+
+
+def publish_status(sha: str, allow_dirty: bool) -> str:
+    """The `exo.health` `detail["publish"]` value (ADR-014 s12, ADR-006 Amendment 9 s6):
+    `"enabled"`, or the refusal reason, derived from `publish_allowed` so they cannot disagree."""
+    if publish_allowed(sha, allow_dirty):
+        return "enabled"
+    return "refused: dirty tree (set [provenance] allow_dirty = true)"
 
 
 def _to_plain(value: object) -> object:
@@ -191,8 +221,23 @@ class EngineSettings:
     v1 manifest's existing meaning of `n_paths` is unchanged.
     """
     bridge_streams: tuple[str, ...] = ()  # stream names bridged, e.g. ("spot",) under QE
+    n_steps_per_year: int | None = None
+    """Book manifests (schema_version 3, ADR-006 Amendment 9 s5): each product's step count is
+    `round(expiry * n_steps_per_year)`, so no single `n_steps` describes the run. A book manifest
+    sets this and writes `n_steps = 0`; every other manifest sets `n_steps > 0` and leaves this
+    `None`. Exactly one of the two must be set."""
 
     def __post_init__(self) -> None:
+        if (self.n_steps > 0) == (self.n_steps_per_year is not None):
+            raise ValueError(
+                "exactly one of n_steps > 0 or n_steps_per_year must be set, got "
+                f"n_steps={self.n_steps}, n_steps_per_year={self.n_steps_per_year}"
+            )
+        if self.n_steps < 0 or (self.n_steps_per_year is not None and self.n_steps_per_year <= 0):
+            raise ValueError(
+                f"n_steps={self.n_steps} / n_steps_per_year={self.n_steps_per_year} must be "
+                "positive when set"
+            )
         if self.sampler not in ("pseudo", "sobol"):
             raise ValueError(f"sampler={self.sampler!r} must be one of ('pseudo', 'sobol')")
         if self.sampler == "sobol" and self.n_replicates is None:
@@ -211,7 +256,8 @@ class RunManifest:
     """A pricing run's full reproducibility record, read from / written to TOML.
 
     Seeds are READ FROM the manifest, never derived from time (exo/CLAUDE.md rule 1). TOML shape
-    (written under `exo/run-manifests/`, matching `exo.toml`'s `seed_manifest` setting)::
+    (studies write under `exo/run-manifests/`; live book revaluations under the git-ignored
+    `exo.toml [valuation] manifest_dir`, `exo/run-manifests/live/`)::
 
         schema_version = 2
         run_id      = "2026-09-05T12-00-00Z-a1b2c3d4"
@@ -236,7 +282,9 @@ class RunManifest:
 
     `schema_version=1` (no `sampler`/`n_replicates`/`bridge_streams` in `[engine]`) still reads;
     `RunManifest.read` fills the three fields with their v1-equivalent defaults. Newly
-    constructed/written manifests default to `schema_version=2`.
+    constructed/written manifests default to `schema_version=2`. `schema_version=3` (P2.M4,
+    ADR-006 Amendment 9 s5) adds `[engine] n_steps_per_year` for book manifests, and is REQUIRED
+    when that key is set; versions 1 and 2 still read.
     """
 
     run_id: str
@@ -256,10 +304,14 @@ class RunManifest:
         # rather than silently reading a future version's fields as if they belonged to a version
         # this reader understands. T7 (schema_version 2): adds sampler/n_replicates/bridge_streams
         # to EngineSettings; version 1 (those three absent/defaulted) still reads.
-        if self.schema_version not in (1, 2):
+        if self.schema_version not in (1, 2, 3):
             raise ValueError(
                 f"unsupported schema_version={self.schema_version}: this reader only "
-                "understands schema_version 1 or 2"
+                "understands schema_version 1, 2 or 3"
+            )
+        if self.engine.n_steps_per_year is not None and self.schema_version < 3:
+            raise ValueError(
+                f"engine.n_steps_per_year needs schema_version 3, got {self.schema_version}"
             )
         # Amendment A4: `seed`/`n_paths` are `uint64`/`uint32` in the proto (common.proto). Reject
         # values that would not fit at manifest construction time, not silently at P2.M4's bus
@@ -288,6 +340,7 @@ class RunManifest:
             sampler=engine_raw.get("sampler", "pseudo"),
             n_replicates=engine_raw.get("n_replicates"),
             bridge_streams=tuple(engine_raw.get("bridge_streams", ())),
+            n_steps_per_year=engine_raw.get("n_steps_per_year"),
         )
         params_raw = raw.get("params", {})
         params = {symbol: dict(values) for symbol, values in params_raw.items()}
@@ -316,6 +369,8 @@ class RunManifest:
         # which `read()`'s `.get("n_replicates")` maps back to `None`.
         if self.engine.n_replicates is not None:
             engine_doc["n_replicates"] = self.engine.n_replicates
+        if self.engine.n_steps_per_year is not None:
+            engine_doc["n_steps_per_year"] = self.engine.n_steps_per_year
         doc: dict[str, object] = {
             "schema_version": self.schema_version,
             "run_id": self.run_id,

@@ -24,11 +24,15 @@ P2.M2's LSM retains exactly one bundle at peak (`price_american` drops its pilot
 the valuation `simulate`): tracemalloc-measured peak/array 4.982, committed as
 `LSM_PEAK_ARRAY_RATIO = 5.2` in `models/memory.py`, so it adds nothing to this ceiling and needs
 no batching at the M2 gate sizes (<= 50k paths x 52 steps).
-Trigger: P2.M4 (RQMC American pricing, production-size portfolio revaluation), or any run that
-needs more paths/steps than fit in memory at once — retain only a declared observation grid, or
-batch paths (see `PriceResult.combine()` in estimator.py, which exists for exactly this;
-`studies/scheme_convergence.py`'s `resolve_batch_plan` is the first consumer and accounts for
-the full measured footprint).
+P2.M4 ENFORCES this ceiling rather than lifting it (ADR-006 Amendment 9 s7): one Greek job
+(ten sequential `simulate()` legs, one bundle alive at a time) was measured at 20_000 paths x 250
+steps as 202 MB for the autocallable (5.04 arrays) and 457 MB for a continuous-bridge product
+(11.4 arrays); `models/memory.py::GREEKS_PEAK_ARRAY_RATIO = 12.0` is checked at book load against
+`[valuation] max_job_bytes`. Owner P4.M5. Trigger: a book entry that guard refuses (enrichment at
+scale), or any run that needs more paths/steps than fit in memory at once — retain only a declared
+observation grid, or batch paths (see `PriceResult.combine()` in estimator.py, which exists for
+exactly this; `studies/scheme_convergence.py`'s `resolve_batch_plan` is the first consumer and
+accounts for the full measured footprint).
 
 Two schemes are implemented:
 

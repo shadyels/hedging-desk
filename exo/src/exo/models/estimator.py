@@ -150,6 +150,10 @@ def mc_estimate(bundle: PathBundle, discounted_payoff: NDArray[np.float64]) -> P
         pv = float(discounted_payoff.mean())
         std_err = float(discounted_payoff.std(ddof=1) / math.sqrt(n_total))
 
+    # A NaN/Inf PV or SE (e.g. a payoff that overflowed, or non-finite bumped parameters) must
+    # never reach the wire as a fixed-point number (ADR-006 Amendment 9 s7).
+    if not (math.isfinite(pv) and math.isfinite(std_err)):
+        raise ValueError(f"mc_estimate produced a non-finite estimate: pv={pv}, std_err={std_err}")
     return PriceResult(pv=pv, std_err=std_err, n_paths=n_total)
 
 
@@ -208,8 +212,9 @@ def rqmc_estimate(replicate_pvs: Sequence[float], *, n_paths_per_replicate: int)
     payoff's tail behaviour. Ceiling: calibration measured in two regimes, differing
     between them (0.48-0.94 at d=4 smooth analytic vs 0.84-1.31 at d~=100 Heston
     barrier/autocallable), and unquantified outside both. Upgrade: a bias-corrected
-    or bootstrap standard error. Trigger: P2.M4 publishing `pv_std_err_e9`, or any
-    new payoff class whose replicate-mean kurtosis has not been measured.
+    or bootstrap standard error. Trigger: the first published RQMC number (P2.M4 publishes
+    pseudo-random + antithetic, ADR-006 Amendment 9 s1), or any new payoff class whose
+    replicate-mean kurtosis has not been measured.
 
     Raises `ValueError` if `R < 8`: below that floor the reported SE is more than 2x
     optimistic (0.482 vs the ~0.85 "usable" region above), which is not a defensible

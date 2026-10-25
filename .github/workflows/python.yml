@@ -12,6 +12,7 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 20  # a hung async test fails the job instead of stalling it
     defaults:
       run:
         working-directory: exo

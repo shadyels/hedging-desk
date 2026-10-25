@@ -48,8 +48,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use apache_avro::Schema;
-use d1::config::TrackerConfig;
-use d1::{FixConfig, PostTradeConfig, StartupOrder, spawn};
+use d1::config::{LimitsConfig, TrackerConfig};
+use d1::{FixConfig, PostTradeConfig, SpawnConfig, StartupOrder, spawn};
 use d1_core::{BookId, InstrumentId, Side};
 use d1_gateway_nats::pb::hedging::common::v1::{InstrumentRef, Meta};
 use d1_gateway_nats::pb::hedging::live::v1::{
@@ -260,6 +260,14 @@ fn workspace_root() -> PathBuf {
         .parent()
         .expect("delta-one dir")
         .to_path_buf()
+}
+
+fn real_d1_limits() -> LimitsConfig {
+    // The real `d1.toml` caps: this file has no opinion on limits, it only
+    // needs a valid `SpawnConfig`.
+    d1::config::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../d1.toml"))
+        .expect("load d1.toml")
+        .limits
 }
 
 fn universe_path() -> PathBuf {
@@ -744,40 +752,43 @@ fn posttrade_golden_file() {
     let book_ids = universe.book_ids.clone();
     let instrument_ids = universe.instrument_ids.clone();
     let handles = spawn(
-        StartupOrder {
-            book: BookId(1),
-            instrument: InstrumentId(1001),
-            side: Side::Buy,
-            qty_e2: STARTUP_QTY_E2,
-            px_e9: 0,
+        SpawnConfig {
+            startup: StartupOrder {
+                book: BookId(1),
+                instrument: InstrumentId(1001),
+                side: Side::Buy,
+                qty_e2: STARTUP_QTY_E2,
+                px_e9: 0,
+            },
+            fix: FixConfig {
+                settings_path: initiator_cfg_path,
+                sender_comp_id: sender_comp_id(),
+                target_comp_id: target_comp_id(),
+            },
+            nats_url: NATS_URL.to_string(),
+            book_ids,
+            instrument_ids,
+            policy,
+            universe,
+            // `sampling_interval_s: 1` (carried over from Slice 2). Getting
+            // `assert_tracker_record`'s `n_obs >= 2` floor needs the THIRD
+            // sampling-boundary crossing of the feed's `exch_ts_ns` clock (see
+            // `TrackerState::sample`'s doc comment in `crates/d1/src/lib.rs`) --
+            // `await_tracker` below is the deterministic sync point for that,
+            // not a wall-clock floor.
+            tracker: TrackerConfig {
+                sampling_interval_s: 1,
+                te_window_obs: 250,
+                publish_interval_s: 1,
+            },
+            limits: real_d1_limits(),
+            posttrade: Some(PostTradeConfig {
+                brokers: KAFKA_BROKERS.to_string(),
+                registry_url: SCHEMA_REGISTRY.to_string(),
+            }),
+            deterministic: true, // deterministic: pinned ids/timestamps/mid, the golden-file path
+            feed_ticks: None,    // synthetic feed (see d1::spawn's feed_ticks)
         },
-        FixConfig {
-            settings_path: initiator_cfg_path,
-            sender_comp_id: sender_comp_id(),
-            target_comp_id: target_comp_id(),
-        },
-        NATS_URL.to_string(),
-        book_ids,
-        instrument_ids,
-        policy,
-        universe,
-        // `sampling_interval_s: 1` (carried over from Slice 2). Getting
-        // `assert_tracker_record`'s `n_obs >= 2` floor needs the THIRD
-        // sampling-boundary crossing of the feed's `exch_ts_ns` clock (see
-        // `TrackerState::sample`'s doc comment in `crates/d1/src/lib.rs`) --
-        // `await_tracker` below is the deterministic sync point for that,
-        // not a wall-clock floor.
-        TrackerConfig {
-            sampling_interval_s: 1,
-            te_window_obs: 250,
-            publish_interval_s: 1,
-        },
-        Some(PostTradeConfig {
-            brokers: KAFKA_BROKERS.to_string(),
-            registry_url: SCHEMA_REGISTRY.to_string(),
-        }),
-        true, // deterministic: pinned ids/timestamps/mid, the golden-file path
-        None, // synthetic feed (see d1::spawn's feed_ticks)
         &shutdown,
     );
 

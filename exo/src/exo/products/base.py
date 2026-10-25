@@ -95,9 +95,6 @@ class CashflowLedger:
             raise ValueError(f"t must be strictly ascending, got {self.t.tolist()}")
 
 
-# ponytail: term sheets validate values but not types -- `bool` passes for float fields and a
-# `list` for tuple schedules (mutable after validation on a frozen dataclass). Harmless for pytest
-# fixtures. Trigger: first deserialized term sheet, P2.M4 persisted product book.
 class Payoff(Protocol):
     """A priceable product: something that turns one `PathBundle` into a `CashflowLedger`.
 
@@ -298,8 +295,10 @@ def barrier_survival(
     # See docs/PONYTAIL-DEBT.md.
     # ponytail (P2-7, P2.M1 slice 2): CONTINUOUS_BRIDGE peak memory, tracemalloc-measured at
     # ~10.2x one array. Ceiling: ~1 GB once `n_paths * n_steps > 1.2e7` (the P2.M2 mini future
-    # on a daily grid measured 8.22x at 20k x 252). Trigger: P2.M4 portfolio revaluation.
-    # See docs/PONYTAIL-DEBT.md.
+    # on a daily grid measured 8.22x at 20k x 252). P2.M4 covers it with the load-time guard:
+    # `GREEKS_PEAK_ARRAY_RATIO = 12.0` is measured per class (continuous-bridge classes bind at
+    # 11.56 for a whole Greek job, `tests/test_greeks_memory.py`). Owner P4.M5. Trigger: the guard
+    # refuses a CONTINUOUS_BRIDGE book entry. See docs/PONYTAIL-DEBT.md.
     """
     if direction not in _DIRECTIONS:
         raise ValueError(f"direction must be one of {_DIRECTIONS}, got {direction!r}")

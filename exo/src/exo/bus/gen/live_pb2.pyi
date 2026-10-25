@@ -125,7 +125,7 @@ class RiskSnapshot(_message.Message):
     def __init__(self, meta: _Optional[_Union[_common_pb2.Meta, _Mapping]] = ..., greeks: _Optional[_Iterable[_Union[RiskSnapshot.NetGreeks, _Mapping]]] = ...) -> None: ...
 
 class RiskLimitAlert(_message.Message):
-    __slots__ = ("meta", "underlying", "greek", "value_e9", "limit_e9", "breached")
+    __slots__ = ("meta", "underlying", "greek", "value_e9", "limit_e9", "breached", "value_qty_e2", "limit_qty_e2", "text", "cleared")
     class Greek(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
         __slots__ = ()
         GREEK_UNSPECIFIED: _ClassVar[RiskLimitAlert.Greek]
@@ -142,13 +142,33 @@ class RiskLimitAlert(_message.Message):
     VALUE_E9_FIELD_NUMBER: _ClassVar[int]
     LIMIT_E9_FIELD_NUMBER: _ClassVar[int]
     BREACHED_FIELD_NUMBER: _ClassVar[int]
+    VALUE_QTY_E2_FIELD_NUMBER: _ClassVar[int]
+    LIMIT_QTY_E2_FIELD_NUMBER: _ClassVar[int]
+    TEXT_FIELD_NUMBER: _ClassVar[int]
+    CLEARED_FIELD_NUMBER: _ClassVar[int]
     meta: _common_pb2.Meta
     underlying: _common_pb2.InstrumentRef
     greek: RiskLimitAlert.Greek
     value_e9: int
     limit_e9: int
     breached: bool
-    def __init__(self, meta: _Optional[_Union[_common_pb2.Meta, _Mapping]] = ..., underlying: _Optional[_Union[_common_pb2.InstrumentRef, _Mapping]] = ..., greek: _Optional[_Union[RiskLimitAlert.Greek, str]] = ..., value_e9: _Optional[int] = ..., limit_e9: _Optional[int] = ..., breached: bool = ...) -> None: ...
+    value_qty_e2: int
+    limit_qty_e2: int
+    text: str
+    cleared: bool
+    def __init__(self, meta: _Optional[_Union[_common_pb2.Meta, _Mapping]] = ..., underlying: _Optional[_Union[_common_pb2.InstrumentRef, _Mapping]] = ..., greek: _Optional[_Union[RiskLimitAlert.Greek, str]] = ..., value_e9: _Optional[int] = ..., limit_e9: _Optional[int] = ..., breached: bool = ..., value_qty_e2: _Optional[int] = ..., limit_qty_e2: _Optional[int] = ..., text: _Optional[str] = ..., cleared: bool = ...) -> None: ...
+
+class MarkPrice(_message.Message):
+    __slots__ = ("meta", "instrument", "mid_px_e9", "feed_ts_ns")
+    META_FIELD_NUMBER: _ClassVar[int]
+    INSTRUMENT_FIELD_NUMBER: _ClassVar[int]
+    MID_PX_E9_FIELD_NUMBER: _ClassVar[int]
+    FEED_TS_NS_FIELD_NUMBER: _ClassVar[int]
+    meta: _common_pb2.Meta
+    instrument: _common_pb2.InstrumentRef
+    mid_px_e9: int
+    feed_ts_ns: int
+    def __init__(self, meta: _Optional[_Union[_common_pb2.Meta, _Mapping]] = ..., instrument: _Optional[_Union[_common_pb2.InstrumentRef, _Mapping]] = ..., mid_px_e9: _Optional[int] = ..., feed_ts_ns: _Optional[int] = ...) -> None: ...
 
 class InternalCrossNotice(_message.Message):
     __slots__ = ("meta", "cross_id", "instrument", "buy_book_id", "sell_book_id", "qty_e2", "ref_px_e9", "px_policy_id")
@@ -244,7 +264,7 @@ class TrackerAnalytics(_message.Message):
 class ValuationSnapshot(_message.Message):
     __slots__ = ("meta", "book_id", "as_of_ns", "valuation", "lines", "book_pv_e9")
     class ProductLine(_message.Message):
-        __slots__ = ("product_id", "product_type", "underlying", "pv_e9", "pv_std_err_e9", "delta_qty_e2", "vega_e9", "gamma_qty_e2", "rho_e9", "theta_e9", "div_sens_e9")
+        __slots__ = ("product_id", "product_type", "underlying", "pv_e9", "pv_std_err_e9", "delta_qty_e2", "vega_e9", "gamma_qty_e2", "rho_e9", "theta_e9", "div_sens_e9", "delta_std_err_qty_e2", "vega_std_err_e9", "gamma_std_err_qty_e2", "rho_std_err_e9", "theta_std_err_e9", "div_sens_std_err_e9", "rho_foreign_e9", "rho_foreign_std_err_e9", "flagged_greeks")
         PRODUCT_ID_FIELD_NUMBER: _ClassVar[int]
         PRODUCT_TYPE_FIELD_NUMBER: _ClassVar[int]
         UNDERLYING_FIELD_NUMBER: _ClassVar[int]
@@ -256,6 +276,15 @@ class ValuationSnapshot(_message.Message):
         RHO_E9_FIELD_NUMBER: _ClassVar[int]
         THETA_E9_FIELD_NUMBER: _ClassVar[int]
         DIV_SENS_E9_FIELD_NUMBER: _ClassVar[int]
+        DELTA_STD_ERR_QTY_E2_FIELD_NUMBER: _ClassVar[int]
+        VEGA_STD_ERR_E9_FIELD_NUMBER: _ClassVar[int]
+        GAMMA_STD_ERR_QTY_E2_FIELD_NUMBER: _ClassVar[int]
+        RHO_STD_ERR_E9_FIELD_NUMBER: _ClassVar[int]
+        THETA_STD_ERR_E9_FIELD_NUMBER: _ClassVar[int]
+        DIV_SENS_STD_ERR_E9_FIELD_NUMBER: _ClassVar[int]
+        RHO_FOREIGN_E9_FIELD_NUMBER: _ClassVar[int]
+        RHO_FOREIGN_STD_ERR_E9_FIELD_NUMBER: _ClassVar[int]
+        FLAGGED_GREEKS_FIELD_NUMBER: _ClassVar[int]
         product_id: str
         product_type: str
         underlying: _common_pb2.InstrumentRef
@@ -267,7 +296,16 @@ class ValuationSnapshot(_message.Message):
         rho_e9: int
         theta_e9: int
         div_sens_e9: int
-        def __init__(self, product_id: _Optional[str] = ..., product_type: _Optional[str] = ..., underlying: _Optional[_Union[_common_pb2.InstrumentRef, _Mapping]] = ..., pv_e9: _Optional[int] = ..., pv_std_err_e9: _Optional[int] = ..., delta_qty_e2: _Optional[int] = ..., vega_e9: _Optional[int] = ..., gamma_qty_e2: _Optional[int] = ..., rho_e9: _Optional[int] = ..., theta_e9: _Optional[int] = ..., div_sens_e9: _Optional[int] = ...) -> None: ...
+        delta_std_err_qty_e2: int
+        vega_std_err_e9: int
+        gamma_std_err_qty_e2: int
+        rho_std_err_e9: int
+        theta_std_err_e9: int
+        div_sens_std_err_e9: int
+        rho_foreign_e9: int
+        rho_foreign_std_err_e9: int
+        flagged_greeks: _containers.RepeatedScalarFieldContainer[str]
+        def __init__(self, product_id: _Optional[str] = ..., product_type: _Optional[str] = ..., underlying: _Optional[_Union[_common_pb2.InstrumentRef, _Mapping]] = ..., pv_e9: _Optional[int] = ..., pv_std_err_e9: _Optional[int] = ..., delta_qty_e2: _Optional[int] = ..., vega_e9: _Optional[int] = ..., gamma_qty_e2: _Optional[int] = ..., rho_e9: _Optional[int] = ..., theta_e9: _Optional[int] = ..., div_sens_e9: _Optional[int] = ..., delta_std_err_qty_e2: _Optional[int] = ..., vega_std_err_e9: _Optional[int] = ..., gamma_std_err_qty_e2: _Optional[int] = ..., rho_std_err_e9: _Optional[int] = ..., theta_std_err_e9: _Optional[int] = ..., div_sens_std_err_e9: _Optional[int] = ..., rho_foreign_e9: _Optional[int] = ..., rho_foreign_std_err_e9: _Optional[int] = ..., flagged_greeks: _Optional[_Iterable[str]] = ...) -> None: ...
     META_FIELD_NUMBER: _ClassVar[int]
     BOOK_ID_FIELD_NUMBER: _ClassVar[int]
     AS_OF_NS_FIELD_NUMBER: _ClassVar[int]

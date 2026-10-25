@@ -35,6 +35,7 @@ enum Mode {
     EmitTicks {
         scenario: PathBuf,
         out: PathBuf,
+        script_out: Option<PathBuf>,
     },
 }
 
@@ -58,7 +59,11 @@ fn main() -> Result<()> {
             sender_comp_id,
             target_comp_id,
         } => acceptor::run(&cfg, fill_model, &sender_comp_id, &target_comp_id),
-        Mode::EmitTicks { scenario, out } => emit::run(&scenario, &out),
+        Mode::EmitTicks {
+            scenario,
+            out,
+            script_out,
+        } => emit::run(&scenario, &out, script_out.as_deref()),
     }
 }
 
@@ -71,6 +76,7 @@ fn parse_args() -> Result<Mode> {
     let mut sender_comp_id = DEFAULT_SENDER_COMP_ID.to_string();
     let mut target_comp_id = DEFAULT_TARGET_COMP_ID.to_string();
     let mut out: Option<PathBuf> = None;
+    let mut script_out: Option<PathBuf> = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -97,6 +103,13 @@ fn parse_args() -> Result<Mode> {
                     args.next()
                         .map(PathBuf::from)
                         .ok_or_else(|| anyhow::anyhow!("--out requires a path"))?,
+                );
+            }
+            "--script-out" => {
+                script_out = Some(
+                    args.next()
+                        .map(PathBuf::from)
+                        .ok_or_else(|| anyhow::anyhow!("--script-out requires a path"))?,
                 );
             }
             "--cfg" => {
@@ -141,7 +154,11 @@ fn parse_args() -> Result<Mode> {
                 .ok_or_else(|| anyhow::anyhow!("--mode emit-ticks requires --scenario <path>"))?;
             let out =
                 out.ok_or_else(|| anyhow::anyhow!("--mode emit-ticks requires --out <path>"))?;
-            Ok(Mode::EmitTicks { scenario, out })
+            Ok(Mode::EmitTicks {
+                scenario,
+                out,
+                script_out,
+            })
         }
         RunMode::Replay => {
             let scenario = scenario.ok_or_else(|| {

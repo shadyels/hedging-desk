@@ -30,6 +30,19 @@ RQMC_PEAK_ARRAY_RATIO = 19.0
 # margin (the regression test asserts `measured <= ceiling <= 1.06 * measured`).
 LSM_PEAK_ARRAY_RATIO = 5.2
 
-# ponytail: these ceilings are documented and test-measured, never enforced at runtime. Ceiling:
-# at 200k x 252, LSM ~2.1 GB and the mini future ~bundle + 8.6 arrays (~4.3 GB). Trigger: P2.M4
-# `ProcessPoolExecutor` revaluation (raise or batch from these constants).
+# Peak for one `compute_greeks` call (greeks/bump.py; the load-time guard of ADR-006 Amendment 9
+# s7): ten sequential `simulate()` legs, each reduced at once to a (n_paths,) vector, with only a
+# ONE-column pairing stub of the base bundle kept -- so no leg holds more than one bundle (an
+# earlier prototype that kept the whole base bundle and every leg measured 9.03 for the
+# autocallable). MEASURED with tracemalloc against the real call (warm-up outside the trace), for
+# every loadable class at 4_000 x 50 and 8_000 x 100, scheme="qe", antithetic
+# (`tests/test_greeks_memory.py` repeats this): peak/array = 5.18 / 5.09 for every DISCRETE class
+# (autocallable, discrete barrier/BRC/bonus, RC, warrant, TARF, PTARF) -- `simulate()`'s own
+# transient footprint, as for `LSM_PEAK_ARRAY_RATIO`; the CONTINUOUS_BRIDGE classes (barrier, BRC,
+# bonus) bind at 11.46 / 11.56 (4_000 x 50) and 11.41 / 11.46 (8_000 x 100), the `bridge_step_
+# survival` temporaries. Cross-check at the production size, 20_000 x 250: autocallable 5.04 (202
+# MB), continuous barrier 11.39 (457 MB), continuous BRC 11.41 (458 MB). Repeats agree to 3 d.p.
+# Committed at 12.0, 3.8% over the worst measured ratio (11.557); the regression test asserts
+# `measured <= ceiling <= 1.06 * max(measured)`. One constant for all classes: the discrete
+# classes are over-estimated ~2.3x, which only makes the guard conservative.
+GREEKS_PEAK_ARRAY_RATIO = 12.0

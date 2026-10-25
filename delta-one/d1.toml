@@ -4,6 +4,12 @@
 [bus]
 nats_url = "nats://localhost:4222"
 
+[limits]
+# A book whose last accepted ValuationSnapshot is older than this is stale: its
+# underlyings are held at least WARN (ADR-014 s3). Default = three of EXO's 5 s
+# republish intervals.
+valuation_max_age_s = 15
+
 [limits.defaults]        # per underlying, firm level
 vega_warn_e9 = 50_000_000_000_000        # 50k ccy per vol point
 vega_hard_e9 = 100_000_000_000_000

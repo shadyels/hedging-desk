@@ -33,9 +33,12 @@ pub struct ExecutionReport {
     pub cl_ord_id: ::prost::alloc::string::String,
     #[prost(string, tag = "3")]
     pub exec_id: ::prost::alloc::string::String,
-    /// 0 = firm-level parent order pre-allocation
+    /// 0 = firm-level netting parent (pre-allocation); != 0 on a netting parent's
     #[prost(uint32, tag = "4")]
     pub book_id: u32,
+    /// cl_ord_id = one per-book ALLOCATION report (last_qty_e2 = this book's share;
+    /// status/cum/leaves are the PARENT's), ADR-014 §5. Fill consumers dedupe on
+    /// (exec_id, book_id).
     #[prost(message, optional, tag = "5")]
     pub instrument: ::core::option::Option<super::super::common::v1::InstrumentRef>,
     #[prost(enumeration = "super::super::common::v1::Side", tag = "6")]
@@ -128,14 +131,27 @@ pub struct RiskLimitAlert {
     pub underlying: ::core::option::Option<super::super::common::v1::InstrumentRef>,
     #[prost(enumeration = "risk_limit_alert::Greek", tag = "3")]
     pub greek: i32,
-    /// current firm-level exposure (vega/rho: ccy; gamma: qty_e2 semantics noted in text)
+    /// firm exposure for VEGA/RHO (ccy*1e9); 0 for GAMMA (see value_qty_e2)
     #[prost(sint64, tag = "4")]
     pub value_e9: i64,
+    /// VEGA/RHO limit crossed (ccy*1e9); 0 for GAMMA
     #[prost(sint64, tag = "5")]
     pub limit_e9: i64,
     /// false = warning threshold, true = hard limit
     #[prost(bool, tag = "6")]
     pub breached: bool,
+    /// GAMMA only: firm dDelta per +1% spot, qty_e2 (ADR-014 §4)
+    #[prost(sint64, tag = "7")]
+    pub value_qty_e2: i64,
+    /// GAMMA only: limit crossed, qty_e2
+    #[prost(sint64, tag = "8")]
+    pub limit_qty_e2: i64,
+    /// human-readable, with units; for display, never parsed
+    #[prost(string, tag = "9")]
+    pub text: ::prost::alloc::string::String,
+    /// true = exposure back inside warn (level OK); breached is then false
+    #[prost(bool, tag = "10")]
+    pub cleared: bool,
 }
 /// Nested message and enum types in `RiskLimitAlert`.
 pub mod risk_limit_alert {
@@ -171,6 +187,20 @@ pub mod risk_limit_alert {
             }
         }
     }
+}
+/// Delta One -> EXO / UI: marks (ADR-014 §2). Subject d1.marks.<instrument>.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MarkPrice {
+    #[prost(message, optional, tag = "1")]
+    pub meta: ::core::option::Option<super::super::common::v1::Meta>,
+    #[prost(message, optional, tag = "2")]
+    pub instrument: ::core::option::Option<super::super::common::v1::InstrumentRef>,
+    /// Delta One's arrival mid (cross reference price rule), > 0
+    #[prost(sint64, tag = "3")]
+    pub mid_px_e9: i64,
+    /// D1 feed clock: ns since feed-session start, NOT epoch -- declared exception
+    #[prost(uint64, tag = "4")]
+    pub feed_ts_ns: u64,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct InternalCrossNotice {
@@ -325,10 +355,13 @@ pub mod valuation_snapshot {
         /// MC standard error; mandatory (exo/CLAUDE.md rule 6)
         #[prost(sint64, tag = "5")]
         pub pv_std_err_e9: i64,
+        /// desk-position dPV/dS, units of underlying x1e2 (ADR-014 §9)
         #[prost(sint64, tag = "6")]
         pub delta_qty_e2: i64,
+        /// ccy per +1 vol point (0.01; sqrt(v0), sqrt(theta) together)
         #[prost(sint64, tag = "7")]
         pub vega_e9: i64,
+        /// dDelta per +1% spot, qty_e2
         #[prost(sint64, tag = "8")]
         pub gamma_qty_e2: i64,
         /// ccy per +1bp parallel rate shift
@@ -340,6 +373,28 @@ pub mod valuation_snapshot {
         /// ccy per +1% absolute div-yield change
         #[prost(sint64, tag = "11")]
         pub div_sens_e9: i64,
+        /// MC standard errors (exo/CLAUDE.md rule 6), same units as the Greek
+        #[prost(sint64, tag = "12")]
+        pub delta_std_err_qty_e2: i64,
+        #[prost(sint64, tag = "13")]
+        pub vega_std_err_e9: i64,
+        #[prost(sint64, tag = "14")]
+        pub gamma_std_err_qty_e2: i64,
+        #[prost(sint64, tag = "15")]
+        pub rho_std_err_e9: i64,
+        #[prost(sint64, tag = "16")]
+        pub theta_std_err_e9: i64,
+        #[prost(sint64, tag = "17")]
+        pub div_sens_std_err_e9: i64,
+        /// FX_SPOT underlyings: ccy per +1bp foreign (base-ccy) rate, q := r_f
+        #[prost(sint64, tag = "18")]
+        pub rho_foreign_e9: i64,
+        /// (ADR-006 A8 s1, A9 s4); 0 otherwise
+        #[prost(sint64, tag = "19")]
+        pub rho_foreign_std_err_e9: i64,
+        /// names whose SE > max_rel_std_error*|value| ("delta","gamma",...)
+        #[prost(string, repeated, tag = "20")]
+        pub flagged_greeks: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -507,6 +562,7 @@ pub struct Tick {
     pub ask_px_e9: i64,
     #[prost(sint64, tag = "5")]
     pub last_px_e9: i64,
+    /// ponytail: clock undecided (epoch vs feed-session, cf. MarkPrice.feed_ts_ns, ADR-014 s2); first sim Tick publisher decides
     #[prost(uint64, tag = "6")]
     pub exch_ts_ns: u64,
 }
