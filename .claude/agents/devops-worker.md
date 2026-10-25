@@ -28,4 +28,5 @@ End every report with a `LESSONS:` block: 0-3 short, GENERALIZABLE lessons that 
 ## Learned lessons
 - To verify a crate version/feature-set is real when a sandbox blocks the crates.io REST API (`crates.io/api/v1/...` can 403 even when the network is otherwise up), use `cargo add --dry-run <crate>@<ver> --features ...` — it resolves against the cargo sparse index (which stays reachable) and prints the exact resolved version + enabled/disabled feature graph. Never confirm a version from memory.
 - A dependency's DEFAULT features can silently violate an architectural invariant: `rdkafka`'s defaults pull in `tokio`, so a crate meant to stay non-async needs `default-features = false` plus only the wanted features (e.g. `["cmake-build"]`). Always diff the default feature set against the project's constraints before adding, not just the crate name.
+- `just` recipe arguments written as `name=value` after the recipe name are passed through literally as the positional value (`--fill-model fill_model=partial`), not as a named parameter: confirm any documented invocation with `just --dry-run` first.
 <!-- END learned-lessons -->

@@ -32,4 +32,7 @@ End every report with a `LESSONS:` block: 0-3 short, GENERALIZABLE lessons that 
 - Before writing any number or formula a brief calls 'measured' or 'decided', grep the cited source for it; report any you cannot source instead of including them silently. Count ledger rows by grepping the file AFTER edits, never by adjusting the old headline.
 - When a marker has no trigger, distinguish 'deliberate' (`no-trigger`, e.g. YAGNI) from 'not yet decided' (`undecided`) before filling the Upgrade column, and state the choice so a reviewer can flip it.
 - When a marker's MEANING changes (not just its line), grep the ledger's cluster and phase prose for its old PHRASES ('promote to error', 'lands with P3.M2') as well as its old line number — meaning-based citations survive a line-number grep.
+- Before appending a requested phrase to a ledger cell, open the code it describes — 'capped' and 'rejected' are different claims, and the brief's wording can be the wrong one.
+- When a marker's text names an upgrade, a row labelled no-trigger is stale: reclassify it, recompute the headline's no-trigger count, and update every cluster/summary section that lists the same markers — a headline-only update leaves them contradicting the table.
+- When renumbering several rows in one file, order the edits so no replacement creates a duplicate of a still-pending old string (move 46->48 before 44->46), and classify grep hits as marker definitions vs prose cross-references before adding rows.
 <!-- END learned-lessons -->
