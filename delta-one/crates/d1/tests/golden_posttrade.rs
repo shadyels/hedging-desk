@@ -38,6 +38,8 @@
     clippy::indexing_slicing
 )] // integration test, not hot-path code
 
+mod common;
+
 use std::collections::HashMap;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -706,18 +708,23 @@ fn assert_tracker_record(lines: &[String]) {
 #[ignore = "requires a NATS server on 127.0.0.1:4222, a Kafka broker on 127.0.0.1:9092 with posttrade.* topics provisioned, and a Schema Registry on 127.0.0.1:8081 (`just up`, then scripts/demo.sh's topic-create step)"]
 fn posttrade_golden_file() {
     if !nats_reachable() {
-        println!("golden_posttrade: NATS unreachable at {NATS_URL}, skipping (`just up` first)");
+        common::skip_unless_required(
+            "golden_posttrade",
+            &format!("NATS unreachable at {NATS_URL}"),
+        );
         return;
     }
     if !kafka_reachable() {
-        println!(
-            "golden_posttrade: Kafka unreachable at {KAFKA_BROKERS}, skipping (`just up` first)"
+        common::skip_unless_required(
+            "golden_posttrade",
+            &format!("Kafka unreachable at {KAFKA_BROKERS}"),
         );
         return;
     }
     if !schema_registry_reachable() {
-        println!(
-            "golden_posttrade: Schema Registry unreachable at {SCHEMA_REGISTRY}, skipping (`just up` first)"
+        common::skip_unless_required(
+            "golden_posttrade",
+            &format!("Schema Registry unreachable at {SCHEMA_REGISTRY}"),
         );
         return;
     }

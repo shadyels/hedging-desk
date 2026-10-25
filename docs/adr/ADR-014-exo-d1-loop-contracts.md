@@ -369,7 +369,7 @@ kept until a target publication actually goes out.
   key.
 - **Harder.** D1 owns two more rings (11 total) and a position mirror. EXO owns a ledger that halts on any
   lost message (NATS core is at-most-once). The storyline needs a running EXO, `uv`, NATS and the sim
-  acceptor, so it is an `#[ignore]` test that CI never runs.
+  acceptor, so it is an `#[ignore]` test that CI never runs. *(2026-10-25: CI now runs it, with the other infra-gated tests, via `.github/workflows/infra.yml` → `scripts/demo.sh` under `INFRA_REQUIRED=1`.)*
 - **Not done here:**
   - `RiskSnapshot` (P3.M1);
   - per-book cumulative quantity and an allocation flag on reports (P3.M1);

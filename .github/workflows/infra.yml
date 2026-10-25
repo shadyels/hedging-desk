@@ -1,0 +1,65 @@
+# Infra-gated tests (ADR-007): the six `#[ignore]`/`-m infra` tests that need a
+# live NATS + Kafka + Schema Registry. Runs exactly scripts/demo.sh, so CI and a
+# local `just demo` execute the same thing. Not path-filtered (the tests span
+# every component) and deliberately slower than the per-component jobs, hence a
+# nightly run in addition to PRs. Advisory: whether it is a *required* check is a
+# GitHub branch-protection setting, not repo config (see scripts/README.md).
+name: infra
+
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same PR supersedes the old run; nightly/manual runs are never cancelled.
+concurrency:
+  group: infra-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  infra-tests:
+    runs-on: ubuntu-latest
+    # Cold run: Rust build incl. QuickFIX + rdkafka C++ (~15 min worst case) + image
+    # pulls (~3 min) + uv sync + ~3 min of tests; 40 leaves ~2x headroom and still
+    # fails a hung test/pull instead of burning the 6 h default.
+    timeout-minutes: 40
+    env:
+      INFRA_REQUIRED: "1"  # an unreachable service fails the job instead of skipping
+    steps:
+      - uses: actions/checkout@v4
+      # delta-one/rust-toolchain.toml pins 1.88.0 (+ clippy, rustfmt).
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88.0"
+          components: clippy, rustfmt
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            delta-one/target
+          key: infra-${{ runner.os }}-cargo-${{ hashFiles('delta-one/Cargo.lock') }}
+          # Fall back to an older infra cache, then rust.yml's (same 1.88.0 toolchain via
+          # rust-toolchain.toml), so a Cargo.lock change is not a cold ~15 min build.
+          restore-keys: |
+            infra-${{ runner.os }}-cargo-
+            ${{ runner.os }}-cargo-
+      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+      # Third-party action not used by any other workflow: pinned by commit SHA.
+      - uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6  # v2
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.10.9"
+      - run: uv sync --all-extras --dev --locked
+        working-directory: exo
+      - run: ./scripts/demo.sh
+      # demo.sh already prints the logs on a test failure before tearing down;
+      # this covers the cases where it cannot (job timeout/cancel). Harmless
+      # when the stack is already gone.
+      - if: failure() || cancelled()
+        run: docker compose -f deploy/docker-compose.yml logs --tail=200 || true

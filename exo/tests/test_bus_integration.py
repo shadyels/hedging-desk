@@ -1,7 +1,9 @@
 """The ONE `just up` integration test of the EXO loop (P2.M4 slice 4).
 
 Needs NATS on 127.0.0.1:4222 (`just up`). Marked `infra` and auto-skipped when the broker is
-unreachable, so CI (no Docker) collects it and skips it, like the Rust `#[ignore]` infra tests.
+unreachable, so the plain-pytest CI job (no Docker) collects it and skips it, like the Rust
+`#[ignore]` infra tests. With `INFRA_REQUIRED=1` (the infra CI job, scripts/demo.sh) an unreachable
+broker is a failure instead.
 It runs `service.main` for real -- spawned process pool, real `nats-py` -- against a one-warrant
 book (4,000 paths, 0.25 y, about a second), acting as a fake Delta One.
 """
@@ -9,6 +11,7 @@ book (4,000 paths, 0.25 y, about a second), acting as a fake Delta One.
 from __future__ import annotations
 
 import asyncio
+import os
 import socket
 import time
 from collections.abc import Awaitable, Callable
@@ -54,10 +57,17 @@ def _broker_up() -> bool:
     return True
 
 
-pytestmark = [
-    pytest.mark.infra,
-    pytest.mark.skipif(not _broker_up(), reason="NATS not reachable on 127.0.0.1:4222 (just up)"),
-]
+pytestmark = pytest.mark.infra
+
+
+@pytest.fixture(autouse=True)
+def _require_broker() -> None:
+    if _broker_up():
+        return
+    msg = "NATS not reachable on 127.0.0.1:4222 (just up)"
+    if os.environ.get("INFRA_REQUIRED") == "1":
+        pytest.fail(f"{msg}; INFRA_REQUIRED=1 forbids skipping")
+    pytest.skip(msg)
 
 
 def _config(tmp_path: Path) -> ExoConfig:
