@@ -317,6 +317,8 @@ halted, or has any book whose latest valuation attempt failed (§15). `detail` k
 - `limit.<instrument_id>.<greek>`, holding the latest non-cleared `RiskLimitAlert` level. EXO consumes
   `d1.alerts.limits` for logging and health only.
 
+*Clarification (2026-10-25):* the implementation also emits four `detail` keys that this list omits. `nats` is `connected` or `disconnected`, the NATS connection state. `rejected_total` is the count of inbound messages dropped by the replay, duplicate and business-key guards, summed across reasons. `book.<id>.last_error` is the capped reason for that book's latest failed valuation attempt, present only while that attempt has failed. `fatal` is the capped reason for a fatal condition (§15), present from the moment it is raised until EXO exits.
+
 ### 13. Transport trust (ceiling accepted for the single-host demo)
 
 NATS runs with no authentication, no authorization and no TLS (`deploy/nats.conf`), and compose publishes

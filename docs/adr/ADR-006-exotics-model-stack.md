@@ -802,9 +802,9 @@ All gates are in `exo/tests/test_validation_gates_fx.py`, on seeds 601–606. Ev
 ## Amendment 9 (2026-10-24) — P2.M4: published numbers, Greeks, the persisted book
 
 P2.M4 is the first milestone whose prices reach the bus. This amendment records the estimator decisions behind
-every published number. Status: Proposed. Decided by the desk lead on 2026-10-24: the sampler (§1), `bump_spot_rel = 0.01` (§2), the
+every published number. Status: Accepted. Approved by the desk lead on 2026-10-25. Decided by the desk lead on 2026-10-24: the sampler (§1), `bump_spot_rel = 0.01` (§2), the
 `q`-bump labelling (§4), the dirty-tree policy (§6) and publishing the storyline Greeks flagged at 20,000 paths
-(§7); the remaining text awaits approval. Wire units are fixed by
+(§7). Wire units are fixed by
 ADR-014 §9; this amendment fixes how they are estimated. It builds on Amendment 8 §1 (`q := r_f`).
 
 ### 1. Sampler for published numbers: pseudo-random + antithetic, no control variate
