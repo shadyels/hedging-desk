@@ -60,7 +60,7 @@ asyncio_mode = "auto"
 faulthandler_timeout = 120
 testpaths = ["tests"]
 markers = [
-  "infra: needs `just up` (NATS on 127.0.0.1:4222); auto-skipped when the broker is unreachable, so CI never runs it",
+  "infra: needs `just up` (NATS on 127.0.0.1:4222); auto-skipped when the broker is unreachable (a failure under INFRA_REQUIRED=1)",
 ]
 
 [build-system]

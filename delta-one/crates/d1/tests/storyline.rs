@@ -31,6 +31,8 @@
 //! `uv` is a FAILURE (the harness cannot run, and silently passing would hide that).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // integration test, not hot-path code
 
+mod common;
+
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -858,7 +860,7 @@ fn tracker_flow_message_follows_adr_014_s10() {
 #[ignore = "requires NATS on 127.0.0.1:4222 (`just up`), `uv` and a synced exo/.venv"]
 fn storyline_tracker_flow() {
     if !nats_reachable() {
-        println!("storyline: NATS unreachable at {NATS_URL}, skipping (`just up` first)");
+        common::skip_unless_required("storyline", &format!("NATS unreachable at {NATS_URL}"));
         return;
     }
 

@@ -12,9 +12,33 @@
 # P2.M4 slice 5 added the storyline test (sim tracker-flow replay -> d1 <-> EXO
 # loop, EXO spawned by the test via `uv run`, so uv + a synced exo/.venv are
 # prerequisites).
+# Added: loop_round_trip and the exo `-m infra` test, so this runs ALL six infra
+# tests (CI's .github/workflows/infra.yml runs exactly this script). The tests
+# share one NATS broker and subject namespace, so they run strictly
+# sequentially. The Avro half of schema-check is NOT repeated here:
+# .github/workflows/schema-compat.yml already runs it against a live registry.
 # Deferred, not implemented here, not pretended: UI left running (Phase 3).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+# An unreachable service is a failure here, never a skip (every infra test
+# honours this; see delta-one/crates/d1/tests/common/mod.rs).
+export INFRA_REQUIRED=1
+
+# Tear the stack down on every exit path, including a failed test (set -e
+# would otherwise skip the final `just down`). On failure the containers'
+# logs are printed first, since `down -v` destroys them.
+cleanup() {
+  local rc=$?
+  trap - EXIT
+  if [[ "$rc" -ne 0 ]]; then
+    echo "scripts/demo.sh: FAILED (exit $rc), container logs follow" >&2
+    docker compose -f deploy/docker-compose.yml logs --tail=200 >&2 || true
+  fi
+  just down || true
+  exit "$rc"
+}
+trap cleanup EXIT
 
 just up
 
@@ -94,8 +118,8 @@ done
 cd delta-one
 cargo test -p d1 --test nats_round_trip -- --ignored --nocapture
 cargo test -p d1 --test crosses_round_trip -- --ignored --nocapture
+cargo test -p d1 --test loop_round_trip -- --ignored --nocapture
 cargo test -p d1 --test golden_posttrade -- --ignored --nocapture
 cargo test -p d1 --test storyline -- --ignored --nocapture
-cd ..
-
-just down
+cd ../exo
+uv run --locked pytest -m infra

@@ -46,7 +46,7 @@ bench:
     cd delta-one && cargo bench > target/bench.log 2>&1; grep -E 'p50=|NOTE:' target/bench.log   # release profile enforced by criterion config; HDR histograms to target/bench
 
 # P2.M4 storyline: needs `just up` (NATS) and a synced exo/.venv (uv); spawns
-# sim acceptor, d1 and exo itself. CI never runs it.
+# sim acceptor, d1 and exo itself. CI runs it via scripts/demo.sh (infra.yml).
 storyline:
     cd delta-one && cargo test -p d1 --test storyline -- --ignored --nocapture
 
@@ -80,4 +80,4 @@ lint:
 
 # --- the showcase ---------------------------------------------------------
 demo:
-    ./scripts/demo.sh   # up -> provision posttrade topics -> run 3 round-trip tests + the P2.M4 storyline -> down (UI deferred to Phase 3)
+    ./scripts/demo.sh   # up -> provision posttrade topics -> run all 6 infra tests (4 d1 round trips + storyline + exo bus test) -> down (UI deferred to Phase 3)

@@ -17,6 +17,8 @@
 //! environment without NATS up fails soft instead of hanging.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // integration test, not hot-path code
 
+mod common;
+
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -201,7 +203,10 @@ fn spawn_sim_acceptor(cfg_path: &Path) -> SimAcceptor {
 #[ignore = "requires a NATS server on 127.0.0.1:4222 (`just up`)"]
 fn target_position_round_trips_to_execution_report() {
     if !nats_reachable() {
-        println!("nats_round_trip: NATS unreachable at {NATS_URL}, skipping (`just up` first)");
+        common::skip_unless_required(
+            "nats_round_trip",
+            &format!("NATS unreachable at {NATS_URL}"),
+        );
         return;
     }
 
