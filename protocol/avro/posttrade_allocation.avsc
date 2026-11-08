@@ -13,6 +13,6 @@
     {"name": "book_id", "type": "int"},
     {"name": "qty_e2", "type": "long"},
     {"name": "px_e9", "type": "long"},
-    {"name": "netting_cycle_id", "type": "string"}
+    {"name": "netting_cycle_id", "type": "string", "doc": "lineage to the producing netting cycle: \"<run_uuid>/<n>\" (per-process run id + cycle sequence), or \"DIRECT\" for a directed transfer; opaque (ADR-002 Amendment 1)"}
   ]
 }

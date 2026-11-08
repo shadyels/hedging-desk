@@ -79,6 +79,10 @@ pub fn exec_report_to_pb(report: &ExecReport, msg_id: String, sent_ns: u64) -> E
         cum_qty_e2: report.cum_qty_e2,
         leaves_qty_e2: report.leaves_qty_e2,
         text: String::new(),
+        // P3.M1 slice 2 wire fields (live.proto 13-15): populated in a later task.
+        allocation: false,
+        book_cum_qty_e2: 0,
+        netting_cycle_id: String::new(),
     }
 }
 
@@ -127,6 +131,8 @@ pub fn cross_record_to_pb(
         qty_e2: record.qty_e2,
         ref_px_e9: record.ref_px_e9,
         px_policy_id: record.policy_id.to_string(),
+        // live.proto tag 9: populated in a later task.
+        netting_cycle_id: String::new(),
     }
 }
 
