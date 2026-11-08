@@ -1,0 +1,148 @@
+/* Shell styles for Slice 1: state chip, bar, banner, subject table. Tokens only (DESIGN.md); no literal colours. */
+.bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  height: var(--bar-h);
+  padding: 0 var(--gutter);
+  background: var(--surface-1);
+  border-bottom: var(--border-w) solid var(--border);
+}
+.bar-conn {
+  margin-left: auto;
+}
+
+.banner {
+  padding: var(--space-1) var(--gutter);
+  background: var(--surface-2);
+  border-bottom: var(--border-w) solid var(--border-strong);
+  color: var(--state-disconnected-fg);
+}
+.banner-glyph::before {
+  content: var(--glyph-disconnected);
+  margin-right: var(--space-1);
+}
+
+.board {
+  padding: var(--gutter);
+}
+.board[data-disconnected="true"] {
+  filter: var(--disconnected-filter);
+  color: var(--text-3);
+}
+
+.subjects {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-sm);
+}
+.subjects caption {
+  text-align: left;
+  color: var(--text-2);
+  padding: var(--space-1) 0;
+  font-size: var(--fs-xs);
+}
+.subjects thead th {
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-regular);
+  text-align: left;
+}
+.subjects th,
+.subjects td {
+  height: var(--row-h);
+  padding: 0 var(--row-pad-x);
+  border-bottom: var(--border-w) solid var(--border-subtle);
+  text-align: left;
+}
+.subjects tbody th {
+  font-weight: var(--fw-regular);
+}
+.subjects .r {
+  text-align: right;
+}
+.subjects code {
+  font-family: var(--font-mono);
+}
+.foot {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+
+.wire-text {
+  display: inline-block;
+  max-width: 40ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+/* State chip: glyph + label + outline shape. Colour follows state; the shape survives greyscale. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: 18px;
+  padding: 0 var(--space-1);
+  font-size: var(--fs-sm);
+  border: var(--border-w) solid transparent;
+  border-radius: var(--radius);
+}
+.chip-glyph::before {
+  content: var(--glyph-ok);
+}
+.chip[data-state="ok"] {
+  color: var(--state-ok-fg);
+}
+.chip[data-state="warn"] {
+  color: var(--state-warn-fg);
+  background: var(--state-warn-bg);
+  border-color: var(--state-warn-border);
+}
+.chip[data-state="hard"] {
+  color: var(--state-hard-on-fill);
+  background: var(--state-hard-bg-solid);
+  border-color: var(--state-hard-border);
+  font-weight: var(--fw-bold);
+}
+.chip[data-state="halted"] {
+  color: var(--state-halted-fg);
+  background: var(--state-halted-bg);
+  border: 3px double var(--state-halted-border);
+}
+.chip[data-state="stale"] {
+  color: var(--state-stale-fg);
+  border-style: dashed;
+  border-color: var(--state-stale-border);
+  font-style: italic;
+}
+.chip[data-state="waiting"] {
+  color: var(--state-waiting-fg);
+  border-style: dotted;
+  border-color: var(--state-waiting-border);
+}
+.chip[data-state="disconnected"] {
+  color: var(--state-disconnected-fg);
+  background: var(--state-disconnected-bg);
+  border-color: var(--state-disconnected-border);
+}
+.chip[data-state="warn"] .chip-glyph::before {
+  content: var(--glyph-warn);
+}
+.chip[data-state="hard"] .chip-glyph::before {
+  content: var(--glyph-hard);
+}
+.chip[data-state="halted"] .chip-glyph::before {
+  content: var(--glyph-halted);
+}
+.chip[data-state="stale"] .chip-glyph::before {
+  content: var(--glyph-stale);
+}
+.chip[data-state="waiting"] .chip-glyph::before {
+  content: var(--glyph-waiting);
+}
+.chip[data-state="disconnected"] .chip-glyph::before {
+  content: var(--glyph-disconnected);
+}
