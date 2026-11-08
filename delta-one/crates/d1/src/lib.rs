@@ -21,7 +21,8 @@ use cycle::{NettingSession, allocate_fill};
 use d1_analytics::{Sample, TrackerRecord, TrackerWindow, analytics};
 use d1_core::{
     BookId, ClOrdId, CrossRecord, ExecEvent, ExecOutcome, ExecReport, FeedTick, InstrumentId,
-    MarketData, Order, OrderStatus, OrderStore, PositionKeeper, Side, Target, TransferRequest,
+    MarketData, Order, OrderStatus, OrderStore, PositionKeeper, RunId, Side, Target,
+    TransferRequest,
 };
 use d1_gateway_fix::{FixCallbacks, FixError};
 use d1_gateway_nats::limits::TierOneLimits;
@@ -378,6 +379,17 @@ pub fn spawn(cfg: SpawnConfig, shutdown: &Arc<AtomicBool>) -> RunHandles {
     // is the only pusher onto `posttrade_tx`, so this flag must not flip
     // until the caller has joined `core`, or the producer can drain-flush-exit
     // while `core` is still mid-iteration pushing events.
+    //
+    // Per-process run id for the `netting_cycle_id` lineage key
+    // (`"<run>/<n>"`): `cycle_seq` restarts at 1 each process. Minted HERE,
+    // outside both `Stamper`s' state, so it never consumes a `Stamper::Fixed` id
+    // (that would shift every golden id); deterministic mode uses the nil
+    // `RunId::FIXED` instead.
+    let run_id = if deterministic {
+        RunId::FIXED
+    } else {
+        RunId(Stamper::Wall.uuid())
+    };
     let mut posttrade_shutdown = None;
     let posttrade = posttrade_cfg.map(|cfg| {
         let flag = Arc::new(AtomicBool::new(false));
@@ -395,6 +407,7 @@ pub fn spawn(cfg: SpawnConfig, shutdown: &Arc<AtomicBool>) -> RunHandles {
                 posttrade_rx,
                 producer_stamper,
                 &flag,
+                run_id,
             );
             // Log as soon as the thread dies, not just at `main.rs`'s final
             // join: a broker outage at startup (e.g. `ensure_topics` failing)
@@ -743,10 +756,7 @@ fn run_core(
                                 // proof the post-trade events are already
                                 // enqueued (`tests/golden_posttrade.rs` syncs
                                 // on exactly that).
-                                for event in posttrade::cross_events(
-                                    record,
-                                    NettingCycleId::Cycle(output.cycle_id),
-                                ) {
+                                for event in posttrade::cross_events(record) {
                                     push_posttrade(&mut posttrade_tx, event);
                                 }
                                 if cross_tx.push(*record).is_err() {
@@ -866,7 +876,7 @@ fn run_core(
                 );
                 // Ledger first, NATS notice second -- same ordering
                 // rationale as the netting-derived cross path above.
-                for event in posttrade::cross_events(&record, NettingCycleId::Direct) {
+                for event in posttrade::cross_events(&record) {
                     push_posttrade(&mut posttrade_tx, event);
                 }
                 if cross_tx.push(record).is_err() {

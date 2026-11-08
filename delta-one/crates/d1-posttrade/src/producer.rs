@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use d1_core::RunId;
 use d1_refdata::Universe;
 use rdkafka::ClientConfig;
 use rdkafka::producer::{BaseRecord, DefaultProducerContext, Producer, ThreadedProducer};
@@ -39,6 +40,9 @@ const METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 /// this flag -- is what makes the final drain below correct: by the time
 /// this flag can observably be `true`, nothing can ever be pushed onto `rx`
 /// again, so draining it to empty here really does pick up every event.
+///
+/// `run` is this process's `RunId`, stamped into every cross/allocation
+/// `netting_cycle_id` (`"<run>/<n>"`) so the lineage key is restart-unique.
 pub fn run_producer(
     brokers: &str,
     registry_url: &str,
@@ -46,6 +50,7 @@ pub fn run_producer(
     mut rx: rtrb::Consumer<PostTradeEvent>,
     mut stamper: Stamper,
     shutdown: &AtomicBool,
+    run: RunId,
 ) -> Result<(), PostTradeError> {
     // ADR-002: at-least-once producer, idempotence + acks=all so a retried
     // send can never duplicate or silently lose a record.
@@ -79,6 +84,7 @@ pub fn run_producer(
             &universe,
             &mut stamper,
             &producer,
+            run,
         ) {
             thread::sleep(POLL_INTERVAL);
         }
@@ -101,6 +107,7 @@ pub fn run_producer(
         &universe,
         &mut stamper,
         &producer,
+        run,
     );
 
     producer.flush(FLUSH_TIMEOUT)?;
@@ -116,6 +123,7 @@ fn drain(
     universe: &Universe,
     stamper: &mut Stamper,
     producer: &ThreadedProducer<DefaultProducerContext>,
+    run: RunId,
 ) -> bool {
     let mut did_work = false;
 
@@ -133,7 +141,7 @@ fn drain(
             );
             continue;
         };
-        let datum = match schemas.encode(&event, universe, stamper) {
+        let datum = match schemas.encode(&event, universe, stamper, run) {
             Ok(datum) => datum,
             Err(err) => {
                 eprintln!("d1-posttrade: encode failed, dropping event: {err}");

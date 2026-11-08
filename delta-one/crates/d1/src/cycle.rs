@@ -15,8 +15,8 @@
 use std::collections::HashMap;
 
 use d1_core::{
-    BookId, ClOrdId, CrossRecord, InstrumentId, Order, OrderStatus, PositionKeeper, Side, Target,
-    TransferRequest,
+    BookId, ClOrdId, CrossRecord, InstrumentId, NettingCycleId, Order, OrderStatus, PositionKeeper,
+    Side, Target, TransferRequest,
 };
 use d1_netting::{BookDemand, Cross, MAX_BOOKS, NettingError, RefPxPolicy, net};
 use d1_posttrade::Stamper;
@@ -89,6 +89,7 @@ fn book_cross(
     px_e9: i64,
     policy: RefPxPolicy,
     stamper: &mut Stamper,
+    netting_cycle_id: NettingCycleId,
 ) -> Option<CrossRecord> {
     if keeper
         .apply_cross(instrument, buy_book, sell_book, qty_e2, px_e9)
@@ -107,6 +108,7 @@ fn book_cross(
         qty_e2,
         ref_px_e9: px_e9,
         policy_id: policy.as_str(),
+        netting_cycle_id,
     })
 }
 
@@ -232,6 +234,11 @@ impl NettingSession {
         // Book cross legs immediately via the shared `book_cross` path: nets
         // to zero firm-wide and makes re-netting idempotent (root CLAUDE.md
         // #2: never leave a cross silently unbooked).
+        //
+        // `cycle_id` is computed before booking so each record carries its
+        // cycle; `cycle_seq` itself is still only advanced below, exactly
+        // where it always was.
+        let cycle_id = self.cycle_seq.wrapping_add(1);
         let stamper = &mut self.stamper;
         let cross_records: Vec<CrossRecord> = crosses
             .iter()
@@ -245,12 +252,12 @@ impl NettingSession {
                     c.px_e9,
                     c.policy,
                     stamper,
+                    NettingCycleId::Cycle(cycle_id),
                 )
             })
             .collect();
 
-        self.cycle_seq = self.cycle_seq.wrapping_add(1);
-        let cycle_id = self.cycle_seq;
+        self.cycle_seq = cycle_id;
 
         // Residual weights: the engine returns crosses + net_external, not
         // per-book residuals, so derive residual_b = demand_b - signed cross
@@ -357,6 +364,7 @@ impl NettingSession {
             ref_px_e9,
             self.policy,
             &mut self.stamper,
+            NettingCycleId::Direct,
         )
     }
 
@@ -608,6 +616,13 @@ mod tests {
             .unwrap();
         assert_eq!(out2.crosses_to_book.len(), 1);
         assert!(out2.parent_order.is_none(), "exact offset, no residual");
+        // Lineage: the booked record carries the cycle that produced it
+        // (second cycle of this session).
+        assert_eq!(out2.cycle_id, 2);
+        assert_eq!(
+            out2.crosses_to_book.first().unwrap().netting_cycle_id,
+            NettingCycleId::Cycle(out2.cycle_id)
+        );
 
         // Cross legs net to zero firm-wide.
         let p1 = keeper.position(BookId(1), InstrumentId(1001)).unwrap();
@@ -760,6 +775,7 @@ mod tests {
         assert_eq!(record.qty_e2, 40_000);
         assert_eq!(record.ref_px_e9, 150_000_000_000);
         assert_eq!(record.policy_id, "ARRIVAL_MID");
+        assert_eq!(record.netting_cycle_id, NettingCycleId::Direct);
         assert_eq!(
             keeper
                 .position(BookId(5), InstrumentId(1001))

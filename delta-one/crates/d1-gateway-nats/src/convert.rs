@@ -436,6 +436,7 @@ mod tests {
             qty_e2: 800_000,
             ref_px_e9: 150_000_000_000,
             policy_id: "ARRIVAL_MID",
+            netting_cycle_id: d1_core::NettingCycleId::Cycle(2),
         };
         let pb = cross_record_to_pb(&record, "msg-1".to_string(), 42);
 

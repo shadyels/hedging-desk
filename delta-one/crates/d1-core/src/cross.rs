@@ -5,6 +5,7 @@
 //! for exec reports and EXO targets.
 
 use crate::ids::{BookId, InstrumentId};
+use crate::lineage::NettingCycleId;
 
 /// Core -> gateway DTO for one booked internal cross leg pair (netting- or
 /// transfer-derived, ADR-005/ADR-009). Minted by
@@ -31,6 +32,10 @@ pub struct CrossRecord {
     /// `RefPxPolicy::as_str()` that produced `ref_px_e9`, stamped for
     /// compliance lineage (ADR-005 §4).
     pub policy_id: &'static str,
+    /// Netting cycle that produced this cross (`Cycle`, from `on_target`) or
+    /// `Direct` for a directed transfer (`on_transfer`). Single source for
+    /// both the NATS notice and the Kafka record.
+    pub netting_cycle_id: NettingCycleId,
 }
 
 /// Gateway -> core DTO for an inbound directed internal transfer (ADR-009):
