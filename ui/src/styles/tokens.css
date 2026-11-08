@@ -1,0 +1,200 @@
+/*
+ * Design tokens for the monitoring UI (P3.M1). Spec and rules: ui/DESIGN.md.
+ *
+ * Dark is the default. A light variant exists under [data-theme="light"] with the
+ * same token names. Colour is reserved for limit and health state: every
+ * --state-* colour has a non-colour twin (glyph, border style, label) below.
+ * Nothing imports this file yet; the first slice that builds a component does.
+ */
+
+/* ---- Non-colour tokens (theme independent) -------------------------------- */
+:root {
+  /* Type families: system stacks, no webfont (offline desk terminal, no dependency). */
+  --font-sans:
+    system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+    sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", "Cascadia Mono", "Roboto Mono", Menlo, Consolas,
+    monospace;
+
+  /* Type scale (px). Table body is --fs-sm. KPI figure is the only large size. */
+  --fs-xs: 11px; /* column headers, captions, units */
+  --fs-sm: 12px; /* table cells, chips */
+  --fs-md: 13px; /* UI text, form controls */
+  --fs-lg: 14px; /* book code on a card, empty-state headline */
+  --fs-xl: 16px; /* reserved: disconnected banner headline */
+  --fs-kpi: 20px; /* tracker card headline figure */
+  --lh-tight: 16px; /* single-line cell text, fits a 22 px row */
+  --lh-body: 20px;
+  --fw-regular: 400;
+  --fw-medium: 500;
+  --fw-bold: 600;
+
+  /* Numerals: every number is monospace + tabular + slashed zero. */
+  --num-variant: tabular-nums slashed-zero;
+  --num-features: "tnum" 1, "zero" 1;
+
+  /* Spacing, 4 px grid. --space-half (2 px) is for borders and glyph nudges only. */
+  --space-half: 2px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* Density. 22 px is the only off-grid height, allowed for the compact table. */
+  --row-h: 24px;
+  --row-h-compact: 22px;
+  --row-pad-x: var(--space-2);
+
+  /* Layout. Desktop only; nothing below --page-min-w is designed. */
+  --page-min-w: 1280px;
+  --bar-h: 32px;
+  --gutter: 8px;
+  --panel-pad: 8px;
+  --grid-cols: 12;
+
+  /* Shape. Flat: no shadow, no gradient. Radius is small and uniform. */
+  --radius: 2px;
+  --border-w: 1px;
+  --focus-ring: 2px solid var(--text);
+  --focus-offset: 1px;
+  --select-edge: 2px; /* inset left edge on a selected row, in --text */
+
+  /* State cues that are not colour (see ui/DESIGN.md "State matrix"). */
+  --glyph-ok: "●";
+  --glyph-warn: "▲";
+  --glyph-hard: "✕";
+  --glyph-halted: "■";
+  --glyph-stale: "◔";
+  --glyph-waiting: "○";
+  --glyph-disconnected: "⊘";
+  --state-ok-border-style: solid;
+  --state-warn-border-style: solid;
+  --state-hard-border-style: solid; /* plus solid fill: --state-hard-bg-solid */
+  --state-halted-border-style: double;
+  --state-stale-border-style: dashed;
+  --state-waiting-border-style: dotted;
+  --state-disconnected-border-style: solid;
+  --disconnected-filter: grayscale(1);
+}
+
+/* ---- Dark values (default) ------------------------------------------------- */
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* Surface ramp: canvas < panel < raised (table header) < hover < pressed/selected. */
+  --bg: #0c0e11;
+  --surface-1: #12151a;
+  --surface-2: #181c22;
+  --surface-3: #1f242b;
+  --surface-4: #272d35;
+
+  /* Text ramp. --text-3 is for secondary/disabled on bg, surface-1, surface-2 only. */
+  --text: #e4e8ec;
+  --text-2: #a6aeb8;
+  --text-3: #8a94a0;
+
+  --border-subtle: #232830; /* row dividers */
+  --border: #2e353e; /* panel edges */
+  --border-strong: #5b6672; /* controls, 3:1 against surfaces */
+
+  /* Data ink: neutral. Sparklines, bars and chart lines never carry state hue. */
+  --spark: var(--text-2);
+  --bar-track: var(--surface-3);
+  --bar-fill: var(--text-2);
+  --row-hover: var(--surface-3);
+  --row-selected: var(--surface-4);
+
+  /* State: ok / warn / hard / halted carry hue. fg = text and glyph, bg = tint,
+     on-fill = text on a solid --state-*-fill chip. */
+  --state-ok-fg: #5fb88a;
+  --state-ok-bg: #14261d;
+  --state-ok-border: #5fb88a;
+  --state-warn-fg: #e3a93b;
+  --state-warn-bg: #2a2214;
+  --state-warn-border: #e3a93b;
+  --state-hard-fg: #f4645f;
+  --state-hard-bg: #321a1a;
+  --state-hard-border: #f4645f;
+  --state-hard-bg-solid: #f4645f;
+  --state-hard-on-fill: #0c0e11;
+  --state-halted-fg: #6fa8ee;
+  --state-halted-bg: #15233a;
+  --state-halted-border: #6fa8ee;
+
+  /* stale / waiting / disconnected carry no hue: they are the ABSENCE of live data. */
+  --state-stale-fg: var(--text-3);
+  --state-stale-bg: transparent;
+  --state-stale-border: var(--text-3);
+  --state-waiting-fg: var(--text-3);
+  --state-waiting-bg: transparent;
+  --state-waiting-border: var(--text-3);
+  --state-disconnected-fg: var(--text-3);
+  --state-disconnected-bg: var(--surface-2);
+  --state-disconnected-border: var(--border-strong);
+}
+
+/* Honour an OS dark preference unless the user chose light. Dark is already the
+   default above, so this only restates the UA colour scheme (form controls,
+   scrollbars); it does not repeat the values. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+  }
+}
+
+/* ---- Light variant: same token names ------------------------------------- */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #eceff2;
+  --surface-1: #f8f9fb;
+  --surface-2: #eef0f3;
+  --surface-3: #e2e6ea;
+  --surface-4: #d5dae0;
+
+  --text: #14181d;
+  --text-2: #434c57;
+  --text-3: #55606c;
+
+  --border-subtle: #dde1e6;
+  --border: #c9cfd6;
+  --border-strong: #7a8490;
+
+  --state-ok-fg: #1a7348;
+  --state-ok-bg: #dff1e7;
+  --state-ok-border: #1a7348;
+  --state-warn-fg: #855800;
+  --state-warn-bg: #fbf0d9;
+  --state-warn-border: #855800;
+  --state-hard-fg: #b8231f;
+  --state-hard-bg: #fbe3e2;
+  --state-hard-border: #b8231f;
+  --state-hard-bg-solid: #b8231f;
+  --state-hard-on-fill: #ffffff;
+  --state-halted-fg: #1a58a8;
+  --state-halted-bg: #e0ebf9;
+  --state-halted-border: #1a58a8;
+}
+
+/* ---- Base ------------------------------------------------------------------ */
+body {
+  margin: 0;
+  min-width: var(--page-min-w);
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--fs-md);
+  line-height: var(--lh-body);
+}
+
+/* Any element showing a number. Right-aligned in tables (DESIGN.md "Numbers"). */
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: var(--num-variant);
+  font-feature-settings: var(--num-features);
+}
