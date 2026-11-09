@@ -381,7 +381,7 @@ kept until a target publication actually goes out.
 
 ## Amendment 1 (P3.M1 Slice 2): `d1.risk.firm`, `d1.health`, allocation reports, live-plane lineage
 
-**Status:** Proposed · **Date:** 2026-11-09
+**Status:** Accepted (desk lead, 2026-11-09) · **Date:** 2026-11-09
 
 ### 1. `d1.risk.firm` carries `RiskSnapshot`, every 1 s
 
