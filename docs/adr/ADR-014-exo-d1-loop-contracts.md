@@ -386,7 +386,7 @@ kept until a target publication actually goes out.
 ### 1. `d1.risk.firm` carries `RiskSnapshot`, every 1 s
 
 - **Publisher.** The Delta One NATS gateway thread, on the 1 s tick of §2 and §7, immediately after §3's staleness evaluation. Never on the core thread.
-- **Rows.** One `NetGreeks` per underlying that has an accepted EXO line, a non-zero D1 position, or a non-OK limit level. An empty `greeks` list is valid and still published. There is no `book_id` (firm-level, ADR-008).
+- **Rows.** One `NetGreeks` per underlying that has an accepted EXO line, a non-zero firm-net D1 position (the sum over books of `qty_e2` on that instrument; a position that nets to zero across books gets no row), or a non-OK limit level. An empty `greeks` list is valid and still published. There is no `book_id` (firm-level, ADR-008).
 - **Values.**
   - `firm_delta_qty_e2` = Σ over books of D1 position `qty_e2` on that instrument + Σ over books of accepted EXO `delta_qty_e2` for that underlying (ADR-008 "aggregates its own delta"). Inflight is excluded. There is no roll-up through refdata `underlying_id`. The tracker book's liability delta is not represented, so a tracker's inventory appears as firm delta (ledger row N1).
   - `notional_e9` = `firm_delta_qty_e2 × last D1 mark mid_px_e9 / 100`, in the underlying's currency; 0 without a mark.
@@ -396,7 +396,7 @@ kept until a target publication actually goes out.
 - **Limit state.**
   - `*_level` is the level of the latest `RiskLimitAlert` for that (underlying, Greek), or OK if none has been raised or the last one cleared. D1 always sets OK/WARN/HARD; UNSPECIFIED means not populated.
   - `*_warn_*` and `*_hard_*` are the absolute caps from `d1.toml [limits.defaults]`.
-  - `limit_data_suspect` is true when a contributing book is stale or invalid; the reason is on `d1.health`.
+  - `limit_data_suspect` is true when a book that contributes accepted lines to this underlying is stale or invalid. A book with no accepted lines contributes nothing and does not set it; its state is on `d1.health` (`limits.book.<id>.valuation`).
 - **Not covered.** Books that have never published contribute nothing (§3, unchanged).
 
 ### 2. `d1.health` carries `HealthStatus`, every 1 s
@@ -406,7 +406,7 @@ kept until a target publication actually goes out.
   - `nats`: `connected` | `pending` | `disconnected`
   - `fix.session`: `logged_on` | `logged_out`
   - `posttrade`: `disabled` | `starting` | `running` | `failed`
-  - `posttrade.send_failures`: local send errors since start; present unless `disabled`
+  - `posttrade.send_failures`: records dropped locally since start (encode failure, unknown topic, or send error); present unless `disabled`
   - `limits.unattributable_rejects`
   - `limits.book.<book_id>.rejects`, for every configured book
   - `limits.book.<book_id>.valuation`: `none` | `ok` | `stale` | `invalid`, for every configured book
