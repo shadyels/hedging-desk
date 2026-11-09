@@ -1545,6 +1545,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fail_on_unwind_armed_drop_sets_failed() {
+        let failed = AtomicBool::new(false);
+        drop(FailOnUnwind {
+            failed: &failed,
+            armed: true,
+        });
+        assert!(failed.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn fail_on_unwind_disarmed_drop_leaves_failed_clear() {
+        let failed = AtomicBool::new(false);
+        drop(FailOnUnwind {
+            failed: &failed,
+            armed: false,
+        });
+        assert!(!failed.load(Ordering::Relaxed));
+    }
+
+    /// The real use: the guard's `Drop` runs while a panic unwinds. `panic!` and
+    /// `panic_any` both trip the workspace `clippy::panic` deny, so unwind with
+    /// `resume_unwind` (a real unwind, minus the panic hook).
+    #[test]
+    fn fail_on_unwind_sets_failed_when_panic_unwinds() {
+        let failed = AtomicBool::new(false);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = FailOnUnwind {
+                failed: &failed,
+                armed: true,
+            };
+            std::panic::resume_unwind(Box::new("producer thread panic"));
+        }));
+        assert!(result.is_err());
+        assert!(failed.load(Ordering::Relaxed));
+    }
+
+    #[test]
     fn zero_and_never_ticked_instruments_have_non_positive_ref_px() {
         let (zero, good, never) = (InstrumentId(1), InstrumentId(2), InstrumentId(3));
         let mut md = MarketData::new(&[zero, good, never]);
