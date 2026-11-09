@@ -92,6 +92,20 @@ pub enum Level {
     Hard,
 }
 
+/// One book's valuation feed as seen at a given instant (ADR-014 §3), for
+/// `d1.health`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValuationState {
+    /// Nothing was ever received for the book (neither accepted nor rejected).
+    None,
+    /// Last snapshot accepted and fresher than `max_age`.
+    Ok,
+    /// Last accepted snapshot is older than `max_age`.
+    Stale,
+    /// The latest snapshot was rejected; no accept since.
+    Invalid,
+}
+
 /// Level of an absolute exposure: `abs >= hard` is `Hard`, `abs >= warn` is
 /// `Warn`. Takes `u128` (the `unsigned_abs` of an `i128` sum), so there is no
 /// `abs()` on `i64` anywhere on this path (`i64::MIN` is representable).
@@ -189,8 +203,9 @@ struct BookEntry {
 ///
 /// ponytail: no hysteresis -- alerts can flap at MC noise near a limit. Add a
 /// clear-below-warn-minus-margin rule on the first observed flapping or a
-/// book decommission (ADR-014 §3). Books that never published are invisible
-/// here (Delta One cannot know which books EXO values).
+/// book decommission (ADR-014 §3). Books that never published raise no alert
+/// (Delta One cannot know which books EXO values); `d1.health` now surfaces
+/// them as `valuation=none`, and surfaces reject counters (`health::health_detail`).
 ///
 /// ponytail: D1-held listed options contribute no vega (Delta One holds
 /// linear instruments only in P2 and cannot price options). Owner P4.M3.
@@ -323,6 +338,25 @@ impl LimitBook {
     #[must_use]
     pub fn rejects(&self, book: BookId) -> u64 {
         self.state.get(&book).map_or(0, |e| e.rejects)
+    }
+
+    /// `book`'s valuation feed at `now`. Reuses `forced_reason` for the stale
+    /// test, so staleness has one definition. A book rejected on its first-ever
+    /// snapshot reads `Invalid`; one never heard from reads `None`.
+    #[must_use]
+    pub fn valuation_state(&self, book: BookId, now: Instant) -> ValuationState {
+        let Some(entry) = self.state.get(&book) else {
+            return ValuationState::None;
+        };
+        if entry.invalid.is_some() {
+            ValuationState::Invalid
+        } else if entry.received.is_none() {
+            ValuationState::None
+        } else if self.forced_reason(book, entry, now).is_some() {
+            ValuationState::Stale
+        } else {
+            ValuationState::Ok
+        }
     }
 
     /// One line for the shutdown log: every non-zero reject counter.

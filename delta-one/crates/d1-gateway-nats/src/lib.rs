@@ -9,6 +9,7 @@
 
 pub mod convert;
 pub mod error;
+pub mod health;
 pub mod limits;
 pub mod marks;
 pub mod positions;
@@ -43,6 +44,7 @@ use futures_util::StreamExt;
 use prost::Message as _;
 
 pub use error::NatsError;
+pub use health::{HealthInputs, PostTradeHealth};
 use limits::{AlertEvent, LimitBook, TierOneLimits};
 use marks::MarkThrottle;
 use pb::hedging::live::v1::{InternalTransferRequest, TargetPosition, ValuationSnapshot};
@@ -52,8 +54,9 @@ use positions::PositionMirror;
 /// subscribe timeout. Off the hot path (ADR-004): matches
 /// `d1-gateway-fix::DRAIN_POLL_INTERVAL`'s reasoning exactly.
 const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
-/// Cadence of the mark keepalive, the every-book position snapshots and the
-/// limits staleness check (ADR-014 §2, §7, §3).
+/// Cadence of the mark keepalive, the every-book position snapshots, the
+/// limits staleness check, `d1.risk.firm` and `d1.health` (ADR-014 §2, §7, §3,
+/// Amendment 1).
 const PERIODIC_INTERVAL: Duration = Duration::from_secs(1);
 /// Wildcard subscription for every book/instrument EXO publishes targets on
 /// (`protocol/nats-subjects.md`: `exo.targets.<book>.<instrument>`).
@@ -116,6 +119,8 @@ pub struct GatewayConfig {
     pub valuation_max_age_s: u32,
     /// This process's run id, rendered into every `netting_cycle_id`.
     pub run_id: RunId,
+    /// Liveness flags of the FIX and Kafka threads, for `d1.health`.
+    pub health: HealthInputs,
 }
 
 /// The gateway's ends of the core's rings (ADR-013).
@@ -374,7 +379,29 @@ async fn run_gateway_async(
                 "RiskSnapshot",
             )
             .await;
-            // Slot: task 5 publishes HealthStatus here, after the RiskSnapshot.
+
+            // Last, so it reports the state this same tick produced. The
+            // gateway thread is the only publisher on `d1.health`.
+            let (ok, detail) = health::health_detail(
+                client.connection_state(),
+                &cfg.health,
+                &limit_book,
+                &cfg.book_ids,
+                now,
+            );
+            let pb = convert::health_status_to_pb(
+                ok,
+                detail,
+                uuid::Uuid::now_v7().to_string(),
+                now_ns(),
+            );
+            publish_pb(
+                &client,
+                convert::HEALTH_SUBJECT.to_string(),
+                &pb,
+                "HealthStatus",
+            )
+            .await;
         }
     }
 

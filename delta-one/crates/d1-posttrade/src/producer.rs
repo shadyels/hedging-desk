@@ -5,7 +5,7 @@
 //! mirrors `d1-gateway-nats::run_gateway`'s poll/drain-loop shape, `rdkafka`'s
 //! `ThreadedProducer` instead of `async-nats`.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -43,6 +43,14 @@ const METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// `run` is this process's `RunId`, stamped into every cross/allocation
 /// `netting_cycle_id` (`"<run>/<n>"`) so the lineage key is restart-unique.
+///
+/// `ready` is set once the schema registry accepted every schema (the drain
+/// loop is about to start) and `send_failures` counts local `send()` errors;
+/// both feed `d1.health` and are display-only, hence `Relaxed` (no other state
+/// is published through them).
+// Edge thread, off the hot path; bundling the health flags into a struct would
+// force d1-posttrade to depend on d1-gateway-nats (precedent: `d1::run_core`).
+#[allow(clippy::too_many_arguments)]
 pub fn run_producer(
     brokers: &str,
     registry_url: &str,
@@ -51,6 +59,8 @@ pub fn run_producer(
     mut stamper: Stamper,
     shutdown: &AtomicBool,
     run: RunId,
+    ready: &AtomicBool,
+    send_failures: &AtomicU64,
 ) -> Result<(), PostTradeError> {
     // ADR-002: at-least-once producer, idempotence + acks=all so a retried
     // send can never duplicate or silently lose a record.
@@ -75,6 +85,7 @@ pub fn run_producer(
     // dropping booked records. Resolving all four up front makes every
     // subsequent `for_topic` infallible in practice.
     let schema_ids = SchemaIds::register(registry_url)?;
+    ready.store(true, Ordering::Relaxed); // display-only, see the doc comment
 
     while !shutdown.load(Ordering::Relaxed) {
         if !drain(
@@ -85,6 +96,7 @@ pub fn run_producer(
             &mut stamper,
             &producer,
             run,
+            send_failures,
         ) {
             thread::sleep(POLL_INTERVAL);
         }
@@ -108,6 +120,7 @@ pub fn run_producer(
         &mut stamper,
         &producer,
         run,
+        send_failures,
     );
 
     producer.flush(FLUSH_TIMEOUT)?;
@@ -116,6 +129,7 @@ pub fn run_producer(
 
 /// Drain `rx` to empty, encoding, framing and publishing each event. Returns
 /// whether any event was processed, so the caller knows whether to back off.
+#[allow(clippy::too_many_arguments)] // see `run_producer`
 fn drain(
     rx: &mut rtrb::Consumer<PostTradeEvent>,
     schemas: &Schemas,
@@ -124,6 +138,7 @@ fn drain(
     stamper: &mut Stamper,
     producer: &ThreadedProducer<DefaultProducerContext>,
     run: RunId,
+    send_failures: &AtomicU64,
 ) -> bool {
     let mut did_work = false;
 
@@ -156,6 +171,12 @@ fn drain(
         // session, not a retry/backpressure protocol yet.
         if let Err((err, _record)) = producer.send(BaseRecord::to(topic).payload(&bytes).key(&key))
         {
+            // ponytail: (N2) broker-side delivery failures are invisible --
+            // `DefaultProducerContext` drops delivery reports, so this counts
+            // only local `send()` errors. Upgrade: a counting `ProducerContext`.
+            // Trigger: the first non-localhost broker (same as the plaintext
+            // marker in `run_producer`). Owner undecided.
+            send_failures.fetch_add(1, Ordering::Relaxed); // display-only
             eprintln!("d1-posttrade: send to {topic} failed, dropping: {err}");
         }
     }

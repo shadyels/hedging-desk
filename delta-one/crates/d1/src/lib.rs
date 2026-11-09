@@ -26,7 +26,10 @@ use d1_core::{
 };
 use d1_gateway_fix::{FixCallbacks, FixError};
 use d1_gateway_nats::limits::TierOneLimits;
-use d1_gateway_nats::{GatewayConfig, GatewayRings, MarkUpdate, NatsError, PositionUpdate};
+use d1_gateway_nats::{
+    GatewayConfig, GatewayRings, HealthInputs, MarkUpdate, NatsError, PositionUpdate,
+    PostTradeHealth,
+};
 use d1_netting::RefPxPolicy;
 use d1_posttrade::{AuditOrigin, NettingCycleId, PostTradeError, PostTradeEvent, Stamper};
 
@@ -294,6 +297,17 @@ pub fn spawn(cfg: SpawnConfig, shutdown: &Arc<AtomicBool>) -> RunHandles {
     } else {
         RunId(Stamper::Wall.uuid())
     };
+    // `d1.health` inputs (ADR-014 Amendment 1 §2): the FIX flag is cloned before
+    // `callbacks` moves into its thread; the producer's flags exist only when
+    // a producer is spawned.
+    let callbacks = FixCallbacks::new(fix_inbound_tx);
+    let pt_health = posttrade_cfg
+        .is_some()
+        .then(|| Arc::new(PostTradeHealth::default()));
+    let health = HealthInputs {
+        fix_logged_on: callbacks.logged_on_handle(),
+        posttrade: pt_health.clone(),
+    };
     // Cloned before `book_ids`/`instrument_ids` move into the core thread.
     let gateway_cfg = GatewayConfig {
         url: nats_url,
@@ -311,6 +325,7 @@ pub fn spawn(cfg: SpawnConfig, shutdown: &Arc<AtomicBool>) -> RunHandles {
         },
         valuation_max_age_s: limits.valuation_max_age_s,
         run_id,
+        health,
     };
 
     let core_shutdown = Arc::clone(shutdown);
@@ -340,7 +355,6 @@ pub fn spawn(cfg: SpawnConfig, shutdown: &Arc<AtomicBool>) -> RunHandles {
     });
 
     let fix_shutdown = Arc::clone(shutdown);
-    let callbacks = FixCallbacks::new(fix_inbound_tx);
     let fix = thread::spawn(move || {
         d1_gateway_fix::run_initiator(
             &fix_cfg.settings_path,
@@ -399,6 +413,7 @@ pub fn spawn(cfg: SpawnConfig, shutdown: &Arc<AtomicBool>) -> RunHandles {
         } else {
             Stamper::Wall
         };
+        let pt_health = pt_health.unwrap_or_default();
         thread::spawn(move || {
             let result = d1_posttrade::run_producer(
                 &cfg.brokers,
@@ -408,6 +423,8 @@ pub fn spawn(cfg: SpawnConfig, shutdown: &Arc<AtomicBool>) -> RunHandles {
                 producer_stamper,
                 &flag,
                 run_id,
+                &pt_health.ready,
+                &pt_health.send_failures,
             );
             // Log as soon as the thread dies, not just at `main.rs`'s final
             // join: a broker outage at startup (e.g. `ensure_topics` failing)
@@ -416,6 +433,8 @@ pub fn spawn(cfg: SpawnConfig, shutdown: &Arc<AtomicBool>) -> RunHandles {
             // visibility until shutdown.
             if let Err(ref err) = result {
                 eprintln!("d1: Kafka post-trade producer exited with error: {err}");
+                // Relaxed: display-only for `d1.health` (`PostTradeHealth`).
+                pt_health.failed.store(true, Ordering::Relaxed);
             }
             result
         })

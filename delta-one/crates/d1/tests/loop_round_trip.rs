@@ -16,6 +16,9 @@
 //! 5. `d1.risk.firm`: a `RiskSnapshot` (schema_version 2) within 2 s carrying
 //!    the startup fill as AAPL's `firm_delta_qty_e2`, and the vega row level
 //!    following the alert (HARD, then OK) (ADR-014 Amendment 1).
+//!    `d1.health`: a `HealthStatus` (component `delta-one`) within 2 s with
+//!    `fix.session=logged_on`, `posttrade=disabled` and `ok` (ADR-014
+//!    Amendment 1 §2).
 //! 6. No alert for a snapshot without `valuation`, nor for subject book 4 /
 //!    payload book 3 (§3 acceptance rules 1 and 2).
 //!
@@ -41,8 +44,8 @@ use d1_core::{BookId, CycleRef, FeedTick, InstrumentId, NettingCycleId, Side};
 use d1_gateway_nats::pb::hedging::common::v1::{InstrumentRef, Meta, ValuationMeta};
 use d1_gateway_nats::pb::hedging::live::v1::valuation_snapshot::ProductLine;
 use d1_gateway_nats::pb::hedging::live::v1::{
-    ExecutionReport, MarkPrice, OrdStatus, PositionSnapshot, RiskLimitAlert, RiskSnapshot,
-    TargetPosition, ValuationSnapshot, risk_limit_alert, risk_snapshot,
+    ExecutionReport, HealthStatus, MarkPrice, OrdStatus, PositionSnapshot, RiskLimitAlert,
+    RiskSnapshot, TargetPosition, ValuationSnapshot, risk_limit_alert, risk_snapshot,
 };
 use futures_util::StreamExt;
 use prost::Message;
@@ -307,6 +310,7 @@ fn loop_support_round_trip() {
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let book_ids = universe.book_ids.clone();
+    let universe_book_ids = book_ids.clone();
     let instrument_ids = universe.instrument_ids.clone();
     let handles = spawn(
         SpawnConfig {
@@ -355,6 +359,7 @@ fn loop_support_round_trip() {
         let mut alloc_sub = client.subscribe("d1.exec.1.1002").await.unwrap();
         let mut alerts_sub = client.subscribe("d1.alerts.limits").await.unwrap();
         let mut risk_sub = client.subscribe("d1.risk.firm").await.unwrap();
+        let mut health_sub = client.subscribe("d1.health").await.unwrap();
 
         // Sync point: the startup order's report proves the gateway is live
         // and the fill is booked.
@@ -389,6 +394,38 @@ fn loop_support_round_trip() {
         let row = aapl_row(&risk).unwrap();
         assert_eq!(row.vega_level, risk_snapshot::LimitLevel::Ok as i32);
         assert!(row.vega_hard_e9 > row.vega_warn_e9 && row.vega_warn_e9 > 0);
+
+        // (i-c) The 1 s `d1.health` HealthStatus: the startup fill needed a FIX
+        // logon, so `fix.session` is `logged_on` within one more tick.
+        let health: HealthStatus = tokio::time::timeout(
+            Duration::from_secs(2),
+            await_msg(&mut health_sub, "HealthStatus", |h: &HealthStatus| {
+                h.detail.get("fix.session").map(String::as_str) == Some("logged_on")
+            }),
+        )
+        .await
+        .expect("no d1.health with fix.session=logged_on within 2 s");
+        assert_eq!(health.component, "delta-one");
+        assert!(health.ok);
+        let detail = |k: &str| health.detail.get(k).map(String::as_str);
+        assert_eq!(detail("posttrade"), Some("disabled")); // `posttrade: None` above
+        assert_eq!(detail("posttrade.send_failures"), None);
+        assert_eq!(detail("nats"), Some("connected"));
+        assert_eq!(detail("limits.unattributable_rejects"), Some("0"));
+        for book in &universe_book_ids {
+            assert!(
+                health
+                    .detail
+                    .contains_key(&format!("limits.book.{}.rejects", book.0)),
+                "health lacks book {}",
+                book.0
+            );
+            assert!(
+                health
+                    .detail
+                    .contains_key(&format!("limits.book.{}.valuation", book.0))
+            );
+        }
 
         // (i) At least 2 snapshots carrying the startup fill inside 2.5 s.
         let window_end = Instant::now() + Duration::from_millis(2_500);

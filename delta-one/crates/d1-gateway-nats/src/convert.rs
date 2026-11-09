@@ -17,8 +17,8 @@ use crate::limits::{
 };
 use crate::pb::hedging::common::v1::{InstrumentRef, Meta, Side as PbSide};
 use crate::pb::hedging::live::v1::{
-    ExecutionReport, InternalCrossNotice, InternalTransferRequest, MarkPrice, OrdStatus,
-    PositionSnapshot, RiskLimitAlert, RiskSnapshot, TargetPosition, TrackerAnalytics,
+    ExecutionReport, HealthStatus, InternalCrossNotice, InternalTransferRequest, MarkPrice,
+    OrdStatus, PositionSnapshot, RiskLimitAlert, RiskSnapshot, TargetPosition, TrackerAnalytics,
     ValuationSnapshot, position_snapshot, risk_limit_alert, risk_snapshot, tracker_analytics,
 };
 use crate::{MarkUpdate, PositionUpdate};
@@ -34,6 +34,10 @@ pub const ALERTS_SUBJECT: &str = "d1.alerts.limits";
 /// Subject `RiskSnapshot` publishes to (`protocol/nats-subjects.md`:
 /// `d1.risk.firm`).
 pub const RISK_FIRM_SUBJECT: &str = "d1.risk.firm";
+
+/// Subject `HealthStatus` publishes to (`protocol/nats-subjects.md`:
+/// `d1.health`).
+pub const HEALTH_SUBJECT: &str = "d1.health";
 
 /// Prefix of `exo.valuations.<book>`; the book token is numeric (ADR-014 §1).
 const VALUATIONS_PREFIX: &str = "exo.valuations.";
@@ -419,6 +423,24 @@ pub fn valuation_from_pb(msg: &ValuationSnapshot) -> Valuation {
                 n_flagged: l.flagged_greeks.len(),
             })
             .collect(),
+    }
+}
+
+/// Build the outbound `HealthStatus` (`d1.health`). `detail` must hold only
+/// fixed tokens and decimal integers (`health::health_detail`), never a string
+/// taken from a payload (ADR-014 §14).
+#[must_use]
+pub fn health_status_to_pb(
+    ok: bool,
+    detail: BTreeMap<String, String>,
+    msg_id: String,
+    sent_ns: u64,
+) -> HealthStatus {
+    HealthStatus {
+        meta: Some(meta(msg_id, sent_ns, 1)),
+        component: "delta-one".to_string(),
+        ok,
+        detail: detail.into_iter().collect(),
     }
 }
 
@@ -1075,5 +1097,19 @@ mod tests {
         assert_eq!(vega_alert.level, Level::Warn);
         assert_eq!(r.vega_level, risk_snapshot::LimitLevel::Warn as i32);
         assert_eq!(r.vega_warn_e9, 50);
+    }
+
+    #[test]
+    fn health_status_to_pb_maps_all_fields() {
+        let detail = BTreeMap::from([("nats".to_string(), "connected".to_string())]);
+        let pb = health_status_to_pb(true, detail, "m".into(), 9);
+        assert_eq!(pb.component, "delta-one");
+        assert!(pb.ok);
+        assert_eq!(pb.detail.len(), 1);
+        assert_eq!(pb.detail.get("nats").map(String::as_str), Some("connected"));
+        let meta = pb.meta.unwrap();
+        assert_eq!((meta.schema_version, meta.sent_ns), (1, 9));
+        assert_eq!(meta.producer, "delta-one");
+        assert!(!health_status_to_pb(false, BTreeMap::new(), "m".into(), 1).ok);
     }
 }
