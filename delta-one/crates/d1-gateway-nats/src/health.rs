@@ -116,8 +116,6 @@ pub fn health_detail(
 }
 
 #[cfg(test)]
-// tests: unwrap/index bans are hot-path-only (delta-one/CLAUDE.md); a missing map key panicking IS the assertion
-#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use std::collections::BTreeSet;
     use std::time::Duration;
@@ -127,6 +125,12 @@ mod tests {
 
     use super::*;
     use crate::limits::{TierOneLimits, ValLine, Valuation};
+
+    /// Map lookup that cannot panic (indexing is deny-linted in tests too); a
+    /// missing key yields a sentinel that fails the surrounding assertion.
+    fn at<'a>(d: &'a BTreeMap<String, String>, k: &str) -> &'a str {
+        d.get(k).map_or("<missing>", String::as_str)
+    }
 
     const AAPL: InstrumentId = InstrumentId(1001);
     const MAX_AGE: Duration = Duration::from_secs(15);
@@ -224,7 +228,7 @@ mod tests {
             Instant::now(),
         );
         assert_eq!(detail.len(), 14);
-        assert_eq!(detail["posttrade"], "disabled");
+        assert_eq!(at(&detail, "posttrade"), "disabled");
         assert!(!detail.contains_key("posttrade.send_failures"));
     }
 
@@ -249,9 +253,9 @@ mod tests {
                     &books,
                     now,
                 );
-                assert_eq!(detail["posttrade"], token);
+                assert_eq!(at(&detail, "posttrade"), token);
                 assert_eq!(
-                    detail["fix.session"],
+                    at(&detail, "fix.session"),
                     if logged_on { "logged_on" } else { "logged_out" }
                 );
                 assert_eq!(ok, logged_on && pt_ok, "logged_on={logged_on} pt={pt:?}");
@@ -274,7 +278,7 @@ mod tests {
                 &books,
                 Instant::now(),
             );
-            assert_eq!(detail["nats"], token);
+            assert_eq!(at(&detail, "nats"), token);
             // This process publishes the status, so the state is reported, not gated on.
             assert!(ok);
         }
@@ -284,14 +288,12 @@ mod tests {
     fn send_failures_is_reported() {
         let books = books5();
         let i = inputs(true, Some((true, false)));
-        i.posttrade
-            .as_ref()
-            .unwrap()
-            .send_failures
-            .store(7, Ordering::Relaxed);
+        if let Some(pt) = &i.posttrade {
+            pt.send_failures.store(7, Ordering::Relaxed);
+        }
         let (ok, detail) = health_detail(State::Connected, &i, &lb(&books), &books, Instant::now());
         assert!(ok, "send failures alone do not fail health");
-        assert_eq!(detail["posttrade.send_failures"], "7");
+        assert_eq!(at(&detail, "posttrade.send_failures"), "7");
     }
 
     #[test]
@@ -303,7 +305,7 @@ mod tests {
         let state = |lb: &LimitBook, b: u32, now| {
             let (ok, d) = health_detail(State::Connected, &i, lb, &books, now);
             assert!(ok, "valuation state must never affect ok");
-            d[&format!("limits.book.{b}.valuation")].clone()
+            at(&d, &format!("limits.book.{b}.valuation")).to_owned()
         };
         let enum_of = |lb: &LimitBook, b: u32, now| lb.valuation_state(BookId(b), now);
 
@@ -338,17 +340,17 @@ mod tests {
         lb.reject_unattributable("junk");
         lb.on_snapshot(Some(BookId(9)), &snap(9, 1, true), t0); // not in universe
         let (_, detail) = health_detail(State::Connected, &inputs(true, None), &lb, &books, t0);
-        assert_eq!(detail["limits.unattributable_rejects"], "2");
+        assert_eq!(at(&detail, "limits.unattributable_rejects"), "2");
         assert_eq!(lb.unattributable_rejects(), 2);
         for b in &books {
             assert_eq!(
-                detail[&format!("limits.book.{}.rejects", b.0)],
+                at(&detail, &format!("limits.book.{}.rejects", b.0)),
                 lb.rejects(*b).to_string()
             );
         }
-        assert_eq!(detail["limits.book.2.rejects"], "2");
-        assert_eq!(detail["limits.book.4.rejects"], "1");
-        assert_eq!(detail["limits.book.1.rejects"], "0");
+        assert_eq!(at(&detail, "limits.book.2.rejects"), "2");
+        assert_eq!(at(&detail, "limits.book.4.rejects"), "1");
+        assert_eq!(at(&detail, "limits.book.1.rejects"), "0");
     }
 
     #[test]

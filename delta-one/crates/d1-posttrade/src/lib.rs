@@ -23,7 +23,7 @@ use d1_core::{BookId, ClOrdId, ExecId, InstrumentId, OrderStatus, Side};
 use uuid::Uuid;
 
 pub use convert::Schemas;
-pub use producer::run_producer;
+pub use producer::{ProducerFlags, run_producer};
 pub use registry::{FRAME_LEN, MAGIC_BYTE, SchemaIds, frame};
 
 /// Everything the post-trade plane needs to run: a Kafka broker list and the

@@ -416,15 +416,16 @@ pub fn spawn(cfg: SpawnConfig, shutdown: &Arc<AtomicBool>) -> RunHandles {
         let pt_health = pt_health.unwrap_or_default();
         thread::spawn(move || {
             let result = d1_posttrade::run_producer(
-                &cfg.brokers,
-                &cfg.registry_url,
+                &cfg,
                 universe,
                 posttrade_rx,
                 producer_stamper,
                 &flag,
                 run_id,
-                &pt_health.ready,
-                &pt_health.send_failures,
+                d1_posttrade::ProducerFlags {
+                    ready: &pt_health.ready,
+                    send_failures: &pt_health.send_failures,
+                },
             );
             // Log as soon as the thread dies, not just at `main.rs`'s final
             // join: a broker outage at startup (e.g. `ensure_topics` failing)
