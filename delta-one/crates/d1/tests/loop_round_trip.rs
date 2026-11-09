@@ -13,7 +13,10 @@
 //! 4. A `ValuationSnapshot` on `exo.valuations.3` with AAPL vega at the hard
 //!    cap yields `RiskLimitAlert{breached}` on `d1.alerts.limits`; a following
 //!    snapshot with vega 0 yields `cleared` (§3).
-//! 5. No alert for a snapshot without `valuation`, nor for subject book 4 /
+//! 5. `d1.risk.firm`: a `RiskSnapshot` (schema_version 2) within 2 s carrying
+//!    the startup fill as AAPL's `firm_delta_qty_e2`, and the vega row level
+//!    following the alert (HARD, then OK) (ADR-014 Amendment 1).
+//! 6. No alert for a snapshot without `valuation`, nor for subject book 4 /
 //!    payload book 3 (§3 acceptance rules 1 and 2).
 //!
 //! Requires a NATS server on `127.0.0.1:4222` (`just up`). Marked `#[ignore]`
@@ -38,8 +41,8 @@ use d1_core::{BookId, CycleRef, FeedTick, InstrumentId, NettingCycleId, Side};
 use d1_gateway_nats::pb::hedging::common::v1::{InstrumentRef, Meta, ValuationMeta};
 use d1_gateway_nats::pb::hedging::live::v1::valuation_snapshot::ProductLine;
 use d1_gateway_nats::pb::hedging::live::v1::{
-    ExecutionReport, MarkPrice, OrdStatus, PositionSnapshot, RiskLimitAlert, TargetPosition,
-    ValuationSnapshot, risk_limit_alert,
+    ExecutionReport, MarkPrice, OrdStatus, PositionSnapshot, RiskLimitAlert, RiskSnapshot,
+    TargetPosition, ValuationSnapshot, risk_limit_alert, risk_snapshot,
 };
 use futures_util::StreamExt;
 use prost::Message;
@@ -351,6 +354,7 @@ fn loop_support_round_trip() {
         let mut parent_sub = client.subscribe("d1.exec.0.1002").await.unwrap();
         let mut alloc_sub = client.subscribe("d1.exec.1.1002").await.unwrap();
         let mut alerts_sub = client.subscribe("d1.alerts.limits").await.unwrap();
+        let mut risk_sub = client.subscribe("d1.risk.firm").await.unwrap();
 
         // Sync point: the startup order's report proves the gateway is live
         // and the fill is booked.
@@ -364,6 +368,27 @@ fn loop_support_round_trip() {
         assert!(!startup.allocation);
         assert_eq!(startup.book_cum_qty_e2, 0);
         assert_eq!(startup.netting_cycle_id, "");
+
+        // (i-b) The 1 s `d1.risk.firm` RiskSnapshot arrives within 2 s and
+        // reports the startup fill as AAPL's firm delta (D1 qty; no EXO line).
+        let aapl_row = |s: &RiskSnapshot| {
+            s.greeks
+                .iter()
+                .find(|g| g.underlying.as_ref().map(|u| u.instrument_id) == Some(AAPL))
+                .cloned()
+        };
+        let risk: RiskSnapshot = tokio::time::timeout(
+            Duration::from_secs(2),
+            await_msg(&mut risk_sub, "RiskSnapshot", |s: &RiskSnapshot| {
+                aapl_row(s).is_some_and(|g| g.firm_delta_qty_e2 == STARTUP_QTY_E2)
+            }),
+        )
+        .await
+        .expect("no d1.risk.firm RiskSnapshot with the startup fill within 2 s");
+        assert_eq!(risk.meta.as_ref().unwrap().schema_version, 2);
+        let row = aapl_row(&risk).unwrap();
+        assert_eq!(row.vega_level, risk_snapshot::LimitLevel::Ok as i32);
+        assert!(row.vega_hard_e9 > row.vega_warn_e9 && row.vega_warn_e9 > 0);
 
         // (i) At least 2 snapshots carrying the startup fill inside 2.5 s.
         let window_end = Instant::now() + Duration::from_millis(2_500);
@@ -491,6 +516,16 @@ fn loop_support_round_trip() {
         assert_eq!(breach.value_e9, vega_hard_e9);
         assert_eq!(breach.limit_e9, vega_hard_e9);
         assert_eq!((breach.value_qty_e2, breach.limit_qty_e2), (0, 0));
+        // The next RiskSnapshot reports the same level and value.
+        let hard: RiskSnapshot = tokio::time::timeout(
+            Duration::from_secs(2),
+            await_msg(&mut risk_sub, "RiskSnapshot at HARD", |s: &RiskSnapshot| {
+                aapl_row(s).is_some_and(|g| g.vega_level == risk_snapshot::LimitLevel::Hard as i32)
+            }),
+        )
+        .await
+        .expect("no HARD RiskSnapshot within 2 s of the alert");
+        assert_eq!(aapl_row(&hard).unwrap().vega_e9, vega_hard_e9);
         client
             .publish(
                 "exo.valuations.3",
@@ -504,6 +539,20 @@ fn loop_support_round_trip() {
             |a: &RiskLimitAlert| is_aapl_vega(a) && a.cleared,
         )
         .await;
+        let ok: RiskSnapshot = tokio::time::timeout(
+            Duration::from_secs(2),
+            await_msg(
+                &mut risk_sub,
+                "RiskSnapshot back at OK",
+                |s: &RiskSnapshot| {
+                    aapl_row(s)
+                        .is_some_and(|g| g.vega_level == risk_snapshot::LimitLevel::Ok as i32)
+                },
+            ),
+        )
+        .await
+        .expect("no OK RiskSnapshot within 2 s of the clear");
+        assert_eq!(aapl_row(&ok).unwrap().vega_e9, 0);
 
         // (v) No alert for: no `valuation` block (book 4); subject book 4
         // with payload book 3 (rule 1).

@@ -64,10 +64,6 @@ const TRANSFER_SUBJECT_WILDCARD: &str = "exo.transfers.*";
 /// Wildcard subscription for every book EXO publishes valuations on
 /// (`protocol/nats-subjects.md`: `exo.valuations.<book>`), feeding the Tier-1
 /// limits (ADR-014 §3).
-//
-// ponytail: `d1.risk.firm` (`RiskSnapshot`) is not published -- the Tier-1
-// limits read EXO's Greeks directly and nothing consumes a firm snapshot
-// before the UI exists. Owner P3.M1 (ADR-014 "not done here").
 const VALUATION_SUBJECT_WILDCARD: &str = "exo.valuations.*";
 
 /// A mid for the gateway to publish as `MarkPrice` (ADR-014 §2). The core
@@ -358,9 +354,27 @@ async fn run_gateway_async(
             .await;
         }
 
+        // Once per second, in this order: limit re-check (staleness), the alerts
+        // it causes, then the RiskSnapshot that reports the resulting levels.
         if periodic_due {
             let events = limit_book.tick(now);
             publish_alerts(&client, &events).await;
+            let pb = convert::risk_snapshot_to_pb(
+                &limit_book.firm_greeks(now),
+                &position_mirror.net_qty_by_instrument(),
+                |id| mark_throttle.latest_mid(id),
+                &limit_book.limits(),
+                uuid::Uuid::now_v7().to_string(),
+                now_ns(),
+            );
+            publish_pb(
+                &client,
+                convert::RISK_FIRM_SUBJECT.to_string(),
+                &pb,
+                "RiskSnapshot",
+            )
+            .await;
+            // Slot: task 5 publishes HealthStatus here, after the RiskSnapshot.
         }
     }
 

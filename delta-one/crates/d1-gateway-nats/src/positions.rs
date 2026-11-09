@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use d1_core::BookId;
+use d1_core::{BookId, InstrumentId};
 
 use crate::PositionUpdate;
 
@@ -12,7 +12,7 @@ use crate::PositionUpdate;
 /// since the last snapshot.
 #[derive(Default)]
 pub struct PositionMirror {
-    books: BTreeMap<BookId, BTreeMap<d1_core::InstrumentId, PositionUpdate>>,
+    books: BTreeMap<BookId, BTreeMap<InstrumentId, PositionUpdate>>,
     dirty: BTreeSet<BookId>,
 }
 
@@ -48,6 +48,18 @@ impl PositionMirror {
             .unwrap_or_default()
     }
 
+    /// Net quantity per instrument, summed over every book (`i128`, so the
+    /// sum cannot overflow). Includes instruments that net to 0; inflight is
+    /// not counted. Feeds the firm delta of `RiskSnapshot` (ADR-014 Amend 1).
+    #[must_use]
+    pub fn net_qty_by_instrument(&self) -> BTreeMap<InstrumentId, i128> {
+        let mut net = BTreeMap::new();
+        for line in self.books.values().flat_map(BTreeMap::values) {
+            *net.entry(line.instrument).or_insert(0_i128) += i128::from(line.qty_e2);
+        }
+        net
+    }
+
     /// Books that changed since the last call; clears the set.
     pub fn take_dirty(&mut self) -> Vec<BookId> {
         std::mem::take(&mut self.dirty).into_iter().collect()
@@ -62,8 +74,6 @@ impl PositionMirror {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)] // tests: unwrap_used/expect_used are hot-path-only bans (delta-one/CLAUDE.md)
 mod tests {
-    use d1_core::InstrumentId;
-
     use super::*;
 
     fn up(book: u32, instr: u32, qty: i64, inflight: i64) -> PositionUpdate {
@@ -114,5 +124,25 @@ mod tests {
         m.apply(up(1, 1001, 101, 0));
         m.clear_dirty();
         assert!(m.take_dirty().is_empty());
+    }
+
+    #[test]
+    fn net_qty_sums_books_per_instrument_and_ignores_inflight() {
+        let mut m = PositionMirror::new();
+        assert!(m.net_qty_by_instrument().is_empty());
+        m.apply(up(1, 1001, 100, 7));
+        m.apply(up(2, 1001, -40, 0));
+        m.apply(up(2, 1002, 5, 0));
+        m.apply(up(3, 1002, -5, 0)); // nets to 0, still listed
+        let net = m.net_qty_by_instrument();
+        assert_eq!(net.get(&InstrumentId(1001)), Some(&60));
+        assert_eq!(net.get(&InstrumentId(1002)), Some(&0));
+        // Sums are i128: two i64::MAX do not overflow.
+        m.apply(up(1, 1003, i64::MAX, 0));
+        m.apply(up(2, 1003, i64::MAX, 0));
+        assert_eq!(
+            m.net_qty_by_instrument().get(&InstrumentId(1003)),
+            Some(&(2 * i128::from(i64::MAX)))
+        );
     }
 }
