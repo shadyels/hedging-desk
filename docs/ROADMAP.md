@@ -55,7 +55,7 @@ Scope principle (corrected 2026-07-06): the **instrument universe** starts minim
       - *The tracker flow is a harness stand-in* for an index-replication source.
       - *Recon halts clear only on an agreeing snapshot or an EXO restart.* Operator re-seed is P3.M2.
       - *A revaluation over 30 s is fatal* (exit 3); no supervisor restarts EXO (ADR-014 §15).
-      - *`d1.risk.firm` is not published* (P3.M1). Limit alerts have no hysteresis, and books that never published are invisible to the limits.
+      - *`d1.risk.firm` is delivered in P3.M1 Slice 2* (`RiskSnapshot`, ADR-014 Amendment 1 §1). Limit alerts have no hysteresis, and books that never published are invisible to the limits.
       - *The storyline runs Delta One without Kafka* (`posttrade: None`); the `d1` binary itself always produces to Kafka. Post-trade landing (trades, internal crosses, allocations, order audit) is covered by `golden_posttrade` on its own fixed scenario, not by the storyline's numbers. The UI step is P3.
       - *Not loadable:* American warrants and mini futures; no quanto products.
       - *NATS has no authentication* (ADR-014 §13); owner P3.M2.
