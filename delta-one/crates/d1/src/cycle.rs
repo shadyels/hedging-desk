@@ -53,6 +53,19 @@ pub struct ParentOrder {
     pub allocated: Vec<i64>,
 }
 
+impl ParentOrder {
+    /// Cumulative quantity allocated to `book` so far (0 if `book` is not a
+    /// weight of this parent), fixed-point x10^2.
+    #[must_use]
+    pub fn allocated_to(&self, book: BookId) -> i64 {
+        self.weights
+            .iter()
+            .position(|&(b, _)| b == book)
+            .and_then(|i| self.allocated.get(i).copied())
+            .unwrap_or(0)
+    }
+}
+
 /// Output of one netting cycle (`NettingSession::on_target`).
 #[derive(Debug, Clone)]
 pub struct CycleOutput {
@@ -834,6 +847,45 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn allocated_to_is_monotone_bounded_and_sums_to_cum_filled(
+            m in prop::collection::vec(1i64..=1_000, 1..=5),
+            fills in prop::collection::vec(0i64..=2_000, 0..=12),
+        ) {
+            // `allocated_to` feeds the wire's `book_cum_qty_e2`: it must
+            // never fall, never exceed the book's share `m_b` (overfills
+            // are clamped), and the books must always sum to the parent's
+            // `cum_filled_e2`.
+            let weights: Vec<(BookId, i64)> = m
+                .iter()
+                .enumerate()
+                .map(|(i, &w)| (BookId(u32::try_from(i).unwrap() + 1), w))
+                .collect();
+            let mut parent = ParentOrder {
+                cycle_id: 1,
+                instrument: InstrumentId(1001),
+                side: Side::Sell,
+                order_qty_e2: m.iter().sum(),
+                cum_filled_e2: 0,
+                allocated: vec![0; weights.len()],
+                weights: weights.clone(),
+            };
+            prop_assert_eq!(parent.allocated_to(BookId(999)), 0);
+            let mut prev = vec![0i64; weights.len()];
+            for fill in fills {
+                let _ = allocate_fill(&mut parent, fill);
+                let mut total = 0;
+                for (&(book, m_b), before) in weights.iter().zip(prev.iter_mut()) {
+                    let now = parent.allocated_to(book);
+                    prop_assert!(now >= *before);
+                    prop_assert!(now <= m_b);
+                    *before = now;
+                    total += now;
+                }
+                prop_assert_eq!(total, parent.cum_filled_e2);
+            }
+        }
+
         #[test]
         fn transfer_conserves_firm_position(
             qty_e2 in 1i64..=1_000_000,

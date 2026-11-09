@@ -132,6 +132,15 @@ pub struct ExecReport {
     pub cum_qty_e2: i64,
     /// Remaining quantity, fixed-point x10^2.
     pub leaves_qty_e2: i64,
+    /// True for a per-book allocation report of a netting parent (`book` is
+    /// the allocated book, `last_qty_e2` its share; status/cum/leaves stay
+    /// the PARENT's). False for a book-0 parent report or a direct order's.
+    pub allocation: bool,
+    /// Cumulative quantity allocated to `book` including this report
+    /// (allocation reports only; 0 otherwise), fixed-point x10^2.
+    pub book_cum_qty_e2: i64,
+    /// Netting cycle that minted the parent order; `None` for a direct order.
+    pub cycle_id: Option<u64>,
 }
 
 /// Outcome of `apply_exec`: whether the exec was a replayed duplicate

@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use d1::config::TrackerConfig;
 use d1::{FixConfig, SpawnConfig, StartupOrder, spawn};
-use d1_core::{BookId, FeedTick, InstrumentId, Side};
+use d1_core::{BookId, CycleRef, FeedTick, InstrumentId, NettingCycleId, Side};
 use d1_gateway_nats::pb::hedging::common::v1::{InstrumentRef, Meta, ValuationMeta};
 use d1_gateway_nats::pb::hedging::live::v1::valuation_snapshot::ProductLine;
 use d1_gateway_nats::pb::hedging::live::v1::{
@@ -360,6 +360,10 @@ fn loop_support_round_trip() {
             })
             .await;
         assert_eq!(startup.status, OrdStatus::Filled as i32);
+        // A direct (non-parent) order: no lineage, not an allocation.
+        assert!(!startup.allocation);
+        assert_eq!(startup.book_cum_qty_e2, 0);
+        assert_eq!(startup.netting_cycle_id, "");
 
         // (i) At least 2 snapshots carrying the startup fill inside 2.5 s.
         let window_end = Instant::now() + Duration::from_millis(2_500);
@@ -439,6 +443,30 @@ fn loop_support_round_trip() {
             alloc.cum_qty_e2, parent.cum_qty_e2,
             "status/cum/leaves are the parent's"
         );
+        // Allocation flag, per-book cumulative (running Σ last_qty per
+        // (cl_ord_id, book)) and the shared cycle lineage.
+        assert!(
+            !parent.allocation,
+            "book-0 parent report is not an allocation"
+        );
+        assert_eq!(parent.book_cum_qty_e2, 0);
+        assert!(alloc.allocation);
+        let mut running: std::collections::HashMap<(String, u32), i64> =
+            std::collections::HashMap::new();
+        let cum = running
+            .entry((alloc.cl_ord_id.clone(), alloc.book_id))
+            .or_insert(0);
+        *cum += alloc.last_qty_e2;
+        assert_eq!(alloc.book_cum_qty_e2, *cum);
+        assert!(!parent.netting_cycle_id.is_empty());
+        assert_eq!(
+            alloc.netting_cycle_id, parent.netting_cycle_id,
+            "all reports of one parent share one netting_cycle_id"
+        );
+        assert!(matches!(
+            CycleRef::parse(&parent.netting_cycle_id).map(|c| c.cycle),
+            Some(NettingCycleId::Cycle(_))
+        ));
 
         // (iv) Tier-1 limits: hard breach, then cleared.
         client

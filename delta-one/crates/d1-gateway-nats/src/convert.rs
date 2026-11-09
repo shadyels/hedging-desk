@@ -5,8 +5,8 @@
 
 use d1_analytics::TrackerRecord;
 use d1_core::{
-    BookId, ClOrdId, CrossRecord, ExecId, ExecReport, InstrumentId, OrderStatus, Side, Target,
-    TransferRequest,
+    BookId, ClOrdId, CrossRecord, CycleRef, ExecId, ExecReport, InstrumentId, NettingCycleId,
+    OrderStatus, RunId, Side, Target, TransferRequest,
 };
 
 use crate::error::NatsError;
@@ -57,13 +57,18 @@ pub fn exec_subject(book: BookId, instrument: InstrumentId) -> String {
 /// Build the outbound `ExecutionReport` for a core `ExecReport`, stamping a
 /// fresh `Meta` block (`protocol/CLAUDE.md`: every NATS payload carries one).
 #[must_use]
-pub fn exec_report_to_pb(report: &ExecReport, msg_id: String, sent_ns: u64) -> ExecutionReport {
+pub fn exec_report_to_pb(
+    report: &ExecReport,
+    run: RunId,
+    msg_id: String,
+    sent_ns: u64,
+) -> ExecutionReport {
     ExecutionReport {
         meta: Some(Meta {
             msg_id,
             producer: "delta-one".to_string(),
             sent_ns,
-            schema_version: 1,
+            schema_version: 2,
         }),
         cl_ord_id: clordid_to_string(&report.cl_ord_id),
         exec_id: execid_to_string(&report.exec_id),
@@ -79,10 +84,16 @@ pub fn exec_report_to_pb(report: &ExecReport, msg_id: String, sent_ns: u64) -> E
         cum_qty_e2: report.cum_qty_e2,
         leaves_qty_e2: report.leaves_qty_e2,
         text: String::new(),
-        // P3.M1 slice 2 wire fields (live.proto 13-15): populated in a later task.
-        allocation: false,
-        book_cum_qty_e2: 0,
-        netting_cycle_id: String::new(),
+        allocation: report.allocation,
+        book_cum_qty_e2: report.book_cum_qty_e2,
+        // "" for a direct order (no minting cycle).
+        netting_cycle_id: report.cycle_id.map_or_else(String::new, |n| {
+            CycleRef {
+                run,
+                cycle: NettingCycleId::Cycle(n),
+            }
+            .to_string()
+        }),
     }
 }
 
@@ -111,6 +122,7 @@ pub fn internal_transfer_to_transfer(
 #[must_use]
 pub fn cross_record_to_pb(
     record: &CrossRecord,
+    run: RunId,
     msg_id: String,
     sent_ns: u64,
 ) -> InternalCrossNotice {
@@ -119,7 +131,7 @@ pub fn cross_record_to_pb(
             msg_id,
             producer: "delta-one".to_string(),
             sent_ns,
-            schema_version: 1,
+            schema_version: 2,
         }),
         cross_id: record.cross_id.to_string(),
         instrument: Some(InstrumentRef {
@@ -131,8 +143,11 @@ pub fn cross_record_to_pb(
         qty_e2: record.qty_e2,
         ref_px_e9: record.ref_px_e9,
         px_policy_id: record.policy_id.to_string(),
-        // live.proto tag 9: populated in a later task.
-        netting_cycle_id: String::new(),
+        netting_cycle_id: CycleRef {
+            run,
+            cycle: record.netting_cycle_id,
+        }
+        .to_string(),
     }
 }
 
@@ -438,7 +453,13 @@ mod tests {
             policy_id: "ARRIVAL_MID",
             netting_cycle_id: d1_core::NettingCycleId::Cycle(2),
         };
-        let pb = cross_record_to_pb(&record, "msg-1".to_string(), 42);
+        let run = RunId(uuid::Uuid::from_u128(0xabc));
+        let pb = cross_record_to_pb(&record, run, "msg-1".to_string(), 42);
+        assert_eq!(pb.meta.as_ref().unwrap().schema_version, 2);
+        assert_eq!(
+            pb.netting_cycle_id,
+            "00000000-0000-0000-0000-000000000abc/2"
+        );
 
         assert_eq!(pb.meta.as_ref().unwrap().msg_id, "msg-1");
         assert_eq!(pb.meta.as_ref().unwrap().producer, "delta-one");
@@ -450,6 +471,13 @@ mod tests {
         assert_eq!(pb.qty_e2, 800_000);
         assert_eq!(pb.ref_px_e9, 150_000_000_000);
         assert_eq!(pb.px_policy_id, "ARRIVAL_MID");
+
+        let transfer = CrossRecord {
+            netting_cycle_id: d1_core::NettingCycleId::Direct,
+            ..record
+        };
+        let pb = cross_record_to_pb(&transfer, run, "msg-2".to_string(), 43);
+        assert_eq!(pb.netting_cycle_id, "DIRECT");
     }
 
     #[test]
@@ -530,8 +558,19 @@ mod tests {
             last_px_e9: 150_500_000_000,
             cum_qty_e2: 10_000,
             leaves_qty_e2: 0,
+            allocation: true,
+            book_cum_qty_e2: 7_000,
+            cycle_id: Some(5),
         };
-        let pb = exec_report_to_pb(&report, "msg-1".to_string(), 42);
+        let run = RunId(uuid::Uuid::from_u128(0xabc));
+        let pb = exec_report_to_pb(&report, run, "msg-1".to_string(), 42);
+        assert_eq!(pb.meta.as_ref().unwrap().schema_version, 2);
+        assert!(pb.allocation);
+        assert_eq!(pb.book_cum_qty_e2, 7_000);
+        assert_eq!(
+            pb.netting_cycle_id,
+            "00000000-0000-0000-0000-000000000abc/5"
+        );
 
         assert_eq!(pb.meta.as_ref().unwrap().msg_id, "msg-1");
         assert_eq!(pb.meta.as_ref().unwrap().producer, "delta-one");
@@ -546,6 +585,18 @@ mod tests {
         assert_eq!(pb.last_px_e9, 150_500_000_000);
         assert_eq!(pb.cum_qty_e2, 10_000);
         assert_eq!(pb.leaves_qty_e2, 0);
+
+        // A direct order (no minting cycle) carries "" and the zero defaults.
+        let direct = ExecReport {
+            allocation: false,
+            book_cum_qty_e2: 0,
+            cycle_id: None,
+            ..report
+        };
+        let pb = exec_report_to_pb(&direct, run, "msg-2".to_string(), 43);
+        assert!(!pb.allocation);
+        assert_eq!(pb.book_cum_qty_e2, 0);
+        assert_eq!(pb.netting_cycle_id, "");
     }
 
     #[test]

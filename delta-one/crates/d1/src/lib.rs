@@ -284,6 +284,16 @@ pub fn spawn(cfg: SpawnConfig, shutdown: &Arc<AtomicBool>) -> RunHandles {
         })
         .collect();
     let tracker_sampling_interval_s = tracker_cfg.sampling_interval_s;
+    // Per-process run id for the `netting_cycle_id` lineage key
+    // (`"<run>/<n>"`): `cycle_seq` restarts at 1 each process. Minted HERE,
+    // outside both `Stamper`s' state, so it never consumes a `Stamper::Fixed` id
+    // (that would shift every golden id); deterministic mode uses the nil
+    // `RunId::FIXED` instead.
+    let run_id = if deterministic {
+        RunId::FIXED
+    } else {
+        RunId(Stamper::Wall.uuid())
+    };
     // Cloned before `book_ids`/`instrument_ids` move into the core thread.
     let gateway_cfg = GatewayConfig {
         url: nats_url,
@@ -300,6 +310,7 @@ pub fn spawn(cfg: SpawnConfig, shutdown: &Arc<AtomicBool>) -> RunHandles {
             rho_hard_e9: limits.defaults.rho_hard_e9,
         },
         valuation_max_age_s: limits.valuation_max_age_s,
+        run_id,
     };
 
     let core_shutdown = Arc::clone(shutdown);
@@ -379,17 +390,6 @@ pub fn spawn(cfg: SpawnConfig, shutdown: &Arc<AtomicBool>) -> RunHandles {
     // is the only pusher onto `posttrade_tx`, so this flag must not flip
     // until the caller has joined `core`, or the producer can drain-flush-exit
     // while `core` is still mid-iteration pushing events.
-    //
-    // Per-process run id for the `netting_cycle_id` lineage key
-    // (`"<run>/<n>"`): `cycle_seq` restarts at 1 each process. Minted HERE,
-    // outside both `Stamper`s' state, so it never consumes a `Stamper::Fixed` id
-    // (that would shift every golden id); deterministic mode uses the nil
-    // `RunId::FIXED` instead.
-    let run_id = if deterministic {
-        RunId::FIXED
-    } else {
-        RunId(Stamper::Wall.uuid())
-    };
     let mut posttrade_shutdown = None;
     let posttrade = posttrade_cfg.map(|cfg| {
         let flag = Arc::new(AtomicBool::new(false));
@@ -977,11 +977,6 @@ fn run_core(
                                     // Pushed before the parent's book-0 report
                                     // below, on the same ring, so it publishes
                                     // first.
-                                    //
-                                    // ponytail: carries the PARENT's
-                                    // status/cum/leaves and no allocation
-                                    // flag -- no per-book cumulative until
-                                    // P3.M1's blotter needs one.
                                     if let Some(order) = current {
                                         let report = ExecReport {
                                             cl_ord_id: event.cl_ord_id,
@@ -994,6 +989,9 @@ fn run_core(
                                             last_px_e9: fill.px_e9,
                                             cum_qty_e2: order.cum_qty_e2,
                                             leaves_qty_e2: order.leaves_qty_e2,
+                                            allocation: true,
+                                            book_cum_qty_e2: parent.allocated_to(book),
+                                            cycle_id: Some(cycle_id),
                                         };
                                         if exec_report_tx.push(report).is_err() {
                                             eprintln!(
@@ -1132,6 +1130,9 @@ fn run_core(
                                 last_px_e9: event.last_px_e9,
                                 cum_qty_e2: order.cum_qty_e2,
                                 leaves_qty_e2: order.leaves_qty_e2,
+                                allocation: false,
+                                book_cum_qty_e2: 0,
+                                cycle_id: session.parent(event.cl_ord_id).map(|p| p.cycle_id),
                             };
                             if exec_report_tx.push(report).is_err() {
                                 eprintln!("d1: NATS outbound ring full, dropping ExecutionReport");

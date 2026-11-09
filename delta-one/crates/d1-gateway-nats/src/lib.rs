@@ -38,7 +38,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use d1_analytics::TrackerRecord;
-use d1_core::{BookId, CrossRecord, ExecReport, InstrumentId, Target, TransferRequest};
+use d1_core::{BookId, CrossRecord, ExecReport, InstrumentId, RunId, Target, TransferRequest};
 use futures_util::StreamExt;
 use prost::Message as _;
 
@@ -118,6 +118,8 @@ pub struct GatewayConfig {
     pub limits: TierOneLimits,
     /// `d1.toml [limits] valuation_max_age_s`.
     pub valuation_max_age_s: u32,
+    /// This process's run id, rendered into every `netting_cycle_id`.
+    pub run_id: RunId,
 }
 
 /// The gateway's ends of the core's rings (ADR-013).
@@ -266,7 +268,7 @@ async fn run_gateway_async(
         while let Ok(report) = exec_rx.pop() {
             let subject = convert::exec_subject(report.book, report.instrument);
             let msg_id = uuid::Uuid::now_v7().to_string();
-            let pb_report = convert::exec_report_to_pb(&report, msg_id, now_ns());
+            let pb_report = convert::exec_report_to_pb(&report, cfg.run_id, msg_id, now_ns());
             if let Err(err) = client
                 .publish(subject, pb_report.encode_to_vec().into())
                 .await
@@ -277,7 +279,7 @@ async fn run_gateway_async(
 
         while let Ok(record) = cross_rx.pop() {
             let msg_id = uuid::Uuid::now_v7().to_string();
-            let pb_notice = convert::cross_record_to_pb(&record, msg_id, now_ns());
+            let pb_notice = convert::cross_record_to_pb(&record, cfg.run_id, msg_id, now_ns());
             if let Err(err) = client
                 .publish(convert::CROSSES_SUBJECT, pb_notice.encode_to_vec().into())
                 .await
