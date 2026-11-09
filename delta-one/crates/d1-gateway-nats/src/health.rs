@@ -23,9 +23,10 @@ pub struct PostTradeHealth {
     /// Set once the schema registry accepted all schemas, i.e. the producer is
     /// about to drain.
     pub ready: AtomicBool,
-    /// Set when the producer thread exited with an error.
+    /// Set when the producer thread exited with an error or panicked.
     pub failed: AtomicBool,
-    /// Local `send()` failures (queue full, message too large, ...).
+    /// Records dropped locally: `send()` failures (queue full, message too
+    /// large, ...), encode failures and unknown-topic drops.
     pub send_failures: AtomicU64,
 }
 

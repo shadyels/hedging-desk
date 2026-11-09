@@ -197,6 +197,23 @@ pub struct SpawnConfig {
     pub feed_ticks: Option<Vec<FeedTick>>,
 }
 
+/// Marks `d1.health`'s producer flag `failed` if dropped while `armed`, i.e.
+/// when the producer thread unwinds from a panic before the clean-exit path
+/// disarms it.
+struct FailOnUnwind<'a> {
+    failed: &'a AtomicBool,
+    armed: bool,
+}
+
+impl Drop for FailOnUnwind<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            // Relaxed: display-only for `d1.health` (`PostTradeHealth`).
+            self.failed.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
 /// Build the `rtrb` rings (ADR-013) and spawn the core/FIX/NATS/feed
 /// threads. Blocks on nothing itself -- the caller decides how/when to flip
 /// `shutdown` and joins the returned handles. If a Kafka producer thread is
@@ -302,8 +319,8 @@ pub fn spawn(cfg: SpawnConfig, shutdown: &Arc<AtomicBool>) -> RunHandles {
     // a producer is spawned.
     let callbacks = FixCallbacks::new(fix_inbound_tx);
     let pt_health = posttrade_cfg
-        .is_some()
-        .then(|| Arc::new(PostTradeHealth::default()));
+        .as_ref()
+        .map(|_| Arc::new(PostTradeHealth::default()));
     let health = HealthInputs {
         fix_logged_on: callbacks.logged_on_handle(),
         posttrade: pt_health.clone(),
@@ -405,7 +422,9 @@ pub fn spawn(cfg: SpawnConfig, shutdown: &Arc<AtomicBool>) -> RunHandles {
     // until the caller has joined `core`, or the producer can drain-flush-exit
     // while `core` is still mid-iteration pushing events.
     let mut posttrade_shutdown = None;
-    let posttrade = posttrade_cfg.map(|cfg| {
+    // `zip` ties the producer to the health flags by type: the same `Option`
+    // that gates the spawn supplies the flags, so no fallback is needed.
+    let posttrade = posttrade_cfg.zip(pt_health).map(|(cfg, pt_health)| {
         let flag = Arc::new(AtomicBool::new(false));
         posttrade_shutdown = Some(Arc::clone(&flag));
         let producer_stamper = if deterministic {
@@ -413,8 +432,13 @@ pub fn spawn(cfg: SpawnConfig, shutdown: &Arc<AtomicBool>) -> RunHandles {
         } else {
             Stamper::Wall
         };
-        let pt_health = pt_health.unwrap_or_default();
         thread::spawn(move || {
+            // Armed until `run_producer` returns, so a panic (which unwinds
+            // past the `Err` arm below) still marks the producer failed.
+            let mut panic_guard = FailOnUnwind {
+                failed: &pt_health.failed,
+                armed: true,
+            };
             let result = d1_posttrade::run_producer(
                 &cfg,
                 universe,
@@ -432,6 +456,7 @@ pub fn spawn(cfg: SpawnConfig, shutdown: &Arc<AtomicBool>) -> RunHandles {
             // would otherwise leave the entire post-trade/compliance audit
             // trail silently dropped for the rest of the session with no
             // visibility until shutdown.
+            panic_guard.armed = false;
             if let Err(ref err) = result {
                 eprintln!("d1: Kafka post-trade producer exited with error: {err}");
                 // Relaxed: display-only for `d1.health` (`PostTradeHealth`).

@@ -38,7 +38,8 @@ pub struct ProducerFlags<'a> {
     /// Set once the schema registry accepted every schema (the drain loop is
     /// about to start).
     pub ready: &'a AtomicBool,
-    /// Counts local `send()` errors.
+    /// Counts records dropped locally: `send()` errors, encode failures and
+    /// unknown-topic drops.
     pub send_failures: &'a AtomicU64,
 }
 
@@ -147,6 +148,7 @@ impl Drainer<'_> {
             // an event that is then dropped would put the golden-file sequence
             // out of step with the records actually published.
             let Some(schema_id) = self.schema_ids.for_topic(topic) else {
+                self.send_failures.fetch_add(1, Ordering::Relaxed); // display-only
                 eprintln!(
                     "d1-posttrade: {}, dropping event",
                     PostTradeError::UnknownTopic(topic.to_owned())
@@ -159,6 +161,7 @@ impl Drainer<'_> {
             {
                 Ok(datum) => datum,
                 Err(err) => {
+                    self.send_failures.fetch_add(1, Ordering::Relaxed); // display-only
                     eprintln!("d1-posttrade: encode failed, dropping event: {err}");
                     continue;
                 }
@@ -175,7 +178,7 @@ impl Drainer<'_> {
             {
                 // ponytail: (N2) broker-side delivery failures are invisible --
                 // `DefaultProducerContext` drops delivery reports, so this counts
-                // only local `send()` errors. Upgrade: a counting `ProducerContext`.
+                // only local drops (`send()` errors, encode failures, unknown topics). Upgrade: a counting `ProducerContext`.
                 // Trigger: the first non-localhost broker (same as the plaintext
                 // marker in `run_producer`). Owner undecided.
                 self.send_failures.fetch_add(1, Ordering::Relaxed); // display-only
