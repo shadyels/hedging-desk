@@ -75,7 +75,6 @@ impl CycleRef {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)] // tests: unwrap_used/expect_used are hot-path-only bans (delta-one/CLAUDE.md)
 mod tests {
     use super::*;
     use proptest::prelude::*;
@@ -107,9 +106,9 @@ mod tests {
             cycle: NettingCycleId::Direct,
         };
         assert_eq!(r.to_string(), "DIRECT");
-        let back = CycleRef::parse("DIRECT").unwrap();
-        assert_eq!(back.cycle, NettingCycleId::Direct);
-        assert_eq!(back.to_string(), "DIRECT");
+        let back = CycleRef::parse("DIRECT");
+        assert_eq!(back.map(|b| b.cycle), Some(NettingCycleId::Direct));
+        assert_eq!(back.map(|b| b.to_string()), Some("DIRECT".to_string()));
     }
 
     #[test]
