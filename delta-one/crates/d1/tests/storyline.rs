@@ -43,7 +43,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use d1::config::TrackerConfig;
 use d1::{FixConfig, SpawnConfig, StartupOrder, spawn};
-use d1_core::{BookId, InstrumentId, Side};
+use d1_core::{BookId, CycleRef, InstrumentId, NettingCycleId, Side};
 use d1_gateway_nats::pb::hedging::common::v1::{InstrumentRef, Meta, Side as WireSide};
 use d1_gateway_nats::pb::hedging::live::v1::{
     ExecutionReport, HealthStatus, InternalCrossNotice, MarkPrice, OrdStatus, PositionSnapshot,
@@ -337,6 +337,8 @@ struct Walk {
     t1: Option<(i64, Instant)>,
     /// `internal_cross`: receive time.
     cross_at: Option<Instant>,
+    /// `internal_cross`: the notice's `netting_cycle_id`.
+    cross_cycle_id: Option<String>,
 }
 
 impl Walk {
@@ -997,6 +999,7 @@ fn storyline_tracker_flow() {
         flow_target_e2: 0,
         t1: None,
         cross_at: None,
+        cross_cycle_id: None,
     };
     let mut before_gap: Vec<String> = Vec::new();
     // Trigger of the next expect: the last non-quote action seen in script order.
@@ -1082,6 +1085,7 @@ fn storyline_tracker_flow() {
                                 cross.qty_e2
                             );
                             walk.cross_at = Some(at);
+                            walk.cross_cycle_id = Some(cross.netting_cycle_id.clone());
                             walk.prev = at;
                         }
                         "external_residual_order" => {
@@ -1098,6 +1102,32 @@ fn storyline_tracker_flow() {
                                 probe_residual(l, &walk, bound, &before_gap)
                             })
                             .await;
+                            // Lineage: the cross and the residual parent come from
+                            // one netting cycle (inferred from ADR-005: the parent
+                            // is minted for the residual of the cycle that crossed).
+                            let cross_cycle = walk.cross_cycle_id.clone().unwrap();
+                            assert!(
+                                matches!(
+                                    CycleRef::parse(&cross_cycle).map(|c| c.cycle),
+                                    Some(NettingCycleId::Cycle(_))
+                                ),
+                                "cross netting_cycle_id {cross_cycle:?} must parse as a Cycle"
+                            );
+                            let parent_ids: Vec<String> = log
+                                .lock()
+                                .unwrap()
+                                .exec0
+                                .iter()
+                                .filter(|(_, r)| r.cl_ord_id == cl_ord_id)
+                                .map(|(_, r)| r.netting_cycle_id.clone())
+                                .collect();
+                            assert!(!parent_ids.is_empty());
+                            for id in &parent_ids {
+                                assert_eq!(
+                                    id, &cross_cycle,
+                                    "residual parent {cl_ord_id} book-0 report netting_cycle_id vs the internal_cross notice's"
+                                );
+                            }
                             let (t1, _) = walk.t1.unwrap();
                             let residual = (t1 - walk.t0_qty) - walk.d1_core_demand_e2();
                             println!(

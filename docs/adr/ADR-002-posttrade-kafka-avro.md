@@ -22,3 +22,9 @@ Kafka (KRaft mode, no ZooKeeper) + Avro + Confluent Schema Registry with `BACKWA
 
 - Easier: ledger ingestion, compliance replay, golden-file end-to-end tests (`sim/` diffs deterministic scenario output against Kafka history).
 - Harder: one more moving part in compose (registry); schema changes gated by compatibility checks — that friction is intentional.
+
+## Amendment 1 (P3.M1 Slice 2): `netting_cycle_id` value format
+
+**Status:** Accepted (desk lead, 2026-11-09) · **Date:** 2026-11-09
+
+`posttrade.crosses.netting_cycle_id` and `posttrade.allocations.netting_cycle_id` keep their name, position and `string` type. Their value changes from a bare per-process counter (`"2"`), which collides across Delta One restarts, to `"<run_uuid>/<n>"`, with `"DIRECT"` unchanged for directed transfers (ADR-014 Amendment 1 §4). Only the schemas' `doc` attribute changes, which is BACKWARD-compatible. Records produced before this change hold a bare `n` and cannot be attributed to a run. Consumers must treat the field as opaque. Golden fixtures are regenerated for exactly this value change.

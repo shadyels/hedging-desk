@@ -10,7 +10,7 @@ A subject not in this file does not exist. Publishers use fully-qualified subjec
 | `d1.exec.<book>.<instrument>` | Delta One | EXO, UI | `ExecutionReport` | per order event; book 0 = netting parent, book N = per-book allocation (ADR-014 §5) |
 | **`d1.marks.<instrument>`** (new) | Delta One | EXO, UI | `MarkPrice` | on mid change, ≥ 250 ms per instrument (trailing edge) + 1 s keepalive (ADR-014 §2) |
 | `d1.positions.<book>` | Delta One | EXO, UI | `PositionSnapshot` | every 1 s for every book + on change (ADR-014 §7) |
-| `d1.risk.firm` | Delta One | UI | `RiskSnapshot` | periodic (1 s) — **not yet published; P3.M1** |
+| `d1.risk.firm` | Delta One | UI | `RiskSnapshot` | every 1 s (ADR-014 Amendment 1 §1) |
 | `d1.alerts.limits` | Delta One | UI, EXO | `RiskLimitAlert` | on level change: warn / hard / cleared (ADR-014 §3) |
 | `d1.crosses` | Delta One | **EXO**, UI | `InternalCrossNotice` (live notice; booked record is on Kafka) | per cross |
 | `exo.proposals.<book>` | EXO | Delta One (caches active), UI | `HedgeProposal` | on Tier-2 trigger (breach or trader request) |
@@ -19,7 +19,7 @@ A subject not in this file does not exist. Publishers use fully-qualified subjec
 | `d1.cmd.order` | UI (request) | Delta One (reply) | `CommandRequest` → `CommandAck` | manual, Phase 3 |
 | `d1.cmd.killswitch` | UI (request) | Delta One (reply) | `CommandRequest` → `CommandAck` | manual, Phase 3 |
 | `d1.tracker.<book>` | Delta One | UI | `TrackerAnalytics` | per sampling interval (ADR-010) |
-| `d1.health` | Delta One | UI | `HealthStatus` | 1s heartbeat |
+| `d1.health` | Delta One | UI | `HealthStatus` | 1s heartbeat (ADR-014 Amendment 1 §2) |
 | `exo.health` | EXO | UI | `HealthStatus` | 1s heartbeat |
 | `sim.md.<instrument>` | sim | (Delta One ingests via its feed boundary, not via NATS — this subject exists only for UI display of the simulated tape) | `Tick` | streaming |
 

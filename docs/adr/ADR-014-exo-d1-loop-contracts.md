@@ -378,3 +378,59 @@ kept until a target publication actually goes out.
   - limit hysteresis;
   - limits for books that have never published (Delta One cannot know which books EXO values);
   - NATS authentication and authorization (§13; P3.M2).
+
+## Amendment 1 (P3.M1 Slice 2): `d1.risk.firm`, `d1.health`, allocation reports, live-plane lineage
+
+**Status:** Accepted (desk lead, 2026-11-09) · **Date:** 2026-11-09
+
+### 1. `d1.risk.firm` carries `RiskSnapshot`, every 1 s
+
+- **Publisher.** The Delta One NATS gateway thread, on the 1 s tick of §2 and §7, immediately after §3's staleness evaluation. Never on the core thread.
+- **Rows.** One `NetGreeks` per underlying that has an accepted EXO line, a non-zero firm-net D1 position (the sum over books of `qty_e2` on that instrument; a position that nets to zero across books gets no row), or a non-OK limit level. An empty `greeks` list is valid and still published. There is no `book_id` (firm-level, ADR-008).
+- **Values.**
+  - `firm_delta_qty_e2` = Σ over books of D1 position `qty_e2` on that instrument + Σ over books of accepted EXO `delta_qty_e2` for that underlying (ADR-008 "aggregates its own delta"). Inflight is excluded. There is no roll-up through refdata `underlying_id`. The tracker book's liability delta is not represented, so a tracker's inventory appears as firm delta (ledger row N1).
+  - `notional_e9` = `firm_delta_qty_e2 × last D1 mark mid_px_e9 / 100`, in the underlying's currency; 0 without a mark.
+  - `vega_e9`, `gamma_qty_e2`, `rho_e9`, `theta_e9`, `div_sens_e9` are Σ of every book's last accepted lines, using §3's aggregation, in `i128`.
+  - `greeks_flagged` is true if any contributing line has a non-empty `flagged_greeks`.
+  - A sum outside `i64` is saturated by sign (limited Greeks are then HARD, per §3).
+- **Limit state.**
+  - `*_level` is the level of the latest `RiskLimitAlert` for that (underlying, Greek), or OK if none has been raised or the last one cleared. D1 always sets OK/WARN/HARD; UNSPECIFIED means not populated.
+  - `*_warn_*` and `*_hard_*` are the absolute caps from `d1.toml [limits.defaults]`.
+  - `limit_data_suspect` is true when a book that contributes accepted lines to this underlying is stale or invalid. A book with no accepted lines contributes nothing and does not set it; its state is on `d1.health` (`limits.book.<id>.valuation`).
+- **Not covered.** Books that have never published contribute nothing (§3, unchanged).
+
+### 2. `d1.health` carries `HealthStatus`, every 1 s
+
+- `component = "delta-one"`. Published by the gateway thread, so a lost NATS link shows as missing heartbeats.
+- `detail` keys (bounded by configuration; values are fixed tokens or decimal `u64`):
+  - `nats`: `connected` | `pending` | `disconnected`
+  - `fix.session`: `logged_on` | `logged_out`
+  - `posttrade`: `disabled` | `starting` | `running` | `failed`
+  - `posttrade.send_failures`: records dropped locally since start (encode failure, unknown topic, or send error); present unless `disabled`
+  - `limits.unattributable_rejects`
+  - `limits.book.<book_id>.rejects`, for every configured book
+  - `limits.book.<book_id>.valuation`: `none` | `ok` | `stale` | `invalid`, for every configured book
+- `ok` = `fix.session == logged_on` and `posttrade` ∈ {`disabled`, `running`}. Limit levels never affect `ok`. No payload-derived string is ever placed in `detail` (§14).
+
+### 3. Allocation reports (amends §5)
+
+- `ExecutionReport.allocation = true` marks a §5 per-book allocation report. It is false on the book-0 parent report and on a direct order's report.
+- `book_cum_qty_e2` (allocation only; otherwise 0) is the cumulative quantity allocated to `book_id` on this parent, including this report. It reads the allocation ledger that drives inflight, so an allocation that fails to book still counts (and is logged).
+- Reports are published per venue execution only, never at placement. A NEW report is not guaranteed to precede a fill; the working quantity per book is `PositionSnapshot.inflight_qty_e2`.
+
+### 4. Live-plane lineage: `netting_cycle_id`
+
+- **Format.** Each Delta One process mints one run id (UUIDv7) at startup. A netting cycle's id is `"<run_uuid>/<n>"`: the run id in lowercase hyphenated form, `/`, then the decimal per-process cycle sequence (from 1). A directed transfer (ADR-009) carries `"DIRECT"`. One renderer serves NATS and Kafka, so the same cross carries the same string on `d1.crosses` and `posttrade.crosses`.
+- **`InternalCrossNotice.netting_cycle_id`** is the producing cycle's id, or `"DIRECT"`.
+- **`ExecutionReport.netting_cycle_id`** is the minting cycle's id on a netting parent's book-0 report and on its allocation reports, and `""` on a direct (non-parent) order's report.
+- **What is linked.** Crosses and the parent order of the same cycle share `netting_cycle_id`, and an order links to its fills and allocations by `cl_ord_id`/`exec_id`/`book_id`. A target is not linked to the cycle it triggered; that correlation is by (book, instrument) and time.
+- **Consumers.** Treat the id as an opaque string, and never parse the sequence for ordering.
+- **Not restart-unique.** `cl_ord_id` is still per-process (ledger row `d1-core/src/ids.rs`).
+
+### 5. Schema versions (§4 rule, per message type)
+
+`ExecutionReport` 2 (fields 13–15). `InternalCrossNotice` 2 (field 9). `RiskSnapshot` 2 (fields 10–19 on the 1–9 baseline). `HealthStatus` 1. All others are unchanged.
+
+### 6. "Not done here" (updated)
+
+`RiskSnapshot`, the per-book cumulative and allocation flag, and cross↔order lineage are delivered. Target↔cycle lineage and restart-unique `cl_ord_id` remain open.

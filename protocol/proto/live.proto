@@ -45,6 +45,11 @@ message ExecutionReport {
   sint64 cum_qty_e2 = 10;
   sint64 leaves_qty_e2 = 11;
   string text = 12;                // reject reason etc.
+  bool allocation = 13;            // true = per-book ALLOCATION report of a netting parent (ADR-014 Amend 1 s3).
+                                   // book_id != 0; last_qty = this book's share; status/cum/leaves are the PARENT's.
+                                   // false = book-0 parent report, or a direct order's own report.
+  sint64 book_cum_qty_e2 = 14;     // allocation reports only; cumulative qty allocated to book_id incl. this report; 0 otherwise
+  string netting_cycle_id = 15;    // "<run_uuid>/<n>" of minting cycle (book-0 + allocation reports); "" for direct order
 }
 
 message PositionSnapshot {
@@ -63,9 +68,15 @@ message RiskSnapshot {
   // Design decision: delta is HEDGED automatically; vega/gamma are MONITORED
   // only (surfaced to UI/desk, never auto-executed). See docs/ARCHITECTURE.md.
   hedging.common.v1.Meta meta = 1;
+  enum LimitLevel {
+    LIMIT_LEVEL_UNSPECIFIED = 0;
+    LIMIT_LEVEL_OK = 1;
+    LIMIT_LEVEL_WARN = 2;
+    LIMIT_LEVEL_HARD = 3;
+  }
   message NetGreeks {
     hedging.common.v1.InstrumentRef underlying = 1;
-    sint64 firm_delta_qty_e2 = 2;   // hedgeable via Delta One
+    sint64 firm_delta_qty_e2 = 2;   // Σ D1 position qty (all books) + Σ EXO delta_qty_e2 for this underlying (Amend 1 s1)
     sint64 notional_e9 = 3;         // delta notional, underlying ccy
     sint64 vega_e9 = 4;             // ccy per 1.00 vol point; monitored only
     sint64 gamma_qty_e2 = 5;        // dDelta per 1% spot move; monitored only
@@ -73,6 +84,16 @@ message RiskSnapshot {
     sint64 rho_e9 = 7;              // ccy per +1bp parallel rate shift; monitored + limited (ADR-008)
     sint64 theta_e9 = 8;            // expected carry, ccy per calendar day; monitored only (ADR-008)
     sint64 div_sens_e9 = 9;         // ccy per +1% absolute div-yield change; monitored only (ADR-008)
+    LimitLevel vega_level = 10;
+    sint64 vega_warn_e9 = 11;       // |vega| cap, ccy*1e9 per vol point
+    sint64 vega_hard_e9 = 12;
+    LimitLevel gamma_level = 13;
+    sint64 gamma_warn_qty_e2 = 14;  // |gamma| cap, dDelta per +1% spot, qty_e2
+    sint64 gamma_hard_qty_e2 = 15;
+    LimitLevel rho_level = 16;
+    sint64 rho_warn_e9 = 17;        // |rho| cap, ccy*1e9 per bp
+    sint64 rho_hard_e9 = 18;
+    bool limit_data_suspect = 19;   // a contributing book is stale/invalid (ADR-014 s3)
   }
   repeated NetGreeks greeks = 2;
 }
@@ -116,6 +137,7 @@ message InternalCrossNotice {
   sint64 qty_e2 = 6;
   sint64 ref_px_e9 = 7;
   string px_policy_id = 8;         // ADR-005 §4; compliance-visible
+  string netting_cycle_id = 9;     // "<run_uuid>/<n>" of producing cycle, or "DIRECT" (ADR-009); equals posttrade.crosses value
 }
 
 message ReconAlert {

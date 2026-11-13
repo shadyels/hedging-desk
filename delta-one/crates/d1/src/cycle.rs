@@ -15,8 +15,8 @@
 use std::collections::HashMap;
 
 use d1_core::{
-    BookId, ClOrdId, CrossRecord, InstrumentId, Order, OrderStatus, PositionKeeper, Side, Target,
-    TransferRequest,
+    BookId, ClOrdId, CrossRecord, InstrumentId, NettingCycleId, Order, OrderStatus, PositionKeeper,
+    Side, Target, TransferRequest,
 };
 use d1_netting::{BookDemand, Cross, MAX_BOOKS, NettingError, RefPxPolicy, net};
 use d1_posttrade::Stamper;
@@ -51,6 +51,19 @@ pub struct ParentOrder {
     /// Cumulative quantity allocated to each book so far, parallel to
     /// `weights` (same index -> same book).
     pub allocated: Vec<i64>,
+}
+
+impl ParentOrder {
+    /// Cumulative quantity allocated to `book` so far (0 if `book` is not a
+    /// weight of this parent), fixed-point x10^2.
+    #[must_use]
+    pub fn allocated_to(&self, book: BookId) -> i64 {
+        self.weights
+            .iter()
+            .position(|&(b, _)| b == book)
+            .and_then(|i| self.allocated.get(i).copied())
+            .unwrap_or(0)
+    }
 }
 
 /// Output of one netting cycle (`NettingSession::on_target`).
@@ -89,6 +102,7 @@ fn book_cross(
     px_e9: i64,
     policy: RefPxPolicy,
     stamper: &mut Stamper,
+    netting_cycle_id: NettingCycleId,
 ) -> Option<CrossRecord> {
     if keeper
         .apply_cross(instrument, buy_book, sell_book, qty_e2, px_e9)
@@ -107,6 +121,7 @@ fn book_cross(
         qty_e2,
         ref_px_e9: px_e9,
         policy_id: policy.as_str(),
+        netting_cycle_id,
     })
 }
 
@@ -232,6 +247,11 @@ impl NettingSession {
         // Book cross legs immediately via the shared `book_cross` path: nets
         // to zero firm-wide and makes re-netting idempotent (root CLAUDE.md
         // #2: never leave a cross silently unbooked).
+        //
+        // `cycle_id` is computed before booking so each record carries its
+        // cycle; `cycle_seq` itself is still only advanced below, exactly
+        // where it always was.
+        let cycle_id = self.cycle_seq.wrapping_add(1);
         let stamper = &mut self.stamper;
         let cross_records: Vec<CrossRecord> = crosses
             .iter()
@@ -245,12 +265,12 @@ impl NettingSession {
                     c.px_e9,
                     c.policy,
                     stamper,
+                    NettingCycleId::Cycle(cycle_id),
                 )
             })
             .collect();
 
-        self.cycle_seq = self.cycle_seq.wrapping_add(1);
-        let cycle_id = self.cycle_seq;
+        self.cycle_seq = cycle_id;
 
         // Residual weights: the engine returns crosses + net_external, not
         // per-book residuals, so derive residual_b = demand_b - signed cross
@@ -357,6 +377,7 @@ impl NettingSession {
             ref_px_e9,
             self.policy,
             &mut self.stamper,
+            NettingCycleId::Direct,
         )
     }
 
@@ -608,6 +629,13 @@ mod tests {
             .unwrap();
         assert_eq!(out2.crosses_to_book.len(), 1);
         assert!(out2.parent_order.is_none(), "exact offset, no residual");
+        // Lineage: the booked record carries the cycle that produced it
+        // (second cycle of this session).
+        assert_eq!(out2.cycle_id, 2);
+        assert_eq!(
+            out2.crosses_to_book.first().unwrap().netting_cycle_id,
+            NettingCycleId::Cycle(out2.cycle_id)
+        );
 
         // Cross legs net to zero firm-wide.
         let p1 = keeper.position(BookId(1), InstrumentId(1001)).unwrap();
@@ -760,6 +788,7 @@ mod tests {
         assert_eq!(record.qty_e2, 40_000);
         assert_eq!(record.ref_px_e9, 150_000_000_000);
         assert_eq!(record.policy_id, "ARRIVAL_MID");
+        assert_eq!(record.netting_cycle_id, NettingCycleId::Direct);
         assert_eq!(
             keeper
                 .position(BookId(5), InstrumentId(1001))
@@ -818,6 +847,45 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn allocated_to_is_monotone_bounded_and_sums_to_cum_filled(
+            m in prop::collection::vec(1i64..=1_000, 1..=5),
+            fills in prop::collection::vec(0i64..=2_000, 0..=12),
+        ) {
+            // `allocated_to` feeds the wire's `book_cum_qty_e2`: it must
+            // never fall, never exceed the book's share `m_b` (overfills
+            // are clamped), and the books must always sum to the parent's
+            // `cum_filled_e2`.
+            let weights: Vec<(BookId, i64)> = m
+                .iter()
+                .enumerate()
+                .map(|(i, &w)| (BookId(u32::try_from(i).unwrap() + 1), w))
+                .collect();
+            let mut parent = ParentOrder {
+                cycle_id: 1,
+                instrument: InstrumentId(1001),
+                side: Side::Sell,
+                order_qty_e2: m.iter().sum(),
+                cum_filled_e2: 0,
+                allocated: vec![0; weights.len()],
+                weights: weights.clone(),
+            };
+            prop_assert_eq!(parent.allocated_to(BookId(999)), 0);
+            let mut prev = vec![0i64; weights.len()];
+            for fill in fills {
+                let _ = allocate_fill(&mut parent, fill);
+                let mut total = 0;
+                for (&(book, m_b), before) in weights.iter().zip(prev.iter_mut()) {
+                    let now = parent.allocated_to(book);
+                    prop_assert!(now >= *before);
+                    prop_assert!(now <= m_b);
+                    *before = now;
+                    total += now;
+                }
+                prop_assert_eq!(total, parent.cum_filled_e2);
+            }
+        }
+
         #[test]
         fn transfer_conserves_firm_position(
             qty_e2 in 1i64..=1_000_000,

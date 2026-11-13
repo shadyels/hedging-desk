@@ -56,6 +56,18 @@ pub struct ExecutionReport {
     /// reject reason etc.
     #[prost(string, tag = "12")]
     pub text: ::prost::alloc::string::String,
+    /// true = per-book ALLOCATION report of a netting parent (ADR-014 Amend 1 s3).
+    #[prost(bool, tag = "13")]
+    pub allocation: bool,
+    /// book_id != 0; last_qty = this book's share; status/cum/leaves are the PARENT's.
+    /// false = book-0 parent report, or a direct order's own report.
+    ///
+    /// allocation reports only; cumulative qty allocated to book_id incl. this report; 0 otherwise
+    #[prost(sint64, tag = "14")]
+    pub book_cum_qty_e2: i64,
+    /// "<run_uuid>/<n>" of minting cycle (book-0 + allocation reports); "" for direct order
+    #[prost(string, tag = "15")]
+    pub netting_cycle_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PositionSnapshot {
@@ -95,7 +107,7 @@ pub mod risk_snapshot {
     pub struct NetGreeks {
         #[prost(message, optional, tag = "1")]
         pub underlying: ::core::option::Option<super::super::super::common::v1::InstrumentRef>,
-        /// hedgeable via Delta One
+        /// Σ D1 position qty (all books) + Σ EXO delta_qty_e2 for this underlying (Amend 1 s1)
         #[prost(sint64, tag = "2")]
         pub firm_delta_qty_e2: i64,
         /// delta notional, underlying ccy
@@ -119,6 +131,62 @@ pub mod risk_snapshot {
         /// ccy per +1% absolute div-yield change; monitored only (ADR-008)
         #[prost(sint64, tag = "9")]
         pub div_sens_e9: i64,
+        #[prost(enumeration = "LimitLevel", tag = "10")]
+        pub vega_level: i32,
+        /// |vega| cap, ccy*1e9 per vol point
+        #[prost(sint64, tag = "11")]
+        pub vega_warn_e9: i64,
+        #[prost(sint64, tag = "12")]
+        pub vega_hard_e9: i64,
+        #[prost(enumeration = "LimitLevel", tag = "13")]
+        pub gamma_level: i32,
+        /// |gamma| cap, dDelta per +1% spot, qty_e2
+        #[prost(sint64, tag = "14")]
+        pub gamma_warn_qty_e2: i64,
+        #[prost(sint64, tag = "15")]
+        pub gamma_hard_qty_e2: i64,
+        #[prost(enumeration = "LimitLevel", tag = "16")]
+        pub rho_level: i32,
+        /// |rho| cap, ccy*1e9 per bp
+        #[prost(sint64, tag = "17")]
+        pub rho_warn_e9: i64,
+        #[prost(sint64, tag = "18")]
+        pub rho_hard_e9: i64,
+        /// a contributing book is stale/invalid (ADR-014 s3)
+        #[prost(bool, tag = "19")]
+        pub limit_data_suspect: bool,
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum LimitLevel {
+        Unspecified = 0,
+        Ok = 1,
+        Warn = 2,
+        Hard = 3,
+    }
+    impl LimitLevel {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unspecified => "LIMIT_LEVEL_UNSPECIFIED",
+                Self::Ok => "LIMIT_LEVEL_OK",
+                Self::Warn => "LIMIT_LEVEL_WARN",
+                Self::Hard => "LIMIT_LEVEL_HARD",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "LIMIT_LEVEL_UNSPECIFIED" => Some(Self::Unspecified),
+                "LIMIT_LEVEL_OK" => Some(Self::Ok),
+                "LIMIT_LEVEL_WARN" => Some(Self::Warn),
+                "LIMIT_LEVEL_HARD" => Some(Self::Hard),
+                _ => None,
+            }
+        }
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -221,6 +289,9 @@ pub struct InternalCrossNotice {
     /// ADR-005 §4; compliance-visible
     #[prost(string, tag = "8")]
     pub px_policy_id: ::prost::alloc::string::String,
+    /// "<run_uuid>/<n>" of producing cycle, or "DIRECT" (ADR-009); equals posttrade.crosses value
+    #[prost(string, tag = "9")]
+    pub netting_cycle_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ReconAlert {

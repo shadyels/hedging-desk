@@ -14,6 +14,6 @@
     {"name": "qty_e2", "type": "long"},
     {"name": "ref_px_e9", "type": "long"},
     {"name": "px_policy_id", "type": "string", "doc": "compliance-visible reference price policy, ADR-005 s.4"},
-    {"name": "netting_cycle_id", "type": "string", "doc": "lineage back to the netting cycle that generated the cross"}
+    {"name": "netting_cycle_id", "type": "string", "doc": "lineage to the producing netting cycle: \"<run_uuid>/<n>\" (per-process run id + cycle sequence), or \"DIRECT\" for a directed transfer; opaque (ADR-002 Amendment 1)"}
   ]
 }
