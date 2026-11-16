@@ -1,0 +1,215 @@
+/* Risk board (P3.M1 Slice 3). Tokens only (DESIGN.md); colour appears only on limit chips and limit bars. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.risk {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gutter);
+}
+.risk-pair {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--gutter);
+}
+
+.panel {
+  background: var(--surface-1);
+  border: var(--border-w) solid var(--border);
+  border-radius: var(--radius);
+  padding: 0 var(--panel-pad) var(--panel-pad);
+  min-width: 0;
+  overflow-x: auto;
+}
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: var(--space-6);
+  font-size: var(--fs-md);
+}
+.panel-head h2 {
+  margin: 0;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-medium);
+}
+.panel-note {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+.panel-note code {
+  font-family: var(--font-mono);
+}
+.panel-status {
+  margin-left: auto;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+
+.grid {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-sm);
+  font-family: var(--font-mono);
+  font-variant-numeric: var(--num-variant);
+  font-feature-settings: var(--num-features);
+}
+.grid th,
+.grid td {
+  height: var(--row-h);
+  padding: 0 var(--row-pad-x);
+  border-bottom: var(--border-w) solid var(--border-subtle);
+  text-align: left;
+  white-space: nowrap;
+}
+.grid thead th {
+  position: sticky;
+  top: 0;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-family: var(--font-sans);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-regular);
+}
+.grid tbody th {
+  font-weight: var(--fw-regular);
+}
+.grid tbody tr:hover {
+  background: var(--row-hover);
+}
+.grid .r {
+  text-align: right;
+}
+.grid .na,
+.na {
+  color: var(--text-3);
+}
+.grid td:not(.num):not(.r) {
+  font-family: var(--font-sans);
+}
+
+/* Stale cells keep the last value, italic and dimmed (DESIGN.md "stale"). */
+[data-fresh="stale"] .grid tbody td,
+[data-fresh="stale"] .grid tbody th,
+.grid td[data-fresh="stale"],
+.grid tr[data-fresh="stale"] td,
+.grid tr[data-fresh="stale"] th {
+  color: var(--text-3);
+  font-style: italic;
+}
+
+.limit-cell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+.limit-cell .na {
+  width: 56px;
+  font-size: var(--fs-xs);
+  font-family: var(--font-sans);
+  text-align: left;
+}
+.trail {
+  color: var(--text-3);
+}
+
+.flag {
+  color: var(--text-2);
+  margin-left: var(--space-half);
+}
+.suspect,
+.se-flag {
+  margin-left: var(--space-1);
+  padding: 0 var(--space-1);
+  font-family: var(--font-sans);
+  font-size: var(--fs-xs);
+  color: var(--text-2);
+  border: var(--border-w) solid var(--border-strong);
+  border-radius: var(--radius);
+}
+.se-flag {
+  margin-left: 0;
+}
+
+/* Headroom bar: 56 x 6, neutral ink; hue only follows the wire limit level. */
+.hbar {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-half);
+  width: 64px;
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+}
+.hbar-track {
+  position: relative;
+  width: 56px;
+  height: 6px;
+  background: var(--bar-track);
+}
+.hbar[data-waiting="true"] .hbar-track {
+  background: transparent;
+  border: var(--border-w) dotted var(--state-waiting-border);
+  box-sizing: border-box;
+}
+.hbar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--bar-fill);
+}
+.hbar[data-level="warn"] .hbar-fill {
+  background: var(--state-warn-fg);
+}
+.hbar[data-level="hard"] .hbar-fill {
+  background: var(--state-hard-fg);
+}
+.hbar-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--text-3);
+}
+
+.waiting,
+.empty {
+  margin: 0;
+  padding: var(--space-3) var(--space-2);
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+  border: var(--border-w) dotted var(--state-waiting-border);
+  border-radius: var(--radius);
+}
+.waiting code,
+.empty code {
+  font-family: var(--font-mono);
+}
+.panel .foot {
+  margin: var(--space-2) 0 0;
+}
+
+.ticker {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: var(--fs-sm);
+}
+.ticker li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: var(--row-h);
+  border-bottom: var(--border-w) solid var(--border-subtle);
+}
+.ticker .wire-text {
+  max-width: none;
+}
+.ticker .num {
+  color: var(--text-2);
+}

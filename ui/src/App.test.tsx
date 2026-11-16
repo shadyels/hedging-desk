@@ -77,7 +77,8 @@ describe("shell", () => {
       container.querySelector("main")?.getAttribute("data-disconnected"),
     ).toBe("false");
     expect(
-      container.querySelectorAll('.chip[data-state="waiting"]').length,
+      container.querySelectorAll('.subjects .chip[data-state="waiting"]')
+        .length,
     ).toBe(Object.keys(SUBJECTS).length);
     expect(container.querySelector('.chip[data-state="stale"]')).toBeNull();
   });

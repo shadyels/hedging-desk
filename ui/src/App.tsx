@@ -2,7 +2,6 @@
  * Monitoring shell (P3.M1 Slice 1): connection status and per-subject state. The four screens
  * (ui/CLAUDE.md "Screens") are built on top of this in later slices.
  */
-import { useEffect, useState } from "react";
 import { freshness } from "./bus/freshness";
 import { SUBJECT_IDS, SUBJECTS, type SubjectId } from "./bus/subjects";
 import { StateChip, type ChipState } from "./components/StateChip";
@@ -10,15 +9,8 @@ import { WireText } from "./components/WireText";
 import { MISSING, formatAge, formatUtcTime } from "./format";
 import type { HealthStatus } from "./gen/live";
 import { useBus, type Entry } from "./store";
-
-function useNow(intervalMs = 1000): number {
-  const [now, setNow] = useState(Date.now);
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), intervalMs);
-    return () => clearInterval(t);
-  }, [intervalMs]);
-  return now;
-}
+import { RiskBoard } from "./risk/RiskBoard";
+import { useNow } from "./useNow";
 
 const isHealth = (v: unknown): v is HealthStatus =>
   typeof v === "object" &&
@@ -105,6 +97,7 @@ export function App() {
         </div>
       )}
       <main className="board" data-disconnected={!up}>
+        <RiskBoard />
         <table className="subjects">
           <caption>Bus subjects</caption>
           <thead>

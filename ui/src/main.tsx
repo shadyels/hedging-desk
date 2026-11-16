@@ -5,6 +5,7 @@ import { natsConnector, startConnection } from "./bus/connection";
 import { busSink } from "./store";
 import "./styles/tokens.css";
 import "./styles/shell.css";
+import "./styles/risk.css";
 
 // ui/CLAUDE.md "Stack": NATS WebSocket listener from deploy/nats.conf (no_tls, demo only).
 startConnection({
