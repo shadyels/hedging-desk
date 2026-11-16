@@ -9,6 +9,7 @@ import { WireText } from "./components/WireText";
 import { MISSING, formatAge, formatUtcTime } from "./format";
 import type { HealthStatus } from "./gen/live";
 import { useBus, type Entry } from "./store";
+import { BlotterBoard } from "./blotter/BlotterBoard";
 import { RiskBoard } from "./risk/RiskBoard";
 import { TrackerBoard } from "./tracker/TrackerBoard";
 import { useNow } from "./useNow";
@@ -100,6 +101,7 @@ export function App() {
       <main className="board" data-disconnected={!up}>
         <RiskBoard />
         <TrackerBoard now={now} />
+        <BlotterBoard now={now} />
         <table className="subjects">
           <caption>Bus subjects</caption>
           <thead>

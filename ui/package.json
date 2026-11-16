@@ -13,6 +13,7 @@
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "@nats-io/nats-core": "3.4.0",
+    "@tanstack/react-virtual": "3.14.25",
     "zustand": "^5.0.0",
     "@bufbuild/protobuf": "^2.12.0"
   },

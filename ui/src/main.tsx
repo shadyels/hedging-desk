@@ -7,6 +7,7 @@ import "./styles/tokens.css";
 import "./styles/shell.css";
 import "./styles/risk.css";
 import "./styles/tracker.css";
+import "./styles/blotter.css";
 
 // ui/CLAUDE.md "Stack": NATS WebSocket listener from deploy/nats.conf (no_tls, demo only).
 startConnection({

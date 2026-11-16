@@ -1,0 +1,130 @@
+/* Order and execution blotter (P3.M1 Slice 5). Tokens only. Status is neutral text: no --state-* colour here
+   (colour is reserved for limit and health, DESIGN.md). Row height is --row-h, which BlotterBoard.tsx reads for the virtualizer. */
+.blotter {
+  margin-top: var(--gutter);
+}
+.blotter .panel {
+  position: relative;
+  overflow-x: hidden;
+}
+.bl-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-4);
+  margin: 0 0 var(--space-2);
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+.bl-meta code {
+  font-family: var(--font-mono);
+}
+.bl-foot {
+  margin: var(--space-2) 0 0;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+.bl-table {
+  position: relative;
+  font-size: var(--fs-sm);
+  font-family: var(--font-mono);
+  font-variant-numeric: var(--num-variant);
+  font-feature-settings: var(--num-features);
+}
+.bl-cols {
+  display: grid;
+  grid-template-columns:
+    var(--space-6) 10ch 7ch minmax(18ch, 1.4fr)
+    16ch 9ch 6ch 14ch 12ch 20ch 14ch 14ch
+    minmax(16ch, 1fr);
+  align-items: center;
+  column-gap: var(--space-2);
+  padding: 0 var(--row-pad-x);
+  height: var(--row-h);
+  box-sizing: border-box;
+}
+.bl-cols > * {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bl-cols .r {
+  text-align: right;
+}
+.bl-head {
+  overflow: hidden;
+  scrollbar-gutter: stable;
+  background: var(--surface-2);
+  border-bottom: var(--border-w) solid var(--border);
+  color: var(--text-2);
+  font-family: var(--font-sans);
+  font-size: var(--fs-xs);
+}
+.bl-scroll {
+  height: calc(var(--row-h) * 20);
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+}
+.bl-scroll:focus-visible,
+.bl-tog:focus-visible,
+.bl-resume:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-offset);
+}
+.bl-body {
+  position: relative;
+  width: 100%;
+}
+.bl-body .bl-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  border-bottom: var(--border-w) solid var(--border-subtle);
+}
+.bl-body .bl-row:hover {
+  background: var(--row-hover);
+}
+.bl-row[data-kind="alloc"] {
+  color: var(--text-2);
+}
+.c-alloc {
+  padding-left: var(--space-4);
+}
+.c-status,
+.c-detail {
+  color: inherit;
+}
+.c-detail {
+  color: var(--text-2);
+}
+.bl-tog {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--space-5);
+  height: var(--space-5);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-2);
+  font: inherit;
+  cursor: pointer;
+}
+.bl-resume {
+  position: absolute;
+  top: calc(var(--row-h) + var(--space-2));
+  right: var(--space-6);
+  padding: var(--space-1) var(--space-3);
+  border: var(--border-w) solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.bl-resume:hover {
+  background: var(--surface-3);
+}
