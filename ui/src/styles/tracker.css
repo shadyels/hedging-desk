@@ -1,0 +1,121 @@
+/* Tracker scorecard (P3.M1 Slice 4). Tokens only. Values are neutral ink: no --state-* colour is used here
+   (no tracker limit exists, ui/CLAUDE.md). Stale = dimmed + italic, like every other stale value. */
+.tracker {
+  margin-top: var(--gutter);
+}
+.tracker-title {
+  margin: 0 0 var(--space-1);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-medium);
+}
+.tracker-title code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-regular);
+  color: var(--text-3);
+}
+.tgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: var(--gutter);
+}
+.tcard h2 {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+}
+.tkind {
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-regular);
+}
+.demo-badge {
+  padding: 0 var(--space-1);
+  border: var(--border-w) solid var(--border-strong);
+  border-radius: var(--radius);
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+}
+.tlist {
+  margin: 0;
+}
+.trow {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  height: var(--row-h);
+  border-bottom: var(--border-w) solid var(--border-subtle);
+  font-size: var(--fs-sm);
+}
+.trow dt {
+  color: var(--text-2);
+}
+.trow dd {
+  margin: 0;
+}
+.trow-kpi {
+  height: auto;
+  flex-direction: column;
+  align-items: flex-start;
+  padding-bottom: var(--space-1);
+}
+.tval {
+  color: var(--text);
+}
+.tval.kpi {
+  font-size: var(--fs-kpi);
+  line-height: var(--lh-body);
+}
+.unit {
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+}
+.tcard[data-fresh="stale"] .tval,
+.tcard[data-fresh="stale"] .unit {
+  color: var(--text-3);
+  font-style: italic;
+}
+.spark {
+  margin-top: var(--space-2);
+}
+.spark-svg {
+  display: block;
+  max-width: 100%;
+}
+.spark-line,
+.spark-empty {
+  fill: none;
+  stroke: var(--spark);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+.spark-empty {
+  stroke: var(--text-3);
+  stroke-dasharray: 1 3;
+}
+.spark-dot {
+  fill: var(--spark);
+}
+.tcard[data-fresh="stale"] .spark-line,
+.tcard[data-fresh="stale"] .spark-dot {
+  stroke: var(--text-3);
+  fill: none;
+}
+.tcard[data-fresh="stale"] .spark-dot {
+  fill: var(--text-3);
+}
+.spark-label,
+.tmeta,
+.tnote {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+.spark-label {
+  display: block;
+}
+.tmeta {
+  margin: var(--space-1) 0 0;
+}
+.tnote {
+  margin: var(--space-1) 0 0;
+}

@@ -10,6 +10,7 @@ import { MISSING, formatAge, formatUtcTime } from "./format";
 import type { HealthStatus } from "./gen/live";
 import { useBus, type Entry } from "./store";
 import { RiskBoard } from "./risk/RiskBoard";
+import { TrackerBoard } from "./tracker/TrackerBoard";
 import { useNow } from "./useNow";
 
 const isHealth = (v: unknown): v is HealthStatus =>
@@ -98,6 +99,7 @@ export function App() {
       )}
       <main className="board" data-disconnected={!up}>
         <RiskBoard />
+        <TrackerBoard now={now} />
         <table className="subjects">
           <caption>Bus subjects</caption>
           <thead>

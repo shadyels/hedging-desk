@@ -24,3 +24,4 @@ Phase 3. Monitoring dashboard first; manual order entry + kill switch second. Re
 4. Reconnect logic (`src/bus/connection.ts` owns it: nats-core runs with `reconnect: false`, the manager backs off exponentially and resubscribes): on NATS disconnect, grey out the whole board (stale data is worse than no data on a trading desk); resubscribe + request fresh snapshots on reconnect.
 5. Component tests with Vitest + Testing Library; the order-state rendering and the disconnect/stale behavior must have tests.
 6. `eslint` + `prettier` enforced in CI; `tsc --noEmit` gate.
+7. The tracker scorecard shows values only, with no limit colouring: no TE, TD or cash-drag threshold exists on the bus or in config (ADR-010 defines none), so the screen-1 "limit coloring" wording above does not apply until a limit source exists.
