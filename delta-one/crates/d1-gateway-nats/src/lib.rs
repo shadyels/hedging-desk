@@ -9,6 +9,7 @@
 
 pub mod convert;
 pub mod error;
+pub mod health;
 pub mod limits;
 pub mod marks;
 pub mod positions;
@@ -38,11 +39,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use d1_analytics::TrackerRecord;
-use d1_core::{BookId, CrossRecord, ExecReport, InstrumentId, Target, TransferRequest};
+use d1_core::{BookId, CrossRecord, ExecReport, InstrumentId, RunId, Target, TransferRequest};
 use futures_util::StreamExt;
 use prost::Message as _;
 
 pub use error::NatsError;
+pub use health::{HealthInputs, PostTradeHealth};
 use limits::{AlertEvent, LimitBook, TierOneLimits};
 use marks::MarkThrottle;
 use pb::hedging::live::v1::{InternalTransferRequest, TargetPosition, ValuationSnapshot};
@@ -52,8 +54,9 @@ use positions::PositionMirror;
 /// subscribe timeout. Off the hot path (ADR-004): matches
 /// `d1-gateway-fix::DRAIN_POLL_INTERVAL`'s reasoning exactly.
 const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
-/// Cadence of the mark keepalive, the every-book position snapshots and the
-/// limits staleness check (ADR-014 §2, §7, §3).
+/// Cadence of the mark keepalive, the every-book position snapshots, the
+/// limits staleness check, `d1.risk.firm` and `d1.health` (ADR-014 §2, §7, §3,
+/// Amendment 1).
 const PERIODIC_INTERVAL: Duration = Duration::from_secs(1);
 /// Wildcard subscription for every book/instrument EXO publishes targets on
 /// (`protocol/nats-subjects.md`: `exo.targets.<book>.<instrument>`).
@@ -64,10 +67,6 @@ const TRANSFER_SUBJECT_WILDCARD: &str = "exo.transfers.*";
 /// Wildcard subscription for every book EXO publishes valuations on
 /// (`protocol/nats-subjects.md`: `exo.valuations.<book>`), feeding the Tier-1
 /// limits (ADR-014 §3).
-//
-// ponytail: `d1.risk.firm` (`RiskSnapshot`) is not published -- the Tier-1
-// limits read EXO's Greeks directly and nothing consumes a firm snapshot
-// before the UI exists. Owner P3.M1 (ADR-014 "not done here").
 const VALUATION_SUBJECT_WILDCARD: &str = "exo.valuations.*";
 
 /// A mid for the gateway to publish as `MarkPrice` (ADR-014 §2). The core
@@ -118,6 +117,10 @@ pub struct GatewayConfig {
     pub limits: TierOneLimits,
     /// `d1.toml [limits] valuation_max_age_s`.
     pub valuation_max_age_s: u32,
+    /// This process's run id, rendered into every `netting_cycle_id`.
+    pub run_id: RunId,
+    /// Liveness flags of the FIX and Kafka threads, for `d1.health`.
+    pub health: HealthInputs,
 }
 
 /// The gateway's ends of the core's rings (ADR-013).
@@ -266,7 +269,7 @@ async fn run_gateway_async(
         while let Ok(report) = exec_rx.pop() {
             let subject = convert::exec_subject(report.book, report.instrument);
             let msg_id = uuid::Uuid::now_v7().to_string();
-            let pb_report = convert::exec_report_to_pb(&report, msg_id, now_ns());
+            let pb_report = convert::exec_report_to_pb(&report, cfg.run_id, msg_id, now_ns());
             if let Err(err) = client
                 .publish(subject, pb_report.encode_to_vec().into())
                 .await
@@ -277,7 +280,7 @@ async fn run_gateway_async(
 
         while let Ok(record) = cross_rx.pop() {
             let msg_id = uuid::Uuid::now_v7().to_string();
-            let pb_notice = convert::cross_record_to_pb(&record, msg_id, now_ns());
+            let pb_notice = convert::cross_record_to_pb(&record, cfg.run_id, msg_id, now_ns());
             if let Err(err) = client
                 .publish(convert::CROSSES_SUBJECT, pb_notice.encode_to_vec().into())
                 .await
@@ -356,9 +359,49 @@ async fn run_gateway_async(
             .await;
         }
 
+        // Once per second, in this order: limit re-check (staleness), the alerts
+        // it causes, then the RiskSnapshot that reports the resulting levels.
         if periodic_due {
             let events = limit_book.tick(now);
             publish_alerts(&client, &events).await;
+            let pb = convert::risk_snapshot_to_pb(
+                &limit_book.firm_greeks(now),
+                &position_mirror.net_qty_by_instrument(),
+                |id| mark_throttle.latest_mid(id),
+                &limit_book.limits(),
+                uuid::Uuid::now_v7().to_string(),
+                now_ns(),
+            );
+            publish_pb(
+                &client,
+                convert::RISK_FIRM_SUBJECT.to_string(),
+                &pb,
+                "RiskSnapshot",
+            )
+            .await;
+
+            // Last, so it reports the state this same tick produced. The
+            // gateway thread is the only publisher on `d1.health`.
+            let (ok, detail) = health::health_detail(
+                client.connection_state(),
+                &cfg.health,
+                &limit_book,
+                &cfg.book_ids,
+                now,
+            );
+            let pb = convert::health_status_to_pb(
+                ok,
+                detail,
+                uuid::Uuid::now_v7().to_string(),
+                now_ns(),
+            );
+            publish_pb(
+                &client,
+                convert::HEALTH_SUBJECT.to_string(),
+                &pb,
+                "HealthStatus",
+            )
+            .await;
         }
     }
 

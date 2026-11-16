@@ -47,7 +47,7 @@ class TargetPosition(_message.Message):
     def __init__(self, meta: _Optional[_Union[_common_pb2.Meta, _Mapping]] = ..., book_id: _Optional[int] = ..., instrument: _Optional[_Union[_common_pb2.InstrumentRef, _Mapping]] = ..., target_qty_e2: _Optional[int] = ..., as_of_ns: _Optional[int] = ..., band_qty_e2: _Optional[int] = ..., valuation: _Optional[_Union[_common_pb2.ValuationMeta, _Mapping]] = ..., reason: _Optional[str] = ...) -> None: ...
 
 class ExecutionReport(_message.Message):
-    __slots__ = ("meta", "cl_ord_id", "exec_id", "book_id", "instrument", "side", "status", "last_qty_e2", "last_px_e9", "cum_qty_e2", "leaves_qty_e2", "text")
+    __slots__ = ("meta", "cl_ord_id", "exec_id", "book_id", "instrument", "side", "status", "last_qty_e2", "last_px_e9", "cum_qty_e2", "leaves_qty_e2", "text", "allocation", "book_cum_qty_e2", "netting_cycle_id")
     META_FIELD_NUMBER: _ClassVar[int]
     CL_ORD_ID_FIELD_NUMBER: _ClassVar[int]
     EXEC_ID_FIELD_NUMBER: _ClassVar[int]
@@ -60,6 +60,9 @@ class ExecutionReport(_message.Message):
     CUM_QTY_E2_FIELD_NUMBER: _ClassVar[int]
     LEAVES_QTY_E2_FIELD_NUMBER: _ClassVar[int]
     TEXT_FIELD_NUMBER: _ClassVar[int]
+    ALLOCATION_FIELD_NUMBER: _ClassVar[int]
+    BOOK_CUM_QTY_E2_FIELD_NUMBER: _ClassVar[int]
+    NETTING_CYCLE_ID_FIELD_NUMBER: _ClassVar[int]
     meta: _common_pb2.Meta
     cl_ord_id: str
     exec_id: str
@@ -72,7 +75,10 @@ class ExecutionReport(_message.Message):
     cum_qty_e2: int
     leaves_qty_e2: int
     text: str
-    def __init__(self, meta: _Optional[_Union[_common_pb2.Meta, _Mapping]] = ..., cl_ord_id: _Optional[str] = ..., exec_id: _Optional[str] = ..., book_id: _Optional[int] = ..., instrument: _Optional[_Union[_common_pb2.InstrumentRef, _Mapping]] = ..., side: _Optional[_Union[_common_pb2.Side, str]] = ..., status: _Optional[_Union[OrdStatus, str]] = ..., last_qty_e2: _Optional[int] = ..., last_px_e9: _Optional[int] = ..., cum_qty_e2: _Optional[int] = ..., leaves_qty_e2: _Optional[int] = ..., text: _Optional[str] = ...) -> None: ...
+    allocation: bool
+    book_cum_qty_e2: int
+    netting_cycle_id: str
+    def __init__(self, meta: _Optional[_Union[_common_pb2.Meta, _Mapping]] = ..., cl_ord_id: _Optional[str] = ..., exec_id: _Optional[str] = ..., book_id: _Optional[int] = ..., instrument: _Optional[_Union[_common_pb2.InstrumentRef, _Mapping]] = ..., side: _Optional[_Union[_common_pb2.Side, str]] = ..., status: _Optional[_Union[OrdStatus, str]] = ..., last_qty_e2: _Optional[int] = ..., last_px_e9: _Optional[int] = ..., cum_qty_e2: _Optional[int] = ..., leaves_qty_e2: _Optional[int] = ..., text: _Optional[str] = ..., allocation: bool = ..., book_cum_qty_e2: _Optional[int] = ..., netting_cycle_id: _Optional[str] = ...) -> None: ...
 
 class PositionSnapshot(_message.Message):
     __slots__ = ("meta", "book_id", "lines")
@@ -97,8 +103,18 @@ class PositionSnapshot(_message.Message):
 
 class RiskSnapshot(_message.Message):
     __slots__ = ("meta", "greeks")
+    class LimitLevel(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+        __slots__ = ()
+        LIMIT_LEVEL_UNSPECIFIED: _ClassVar[RiskSnapshot.LimitLevel]
+        LIMIT_LEVEL_OK: _ClassVar[RiskSnapshot.LimitLevel]
+        LIMIT_LEVEL_WARN: _ClassVar[RiskSnapshot.LimitLevel]
+        LIMIT_LEVEL_HARD: _ClassVar[RiskSnapshot.LimitLevel]
+    LIMIT_LEVEL_UNSPECIFIED: RiskSnapshot.LimitLevel
+    LIMIT_LEVEL_OK: RiskSnapshot.LimitLevel
+    LIMIT_LEVEL_WARN: RiskSnapshot.LimitLevel
+    LIMIT_LEVEL_HARD: RiskSnapshot.LimitLevel
     class NetGreeks(_message.Message):
-        __slots__ = ("underlying", "firm_delta_qty_e2", "notional_e9", "vega_e9", "gamma_qty_e2", "greeks_flagged", "rho_e9", "theta_e9", "div_sens_e9")
+        __slots__ = ("underlying", "firm_delta_qty_e2", "notional_e9", "vega_e9", "gamma_qty_e2", "greeks_flagged", "rho_e9", "theta_e9", "div_sens_e9", "vega_level", "vega_warn_e9", "vega_hard_e9", "gamma_level", "gamma_warn_qty_e2", "gamma_hard_qty_e2", "rho_level", "rho_warn_e9", "rho_hard_e9", "limit_data_suspect")
         UNDERLYING_FIELD_NUMBER: _ClassVar[int]
         FIRM_DELTA_QTY_E2_FIELD_NUMBER: _ClassVar[int]
         NOTIONAL_E9_FIELD_NUMBER: _ClassVar[int]
@@ -108,6 +124,16 @@ class RiskSnapshot(_message.Message):
         RHO_E9_FIELD_NUMBER: _ClassVar[int]
         THETA_E9_FIELD_NUMBER: _ClassVar[int]
         DIV_SENS_E9_FIELD_NUMBER: _ClassVar[int]
+        VEGA_LEVEL_FIELD_NUMBER: _ClassVar[int]
+        VEGA_WARN_E9_FIELD_NUMBER: _ClassVar[int]
+        VEGA_HARD_E9_FIELD_NUMBER: _ClassVar[int]
+        GAMMA_LEVEL_FIELD_NUMBER: _ClassVar[int]
+        GAMMA_WARN_QTY_E2_FIELD_NUMBER: _ClassVar[int]
+        GAMMA_HARD_QTY_E2_FIELD_NUMBER: _ClassVar[int]
+        RHO_LEVEL_FIELD_NUMBER: _ClassVar[int]
+        RHO_WARN_E9_FIELD_NUMBER: _ClassVar[int]
+        RHO_HARD_E9_FIELD_NUMBER: _ClassVar[int]
+        LIMIT_DATA_SUSPECT_FIELD_NUMBER: _ClassVar[int]
         underlying: _common_pb2.InstrumentRef
         firm_delta_qty_e2: int
         notional_e9: int
@@ -117,7 +143,17 @@ class RiskSnapshot(_message.Message):
         rho_e9: int
         theta_e9: int
         div_sens_e9: int
-        def __init__(self, underlying: _Optional[_Union[_common_pb2.InstrumentRef, _Mapping]] = ..., firm_delta_qty_e2: _Optional[int] = ..., notional_e9: _Optional[int] = ..., vega_e9: _Optional[int] = ..., gamma_qty_e2: _Optional[int] = ..., greeks_flagged: bool = ..., rho_e9: _Optional[int] = ..., theta_e9: _Optional[int] = ..., div_sens_e9: _Optional[int] = ...) -> None: ...
+        vega_level: RiskSnapshot.LimitLevel
+        vega_warn_e9: int
+        vega_hard_e9: int
+        gamma_level: RiskSnapshot.LimitLevel
+        gamma_warn_qty_e2: int
+        gamma_hard_qty_e2: int
+        rho_level: RiskSnapshot.LimitLevel
+        rho_warn_e9: int
+        rho_hard_e9: int
+        limit_data_suspect: bool
+        def __init__(self, underlying: _Optional[_Union[_common_pb2.InstrumentRef, _Mapping]] = ..., firm_delta_qty_e2: _Optional[int] = ..., notional_e9: _Optional[int] = ..., vega_e9: _Optional[int] = ..., gamma_qty_e2: _Optional[int] = ..., greeks_flagged: bool = ..., rho_e9: _Optional[int] = ..., theta_e9: _Optional[int] = ..., div_sens_e9: _Optional[int] = ..., vega_level: _Optional[_Union[RiskSnapshot.LimitLevel, str]] = ..., vega_warn_e9: _Optional[int] = ..., vega_hard_e9: _Optional[int] = ..., gamma_level: _Optional[_Union[RiskSnapshot.LimitLevel, str]] = ..., gamma_warn_qty_e2: _Optional[int] = ..., gamma_hard_qty_e2: _Optional[int] = ..., rho_level: _Optional[_Union[RiskSnapshot.LimitLevel, str]] = ..., rho_warn_e9: _Optional[int] = ..., rho_hard_e9: _Optional[int] = ..., limit_data_suspect: bool = ...) -> None: ...
     META_FIELD_NUMBER: _ClassVar[int]
     GREEKS_FIELD_NUMBER: _ClassVar[int]
     meta: _common_pb2.Meta
@@ -171,7 +207,7 @@ class MarkPrice(_message.Message):
     def __init__(self, meta: _Optional[_Union[_common_pb2.Meta, _Mapping]] = ..., instrument: _Optional[_Union[_common_pb2.InstrumentRef, _Mapping]] = ..., mid_px_e9: _Optional[int] = ..., feed_ts_ns: _Optional[int] = ...) -> None: ...
 
 class InternalCrossNotice(_message.Message):
-    __slots__ = ("meta", "cross_id", "instrument", "buy_book_id", "sell_book_id", "qty_e2", "ref_px_e9", "px_policy_id")
+    __slots__ = ("meta", "cross_id", "instrument", "buy_book_id", "sell_book_id", "qty_e2", "ref_px_e9", "px_policy_id", "netting_cycle_id")
     META_FIELD_NUMBER: _ClassVar[int]
     CROSS_ID_FIELD_NUMBER: _ClassVar[int]
     INSTRUMENT_FIELD_NUMBER: _ClassVar[int]
@@ -180,6 +216,7 @@ class InternalCrossNotice(_message.Message):
     QTY_E2_FIELD_NUMBER: _ClassVar[int]
     REF_PX_E9_FIELD_NUMBER: _ClassVar[int]
     PX_POLICY_ID_FIELD_NUMBER: _ClassVar[int]
+    NETTING_CYCLE_ID_FIELD_NUMBER: _ClassVar[int]
     meta: _common_pb2.Meta
     cross_id: str
     instrument: _common_pb2.InstrumentRef
@@ -188,7 +225,8 @@ class InternalCrossNotice(_message.Message):
     qty_e2: int
     ref_px_e9: int
     px_policy_id: str
-    def __init__(self, meta: _Optional[_Union[_common_pb2.Meta, _Mapping]] = ..., cross_id: _Optional[str] = ..., instrument: _Optional[_Union[_common_pb2.InstrumentRef, _Mapping]] = ..., buy_book_id: _Optional[int] = ..., sell_book_id: _Optional[int] = ..., qty_e2: _Optional[int] = ..., ref_px_e9: _Optional[int] = ..., px_policy_id: _Optional[str] = ...) -> None: ...
+    netting_cycle_id: str
+    def __init__(self, meta: _Optional[_Union[_common_pb2.Meta, _Mapping]] = ..., cross_id: _Optional[str] = ..., instrument: _Optional[_Union[_common_pb2.InstrumentRef, _Mapping]] = ..., buy_book_id: _Optional[int] = ..., sell_book_id: _Optional[int] = ..., qty_e2: _Optional[int] = ..., ref_px_e9: _Optional[int] = ..., px_policy_id: _Optional[str] = ..., netting_cycle_id: _Optional[str] = ...) -> None: ...
 
 class ReconAlert(_message.Message):
     __slots__ = ("meta", "book_id", "instrument", "exo_view_qty_e2", "d1_view_qty_e2", "publishing_halted")

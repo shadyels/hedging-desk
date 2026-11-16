@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use d1::config::{LimitsConfig, TrackerConfig};
 use d1::{FixConfig, SpawnConfig, StartupOrder, spawn};
-use d1_core::{BookId, InstrumentId, Side};
+use d1_core::{BookId, CycleRef, InstrumentId, NettingCycleId, Side};
 use d1_gateway_nats::pb::hedging::common::v1::{InstrumentRef, Meta};
 use d1_gateway_nats::pb::hedging::live::v1::{
     ExecutionReport, InternalCrossNotice, InternalTransferRequest, OrdStatus, TargetPosition,
@@ -402,12 +402,24 @@ fn crosses_and_transfers_round_trip() {
         );
         assert_eq!(cross.px_policy_id, "ARRIVAL_MID");
         assert!(!cross.cross_id.is_empty());
+        assert!(
+            matches!(
+                CycleRef::parse(&cross.netting_cycle_id).map(|c| c.cycle),
+                Some(NettingCycleId::Cycle(_))
+            ),
+            "cross notice netting_cycle_id {:?} must parse as a Cycle",
+            cross.netting_cycle_id
+        );
 
         let residual = await_report(&mut residual_subscriber, RESIDUAL_CL_ORD_ID).await;
         assert_eq!(residual.status, OrdStatus::Filled as i32);
         assert_eq!(residual.book_id, 0);
         assert_eq!(residual.cum_qty_e2, EXPECTED_RESIDUAL_QTY_E2);
         assert_eq!(residual.leaves_qty_e2, 0);
+        assert_eq!(
+            residual.netting_cycle_id, cross.netting_cycle_id,
+            "the cross and its residual parent come from one cycle"
+        );
 
         // Directed transfer (ADR-009): books instantly through the same
         // `book_cross` path, no external order, no parent-order tracking.
@@ -450,6 +462,7 @@ fn crosses_and_transfers_round_trip() {
         );
         assert_eq!(transfer_cross.px_policy_id, "ARRIVAL_MID");
         assert_ne!(transfer_cross.cross_id, cross.cross_id);
+        assert_eq!(transfer_cross.netting_cycle_id, "DIRECT");
     });
 
     shutdown.store(true, Ordering::Relaxed);

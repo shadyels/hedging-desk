@@ -43,6 +43,12 @@ impl MarkThrottle {
             });
     }
 
+    /// Latest mid seen for `id` (published or not); `None` if it never ticked.
+    #[must_use]
+    pub fn latest_mid(&self, id: InstrumentId) -> Option<i64> {
+        self.by_instrument.get(&id).map(|e| e.latest.mid_px_e9)
+    }
+
     /// Updates to publish now: the mid differs from the last published mid and
     /// at least 250 ms have passed since that instrument's last publish. Call
     /// every gateway iteration: a change suppressed by the window is published
@@ -142,5 +148,15 @@ mod tests {
         assert_eq!(ka.len(), 1);
         // The keepalive counts as a publish: no immediate duplicate.
         assert!(t.due(t0 + Duration::from_secs(1)).is_empty());
+    }
+
+    #[test]
+    fn latest_mid_is_the_newest_update_or_none() {
+        let mut t = MarkThrottle::new();
+        assert_eq!(t.latest_mid(AAPL), None);
+        t.on_update(mark(AAPL, 100));
+        t.on_update(mark(AAPL, 101)); // unpublished, still the latest
+        assert_eq!(t.latest_mid(AAPL), Some(101));
+        assert_eq!(t.latest_mid(MSFT), None);
     }
 }

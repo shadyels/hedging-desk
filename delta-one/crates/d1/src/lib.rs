@@ -21,11 +21,15 @@ use cycle::{NettingSession, allocate_fill};
 use d1_analytics::{Sample, TrackerRecord, TrackerWindow, analytics};
 use d1_core::{
     BookId, ClOrdId, CrossRecord, ExecEvent, ExecOutcome, ExecReport, FeedTick, InstrumentId,
-    MarketData, Order, OrderStatus, OrderStore, PositionKeeper, Side, Target, TransferRequest,
+    MarketData, Order, OrderStatus, OrderStore, PositionKeeper, RunId, Side, Target,
+    TransferRequest,
 };
 use d1_gateway_fix::{FixCallbacks, FixError};
 use d1_gateway_nats::limits::TierOneLimits;
-use d1_gateway_nats::{GatewayConfig, GatewayRings, MarkUpdate, NatsError, PositionUpdate};
+use d1_gateway_nats::{
+    GatewayConfig, GatewayRings, HealthInputs, MarkUpdate, NatsError, PositionUpdate,
+    PostTradeHealth,
+};
 use d1_netting::RefPxPolicy;
 use d1_posttrade::{AuditOrigin, NettingCycleId, PostTradeError, PostTradeEvent, Stamper};
 
@@ -193,6 +197,23 @@ pub struct SpawnConfig {
     pub feed_ticks: Option<Vec<FeedTick>>,
 }
 
+/// Marks `d1.health`'s producer flag `failed` if dropped while `armed`, i.e.
+/// when the producer thread unwinds from a panic before the clean-exit path
+/// disarms it.
+struct FailOnUnwind<'a> {
+    failed: &'a AtomicBool,
+    armed: bool,
+}
+
+impl Drop for FailOnUnwind<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            // Relaxed: display-only for `d1.health` (`PostTradeHealth`).
+            self.failed.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
 /// Build the `rtrb` rings (ADR-013) and spawn the core/FIX/NATS/feed
 /// threads. Blocks on nothing itself -- the caller decides how/when to flip
 /// `shutdown` and joins the returned handles. If a Kafka producer thread is
@@ -283,6 +304,27 @@ pub fn spawn(cfg: SpawnConfig, shutdown: &Arc<AtomicBool>) -> RunHandles {
         })
         .collect();
     let tracker_sampling_interval_s = tracker_cfg.sampling_interval_s;
+    // Per-process run id for the `netting_cycle_id` lineage key
+    // (`"<run>/<n>"`): `cycle_seq` restarts at 1 each process. Minted HERE,
+    // outside both `Stamper`s' state, so it never consumes a `Stamper::Fixed` id
+    // (that would shift every golden id); deterministic mode uses the nil
+    // `RunId::FIXED` instead.
+    let run_id = if deterministic {
+        RunId::FIXED
+    } else {
+        RunId(Stamper::Wall.uuid())
+    };
+    // `d1.health` inputs (ADR-014 Amendment 1 §2): the FIX flag is cloned before
+    // `callbacks` moves into its thread; the producer's flags exist only when
+    // a producer is spawned.
+    let callbacks = FixCallbacks::new(fix_inbound_tx);
+    let pt_health = posttrade_cfg
+        .as_ref()
+        .map(|_| Arc::new(PostTradeHealth::default()));
+    let health = HealthInputs {
+        fix_logged_on: callbacks.logged_on_handle(),
+        posttrade: pt_health.clone(),
+    };
     // Cloned before `book_ids`/`instrument_ids` move into the core thread.
     let gateway_cfg = GatewayConfig {
         url: nats_url,
@@ -299,6 +341,8 @@ pub fn spawn(cfg: SpawnConfig, shutdown: &Arc<AtomicBool>) -> RunHandles {
             rho_hard_e9: limits.defaults.rho_hard_e9,
         },
         valuation_max_age_s: limits.valuation_max_age_s,
+        run_id,
+        health,
     };
 
     let core_shutdown = Arc::clone(shutdown);
@@ -328,7 +372,6 @@ pub fn spawn(cfg: SpawnConfig, shutdown: &Arc<AtomicBool>) -> RunHandles {
     });
 
     let fix_shutdown = Arc::clone(shutdown);
-    let callbacks = FixCallbacks::new(fix_inbound_tx);
     let fix = thread::spawn(move || {
         d1_gateway_fix::run_initiator(
             &fix_cfg.settings_path,
@@ -379,7 +422,9 @@ pub fn spawn(cfg: SpawnConfig, shutdown: &Arc<AtomicBool>) -> RunHandles {
     // until the caller has joined `core`, or the producer can drain-flush-exit
     // while `core` is still mid-iteration pushing events.
     let mut posttrade_shutdown = None;
-    let posttrade = posttrade_cfg.map(|cfg| {
+    // `zip` ties the producer to the health flags by type: the same `Option`
+    // that gates the spawn supplies the flags, so no fallback is needed.
+    let posttrade = posttrade_cfg.zip(pt_health).map(|(cfg, pt_health)| {
         let flag = Arc::new(AtomicBool::new(false));
         posttrade_shutdown = Some(Arc::clone(&flag));
         let producer_stamper = if deterministic {
@@ -388,21 +433,34 @@ pub fn spawn(cfg: SpawnConfig, shutdown: &Arc<AtomicBool>) -> RunHandles {
             Stamper::Wall
         };
         thread::spawn(move || {
+            // Armed until `run_producer` returns, so a panic (which unwinds
+            // past the `Err` arm below) still marks the producer failed.
+            let mut panic_guard = FailOnUnwind {
+                failed: &pt_health.failed,
+                armed: true,
+            };
             let result = d1_posttrade::run_producer(
-                &cfg.brokers,
-                &cfg.registry_url,
+                &cfg,
                 universe,
                 posttrade_rx,
                 producer_stamper,
                 &flag,
+                run_id,
+                d1_posttrade::ProducerFlags {
+                    ready: &pt_health.ready,
+                    send_failures: &pt_health.send_failures,
+                },
             );
             // Log as soon as the thread dies, not just at `main.rs`'s final
             // join: a broker outage at startup (e.g. `ensure_topics` failing)
             // would otherwise leave the entire post-trade/compliance audit
             // trail silently dropped for the rest of the session with no
             // visibility until shutdown.
+            panic_guard.armed = false;
             if let Err(ref err) = result {
                 eprintln!("d1: Kafka post-trade producer exited with error: {err}");
+                // Relaxed: display-only for `d1.health` (`PostTradeHealth`).
+                pt_health.failed.store(true, Ordering::Relaxed);
             }
             result
         })
@@ -743,10 +801,7 @@ fn run_core(
                                 // proof the post-trade events are already
                                 // enqueued (`tests/golden_posttrade.rs` syncs
                                 // on exactly that).
-                                for event in posttrade::cross_events(
-                                    record,
-                                    NettingCycleId::Cycle(output.cycle_id),
-                                ) {
+                                for event in posttrade::cross_events(record) {
                                     push_posttrade(&mut posttrade_tx, event);
                                 }
                                 if cross_tx.push(*record).is_err() {
@@ -866,7 +921,7 @@ fn run_core(
                 );
                 // Ledger first, NATS notice second -- same ordering
                 // rationale as the netting-derived cross path above.
-                for event in posttrade::cross_events(&record, NettingCycleId::Direct) {
+                for event in posttrade::cross_events(&record) {
                     push_posttrade(&mut posttrade_tx, event);
                 }
                 if cross_tx.push(record).is_err() {
@@ -967,11 +1022,6 @@ fn run_core(
                                     // Pushed before the parent's book-0 report
                                     // below, on the same ring, so it publishes
                                     // first.
-                                    //
-                                    // ponytail: carries the PARENT's
-                                    // status/cum/leaves and no allocation
-                                    // flag -- no per-book cumulative until
-                                    // P3.M1's blotter needs one.
                                     if let Some(order) = current {
                                         let report = ExecReport {
                                             cl_ord_id: event.cl_ord_id,
@@ -984,6 +1034,9 @@ fn run_core(
                                             last_px_e9: fill.px_e9,
                                             cum_qty_e2: order.cum_qty_e2,
                                             leaves_qty_e2: order.leaves_qty_e2,
+                                            allocation: true,
+                                            book_cum_qty_e2: parent.allocated_to(book),
+                                            cycle_id: Some(cycle_id),
                                         };
                                         if exec_report_tx.push(report).is_err() {
                                             eprintln!(
@@ -1122,6 +1175,9 @@ fn run_core(
                                 last_px_e9: event.last_px_e9,
                                 cum_qty_e2: order.cum_qty_e2,
                                 leaves_qty_e2: order.leaves_qty_e2,
+                                allocation: false,
+                                book_cum_qty_e2: 0,
+                                cycle_id: session.parent(event.cl_ord_id).map(|p| p.cycle_id),
                             };
                             if exec_report_tx.push(report).is_err() {
                                 eprintln!("d1: NATS outbound ring full, dropping ExecutionReport");
@@ -1487,6 +1543,43 @@ fn refresh_constituent_mids(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fail_on_unwind_armed_drop_sets_failed() {
+        let failed = AtomicBool::new(false);
+        drop(FailOnUnwind {
+            failed: &failed,
+            armed: true,
+        });
+        assert!(failed.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn fail_on_unwind_disarmed_drop_leaves_failed_clear() {
+        let failed = AtomicBool::new(false);
+        drop(FailOnUnwind {
+            failed: &failed,
+            armed: false,
+        });
+        assert!(!failed.load(Ordering::Relaxed));
+    }
+
+    /// The real use: the guard's `Drop` runs while a panic unwinds. `panic!` and
+    /// `panic_any` both trip the workspace `clippy::panic` deny, so unwind with
+    /// `resume_unwind` (a real unwind, minus the panic hook).
+    #[test]
+    fn fail_on_unwind_sets_failed_when_panic_unwinds() {
+        let failed = AtomicBool::new(false);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = FailOnUnwind {
+                failed: &failed,
+                armed: true,
+            };
+            std::panic::resume_unwind(Box::new("producer thread panic"));
+        }));
+        assert!(result.is_err());
+        assert!(failed.load(Ordering::Relaxed));
+    }
 
     #[test]
     fn zero_and_never_ticked_instruments_have_non_positive_ref_px() {

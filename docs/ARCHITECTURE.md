@@ -79,7 +79,7 @@ Per-Greek treatment ladder (full rationale and sources in ADR-008): **delta** is
 2. EXO revalues; structured-product book delta jumps; publishes new targets.
 3. Delta One nets EXO demand against tracker-book demand → explicit internal cross (booked, visible in UI blotter) + small external residual.
 4. Residual executes over FIX against the sim acceptor; fills allocate pro-rata; post-trade events land in Kafka.
-5. UI shows the full lineage: target → cross → order → fills → allocations, plus valuation metadata (model, seed, paths, git sha) for the EXO number.
+5. UI shows the lineage the live plane carries: the internal cross and the residual parent order share `netting_cycle_id` (ADR-014 Amendment 1 §4); the order links to its fills and per-book allocations by `cl_ord_id`/`exec_id`; plus valuation metadata (model, seed, paths, git sha) for the EXO number. The republished target is shown alongside, correlated by book, instrument and time. No wire key links a target to the netting cycle it triggered.
 
 Extended storyline (`advanced-hedging` scenario, Phase 4):
 

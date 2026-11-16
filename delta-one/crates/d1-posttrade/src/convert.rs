@@ -6,7 +6,7 @@
 use apache_avro::types::Value;
 use apache_avro::{Schema, to_avro_datum};
 use d1_analytics::TrackerRecord;
-use d1_core::{BookId, ClOrdId, ExecId, OrderStatus, Side};
+use d1_core::{BookId, ClOrdId, CycleRef, ExecId, OrderStatus, RunId, Side};
 use d1_refdata::Universe;
 
 use crate::{
@@ -74,11 +74,14 @@ impl Schemas {
         event: &PostTradeEvent,
         uni: &Universe,
         stamper: &mut Stamper,
+        run: RunId,
     ) -> Result<Vec<u8>, PostTradeError> {
         match event {
             PostTradeEvent::Trade(t) => encode_trade(&self.trade, t, uni, stamper),
-            PostTradeEvent::Cross(c) => encode_cross(&self.cross, c, uni, stamper),
-            PostTradeEvent::Allocation(a) => encode_allocation(&self.allocation, a, uni, stamper),
+            PostTradeEvent::Cross(c) => encode_cross(&self.cross, c, uni, stamper, run),
+            PostTradeEvent::Allocation(a) => {
+                encode_allocation(&self.allocation, a, uni, stamper, run)
+            }
             PostTradeEvent::OrderAudit(o) => encode_order_audit(&self.order_audit, o, stamper),
             PostTradeEvent::Tracker(r, sampling_interval_s) => {
                 encode_tracker(&self.tracker, r, *sampling_interval_s, uni, stamper)
@@ -147,6 +150,7 @@ fn encode_cross(
     c: &Cross,
     uni: &Universe,
     stamper: &mut Stamper,
+    run: RunId,
 ) -> Result<Vec<u8>, PostTradeError> {
     let symbol = resolve_symbol(uni, c.instrument)?;
 
@@ -181,7 +185,7 @@ fn encode_cross(
         ),
         (
             "netting_cycle_id".to_string(),
-            Value::String(netting_cycle_id_str(c.netting_cycle_id)),
+            Value::String(netting_cycle_id_str(run, c.netting_cycle_id)),
         ),
     ]);
 
@@ -193,6 +197,7 @@ fn encode_allocation(
     a: &Allocation,
     uni: &Universe,
     stamper: &mut Stamper,
+    run: RunId,
 ) -> Result<Vec<u8>, PostTradeError> {
     // Referenced only to confirm the instrument resolves in the universe
     // (allocations don't carry `symbol` on the wire, unlike trades/crosses).
@@ -225,7 +230,7 @@ fn encode_allocation(
         ("px_e9".to_string(), Value::Long(a.px_e9)),
         (
             "netting_cycle_id".to_string(),
-            Value::String(netting_cycle_id_str(a.netting_cycle_id)),
+            Value::String(netting_cycle_id_str(run, a.netting_cycle_id)),
         ),
     ]);
 
@@ -418,11 +423,8 @@ fn origin_enum(origin: crate::AuditOrigin) -> Value {
     }
 }
 
-fn netting_cycle_id_str(id: NettingCycleId) -> String {
-    match id {
-        NettingCycleId::Cycle(n) => n.to_string(),
-        NettingCycleId::Direct => "DIRECT".to_string(),
-    }
+fn netting_cycle_id_str(run: RunId, cycle: NettingCycleId) -> String {
+    CycleRef { run, cycle }.to_string()
 }
 
 /// `d1-core` ids are fixed 20-byte ASCII arrays; the Avro fields are plain
@@ -466,6 +468,9 @@ mod tests {
 
     use super::*;
     use crate::{AuditOrigin, FIXED_BOOKED_NS, PostTradeEvent};
+
+    const TEST_RUN: RunId = RunId(Uuid::from_u128(0xabc));
+    const TEST_RUN_STR: &str = "00000000-0000-0000-0000-000000000abc";
 
     fn test_universe() -> Universe {
         let mut symbol_to_id = HashMap::new();
@@ -515,7 +520,7 @@ mod tests {
         };
 
         let bytes = schemas
-            .encode(&PostTradeEvent::Trade(leg), &uni, &mut stamper)
+            .encode(&PostTradeEvent::Trade(leg), &uni, &mut stamper, TEST_RUN)
             .unwrap();
         let decoded = from_avro_datum(&schemas.trade, &mut &bytes[..], None).unwrap();
 
@@ -587,7 +592,7 @@ mod tests {
         };
 
         let bytes = schemas
-            .encode(&PostTradeEvent::Trade(leg), &uni, &mut stamper)
+            .encode(&PostTradeEvent::Trade(leg), &uni, &mut stamper, TEST_RUN)
             .unwrap();
         let decoded = from_avro_datum(&schemas.trade, &mut &bytes[..], None).unwrap();
 
@@ -645,7 +650,7 @@ mod tests {
         };
 
         let bytes = schemas
-            .encode(&PostTradeEvent::Cross(base), &uni, &mut stamper)
+            .encode(&PostTradeEvent::Cross(base), &uni, &mut stamper, TEST_RUN)
             .unwrap();
         let decoded = from_avro_datum(&schemas.cross, &mut &bytes[..], None).unwrap();
 
@@ -667,7 +672,7 @@ mod tests {
         );
         assert_eq!(
             field(&decoded, "netting_cycle_id"),
-            &Value::String("7".to_string())
+            &Value::String(format!("{TEST_RUN_STR}/7"))
         );
 
         let direct = Cross {
@@ -675,7 +680,7 @@ mod tests {
             ..base
         };
         let bytes = schemas
-            .encode(&PostTradeEvent::Cross(direct), &uni, &mut stamper)
+            .encode(&PostTradeEvent::Cross(direct), &uni, &mut stamper, TEST_RUN)
             .unwrap();
         let decoded = from_avro_datum(&schemas.cross, &mut &bytes[..], None).unwrap();
         // Same `stamper`, second call: the counter keeps advancing (id 2),
@@ -706,7 +711,12 @@ mod tests {
         };
 
         let bytes = schemas
-            .encode(&PostTradeEvent::Allocation(alloc), &uni, &mut stamper)
+            .encode(
+                &PostTradeEvent::Allocation(alloc),
+                &uni,
+                &mut stamper,
+                TEST_RUN,
+            )
             .unwrap();
         let decoded = from_avro_datum(&schemas.allocation, &mut &bytes[..], None).unwrap();
 
@@ -730,7 +740,7 @@ mod tests {
         assert_eq!(field(&decoded, "book_id"), &Value::Int(2));
         assert_eq!(
             field(&decoded, "netting_cycle_id"),
-            &Value::String("3".to_string())
+            &Value::String(format!("{TEST_RUN_STR}/3"))
         );
     }
 
@@ -756,6 +766,7 @@ mod tests {
                 &PostTradeEvent::OrderAudit(audit),
                 &test_universe(),
                 &mut stamper,
+                TEST_RUN,
             )
             .unwrap();
         let decoded = from_avro_datum(&schemas.order_audit, &mut &bytes[..], None).unwrap();
@@ -798,7 +809,7 @@ mod tests {
         };
 
         let err = schemas
-            .encode(&PostTradeEvent::Trade(leg), &uni, &mut stamper)
+            .encode(&PostTradeEvent::Trade(leg), &uni, &mut stamper, TEST_RUN)
             .unwrap_err();
         assert!(matches!(
             err,
@@ -824,7 +835,7 @@ mod tests {
         };
 
         let err = schemas
-            .encode(&PostTradeEvent::Trade(leg), &uni, &mut stamper)
+            .encode(&PostTradeEvent::Trade(leg), &uni, &mut stamper, TEST_RUN)
             .unwrap_err();
         assert!(matches!(err, PostTradeError::IdOverflow(u32::MAX)));
     }

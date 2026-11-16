@@ -3,19 +3,23 @@
 //! state (that lives in `crate::lib`). ADR-004: proto never enters
 //! `d1-core`; mirrors `d1-gateway-fix::convert`'s role for the FIX side.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use d1_analytics::TrackerRecord;
 use d1_core::{
-    BookId, ClOrdId, CrossRecord, ExecId, ExecReport, InstrumentId, OrderStatus, Side, Target,
-    TransferRequest,
+    BookId, ClOrdId, CrossRecord, CycleRef, ExecId, ExecReport, InstrumentId, NettingCycleId,
+    OrderStatus, RunId, Side, Target, TransferRequest,
 };
 
 use crate::error::NatsError;
-use crate::limits::{AlertEvent, Greek, Level, ValLine, Valuation};
+use crate::limits::{
+    AlertEvent, FirmGreeks, Greek, Level, TierOneLimits, ValLine, Valuation, saturate_i64,
+};
 use crate::pb::hedging::common::v1::{InstrumentRef, Meta, Side as PbSide};
 use crate::pb::hedging::live::v1::{
-    ExecutionReport, InternalCrossNotice, InternalTransferRequest, MarkPrice, OrdStatus,
-    PositionSnapshot, RiskLimitAlert, TargetPosition, TrackerAnalytics, ValuationSnapshot,
-    position_snapshot, risk_limit_alert, tracker_analytics,
+    ExecutionReport, HealthStatus, InternalCrossNotice, InternalTransferRequest, MarkPrice,
+    OrdStatus, PositionSnapshot, RiskLimitAlert, RiskSnapshot, TargetPosition, TrackerAnalytics,
+    ValuationSnapshot, position_snapshot, risk_limit_alert, risk_snapshot, tracker_analytics,
 };
 use crate::{MarkUpdate, PositionUpdate};
 
@@ -26,6 +30,14 @@ pub const CROSSES_SUBJECT: &str = "d1.crosses";
 /// Subject `RiskLimitAlert` publishes to (`protocol/nats-subjects.md`:
 /// `d1.alerts.limits`).
 pub const ALERTS_SUBJECT: &str = "d1.alerts.limits";
+
+/// Subject `RiskSnapshot` publishes to (`protocol/nats-subjects.md`:
+/// `d1.risk.firm`).
+pub const RISK_FIRM_SUBJECT: &str = "d1.risk.firm";
+
+/// Subject `HealthStatus` publishes to (`protocol/nats-subjects.md`:
+/// `d1.health`).
+pub const HEALTH_SUBJECT: &str = "d1.health";
 
 /// Prefix of `exo.valuations.<book>`; the book token is numeric (ADR-014 §1).
 const VALUATIONS_PREFIX: &str = "exo.valuations.";
@@ -57,13 +69,18 @@ pub fn exec_subject(book: BookId, instrument: InstrumentId) -> String {
 /// Build the outbound `ExecutionReport` for a core `ExecReport`, stamping a
 /// fresh `Meta` block (`protocol/CLAUDE.md`: every NATS payload carries one).
 #[must_use]
-pub fn exec_report_to_pb(report: &ExecReport, msg_id: String, sent_ns: u64) -> ExecutionReport {
+pub fn exec_report_to_pb(
+    report: &ExecReport,
+    run: RunId,
+    msg_id: String,
+    sent_ns: u64,
+) -> ExecutionReport {
     ExecutionReport {
         meta: Some(Meta {
             msg_id,
             producer: "delta-one".to_string(),
             sent_ns,
-            schema_version: 1,
+            schema_version: 2,
         }),
         cl_ord_id: clordid_to_string(&report.cl_ord_id),
         exec_id: execid_to_string(&report.exec_id),
@@ -79,6 +96,16 @@ pub fn exec_report_to_pb(report: &ExecReport, msg_id: String, sent_ns: u64) -> E
         cum_qty_e2: report.cum_qty_e2,
         leaves_qty_e2: report.leaves_qty_e2,
         text: String::new(),
+        allocation: report.allocation,
+        book_cum_qty_e2: report.book_cum_qty_e2,
+        // "" for a direct order (no minting cycle).
+        netting_cycle_id: report.cycle_id.map_or_else(String::new, |n| {
+            CycleRef {
+                run,
+                cycle: NettingCycleId::Cycle(n),
+            }
+            .to_string()
+        }),
     }
 }
 
@@ -107,6 +134,7 @@ pub fn internal_transfer_to_transfer(
 #[must_use]
 pub fn cross_record_to_pb(
     record: &CrossRecord,
+    run: RunId,
     msg_id: String,
     sent_ns: u64,
 ) -> InternalCrossNotice {
@@ -115,7 +143,7 @@ pub fn cross_record_to_pb(
             msg_id,
             producer: "delta-one".to_string(),
             sent_ns,
-            schema_version: 1,
+            schema_version: 2,
         }),
         cross_id: record.cross_id.to_string(),
         instrument: Some(InstrumentRef {
@@ -127,6 +155,11 @@ pub fn cross_record_to_pb(
         qty_e2: record.qty_e2,
         ref_px_e9: record.ref_px_e9,
         px_policy_id: record.policy_id.to_string(),
+        netting_cycle_id: CycleRef {
+            run,
+            cycle: record.netting_cycle_id,
+        }
+        .to_string(),
     }
 }
 
@@ -274,6 +307,86 @@ pub fn risk_limit_alert_to_pb(event: &AlertEvent, msg_id: String, sent_ns: u64) 
     }
 }
 
+fn level_to_pb(level: Level) -> i32 {
+    let pb = match level {
+        Level::Ok => risk_snapshot::LimitLevel::Ok,
+        Level::Warn => risk_snapshot::LimitLevel::Warn,
+        Level::Hard => risk_snapshot::LimitLevel::Hard,
+    };
+    pb as i32
+}
+
+/// Build the firm `RiskSnapshot` (ADR-014 Amendment 1). One row per
+/// underlying that has an accepted EXO line, a non-OK level, or a non-zero net
+/// D1 position; an empty input still encodes (zero rows). `exo` is
+/// `LimitBook::firm_greeks`, `d1_qty` is `PositionMirror::net_qty_by_instrument`,
+/// `mid` is `MarkThrottle::latest_mid`.
+///
+/// `firm_delta_qty_e2` = Σ D1 position + Σ EXO delta (inflight excluded).
+/// `notional_e9` = firm delta x mid / 100 in `i128`, 0 without a mark. Every
+/// sum saturates to `i64` by sign. Thresholds come from `limits`, never from
+/// constants here.
+///
+/// ponytail: (N1) (a) no `underlying_id` roll-up of options/futures onto their
+/// underlying -- refdata carries no multiplier; (b) OPTION-class D1 positions
+/// count at delta = qty (owner P4.M3, the first D1 option position); (c) the
+/// tracker book's liability delta is not represented (owner undecided;
+/// trigger: the first tracker liability model).
+#[must_use]
+pub fn risk_snapshot_to_pb(
+    exo: &BTreeMap<InstrumentId, FirmGreeks>,
+    d1_qty: &BTreeMap<InstrumentId, i128>,
+    mid: impl Fn(InstrumentId) -> Option<i64>,
+    limits: &TierOneLimits,
+    msg_id: String,
+    sent_ns: u64,
+) -> RiskSnapshot {
+    let ids: BTreeSet<InstrumentId> = exo
+        .keys()
+        .copied()
+        .chain(d1_qty.iter().filter(|(_, q)| **q != 0).map(|(id, _)| *id))
+        .collect();
+    let greeks = ids
+        .into_iter()
+        .map(|id| {
+            let g = exo.get(&id);
+            let d1 = d1_qty.get(&id).copied().unwrap_or(0);
+            let firm_delta = d1.saturating_add(g.map_or(0, |g| g.exo_delta_qty_e2));
+            let notional = mid(id).map_or(0, |m| firm_delta.saturating_mul(i128::from(m)) / 100);
+            let lvl = |f: fn(&FirmGreeks) -> Level| g.map_or(Level::Ok, f);
+            let sum = |f: fn(&FirmGreeks) -> i128| saturate_i64(g.map_or(0, f));
+            risk_snapshot::NetGreeks {
+                underlying: Some(InstrumentRef {
+                    instrument_id: id.0,
+                    ..Default::default()
+                }),
+                firm_delta_qty_e2: saturate_i64(firm_delta),
+                notional_e9: saturate_i64(notional),
+                vega_e9: sum(|g| g.vega_e9),
+                gamma_qty_e2: sum(|g| g.gamma_qty_e2),
+                greeks_flagged: g.is_some_and(|g| g.flagged),
+                rho_e9: sum(|g| g.rho_e9),
+                theta_e9: sum(|g| g.theta_e9),
+                div_sens_e9: sum(|g| g.div_sens_e9),
+                vega_level: level_to_pb(lvl(|g| g.vega)),
+                vega_warn_e9: limits.vega_warn_e9,
+                vega_hard_e9: limits.vega_hard_e9,
+                gamma_level: level_to_pb(lvl(|g| g.gamma)),
+                gamma_warn_qty_e2: limits.gamma_warn_qty_e2,
+                gamma_hard_qty_e2: limits.gamma_hard_qty_e2,
+                rho_level: level_to_pb(lvl(|g| g.rho)),
+                rho_warn_e9: limits.rho_warn_e9,
+                rho_hard_e9: limits.rho_hard_e9,
+                limit_data_suspect: g.is_some_and(|g| g.suspect),
+            }
+        })
+        .collect();
+    RiskSnapshot {
+        meta: Some(meta(msg_id, sent_ns, 2)),
+        greeks,
+    }
+}
+
 /// Book token of an `exo.valuations.<book>` subject; `None` if the subject is
 /// not of that shape or the token is not the CANONICAL decimal `u32` (ADR-014
 /// §1): `+3` and `03` parse as 3 but are not what any publisher emits.
@@ -304,14 +417,36 @@ pub fn valuation_from_pb(msg: &ValuationSnapshot) -> Valuation {
                 vega_e9: l.vega_e9,
                 gamma_qty_e2: l.gamma_qty_e2,
                 rho_e9: l.rho_e9,
+                delta_qty_e2: l.delta_qty_e2,
+                theta_e9: l.theta_e9,
+                div_sens_e9: l.div_sens_e9,
                 n_flagged: l.flagged_greeks.len(),
             })
             .collect(),
     }
 }
 
+/// Build the outbound `HealthStatus` (`d1.health`). `detail` must hold only
+/// fixed tokens and decimal integers (`health::health_detail`), never a string
+/// taken from a payload (ADR-014 §14).
+#[must_use]
+pub fn health_status_to_pb(
+    ok: bool,
+    detail: BTreeMap<String, String>,
+    msg_id: String,
+    sent_ns: u64,
+) -> HealthStatus {
+    HealthStatus {
+        meta: Some(meta(msg_id, sent_ns, 1)),
+        component: "delta-one".to_string(),
+        ok,
+        detail: detail.into_iter().collect(),
+    }
+}
+
 /// `Meta` with this message type's `schema_version` (per type, not global:
-/// 2 for `RiskLimitAlert`, whose fields 7-10 were added in P2.M4, ADR-014 §4).
+/// 2 for `RiskLimitAlert`, whose fields 7-10 were added in P2.M4, ADR-014 §4,
+/// and for `RiskSnapshot`, whose fields 10-19 are ADR-014 Amendment 1).
 fn meta(msg_id: String, sent_ns: u64, schema_version: u32) -> Meta {
     Meta {
         msg_id,
@@ -430,8 +565,15 @@ mod tests {
             qty_e2: 800_000,
             ref_px_e9: 150_000_000_000,
             policy_id: "ARRIVAL_MID",
+            netting_cycle_id: d1_core::NettingCycleId::Cycle(2),
         };
-        let pb = cross_record_to_pb(&record, "msg-1".to_string(), 42);
+        let run = RunId(uuid::Uuid::from_u128(0xabc));
+        let pb = cross_record_to_pb(&record, run, "msg-1".to_string(), 42);
+        assert_eq!(pb.meta.as_ref().unwrap().schema_version, 2);
+        assert_eq!(
+            pb.netting_cycle_id,
+            "00000000-0000-0000-0000-000000000abc/2"
+        );
 
         assert_eq!(pb.meta.as_ref().unwrap().msg_id, "msg-1");
         assert_eq!(pb.meta.as_ref().unwrap().producer, "delta-one");
@@ -443,6 +585,13 @@ mod tests {
         assert_eq!(pb.qty_e2, 800_000);
         assert_eq!(pb.ref_px_e9, 150_000_000_000);
         assert_eq!(pb.px_policy_id, "ARRIVAL_MID");
+
+        let transfer = CrossRecord {
+            netting_cycle_id: d1_core::NettingCycleId::Direct,
+            ..record
+        };
+        let pb = cross_record_to_pb(&transfer, run, "msg-2".to_string(), 43);
+        assert_eq!(pb.netting_cycle_id, "DIRECT");
     }
 
     #[test]
@@ -523,8 +672,19 @@ mod tests {
             last_px_e9: 150_500_000_000,
             cum_qty_e2: 10_000,
             leaves_qty_e2: 0,
+            allocation: true,
+            book_cum_qty_e2: 7_000,
+            cycle_id: Some(5),
         };
-        let pb = exec_report_to_pb(&report, "msg-1".to_string(), 42);
+        let run = RunId(uuid::Uuid::from_u128(0xabc));
+        let pb = exec_report_to_pb(&report, run, "msg-1".to_string(), 42);
+        assert_eq!(pb.meta.as_ref().unwrap().schema_version, 2);
+        assert!(pb.allocation);
+        assert_eq!(pb.book_cum_qty_e2, 7_000);
+        assert_eq!(
+            pb.netting_cycle_id,
+            "00000000-0000-0000-0000-000000000abc/5"
+        );
 
         assert_eq!(pb.meta.as_ref().unwrap().msg_id, "msg-1");
         assert_eq!(pb.meta.as_ref().unwrap().producer, "delta-one");
@@ -539,6 +699,18 @@ mod tests {
         assert_eq!(pb.last_px_e9, 150_500_000_000);
         assert_eq!(pb.cum_qty_e2, 10_000);
         assert_eq!(pb.leaves_qty_e2, 0);
+
+        // A direct order (no minting cycle) carries "" and the zero defaults.
+        let direct = ExecReport {
+            allocation: false,
+            book_cum_qty_e2: 0,
+            cycle_id: None,
+            ..report
+        };
+        let pb = exec_report_to_pb(&direct, run, "msg-2".to_string(), 43);
+        assert!(!pb.allocation);
+        assert_eq!(pb.book_cum_qty_e2, 0);
+        assert_eq!(pb.netting_cycle_id, "");
     }
 
     #[test]
@@ -674,6 +846,9 @@ mod tests {
                     vega_e9: 1,
                     gamma_qty_e2: 2,
                     rho_e9: 3,
+                    delta_qty_e2: 4,
+                    theta_e9: -5,
+                    div_sens_e9: 6,
                     flagged_greeks: vec!["delta".into(), "gamma".into()],
                     ..Default::default()
                 },
@@ -690,10 +865,251 @@ mod tests {
             (l.vega_e9, l.gamma_qty_e2, l.rho_e9, l.n_flagged),
             (1, 2, 3, 2)
         );
+        assert_eq!((l.delta_qty_e2, l.theta_e9, l.div_sens_e9), (4, -5, 6));
         assert_eq!(v.lines.get(1).unwrap().underlying, None);
         msg.valuation.as_mut().unwrap().git_sha.clear();
         assert!(!valuation_from_pb(&msg).meta_complete);
         msg.valuation = None;
         assert!(!valuation_from_pb(&msg).meta_complete);
+    }
+
+    // ---- RiskSnapshot (ADR-014 Amendment 1) ----
+
+    const AAPL: InstrumentId = InstrumentId(1001);
+    const MSFT: InstrumentId = InstrumentId(1002);
+    const IBM: InstrumentId = InstrumentId(1003);
+
+    fn caps() -> TierOneLimits {
+        TierOneLimits {
+            vega_warn_e9: 50,
+            vega_hard_e9: 100,
+            gamma_warn_qty_e2: 20,
+            gamma_hard_qty_e2: 50,
+            rho_warn_e9: 10,
+            rho_hard_e9: 25,
+        }
+    }
+
+    fn fg(u: InstrumentId) -> FirmGreeks {
+        FirmGreeks {
+            underlying: u,
+            exo_delta_qty_e2: 0,
+            vega_e9: 0,
+            gamma_qty_e2: 0,
+            rho_e9: 0,
+            theta_e9: 0,
+            div_sens_e9: 0,
+            flagged: false,
+            vega: Level::Ok,
+            gamma: Level::Ok,
+            rho: Level::Ok,
+            suspect: false,
+        }
+    }
+
+    fn snap_of(
+        exo: &[FirmGreeks],
+        d1: &[(InstrumentId, i128)],
+        mid: Option<i64>,
+    ) -> crate::pb::hedging::live::v1::RiskSnapshot {
+        let exo = exo.iter().map(|g| (g.underlying, *g)).collect();
+        let d1 = d1.iter().copied().collect();
+        risk_snapshot_to_pb(&exo, &d1, |_| mid, &caps(), "id".into(), 7)
+    }
+
+    fn row(
+        s: &crate::pb::hedging::live::v1::RiskSnapshot,
+        u: InstrumentId,
+    ) -> &risk_snapshot::NetGreeks {
+        s.greeks
+            .iter()
+            .find(|g| g.underlying.as_ref().map(|r| r.instrument_id) == Some(u.0))
+            .unwrap()
+    }
+
+    #[test]
+    fn empty_risk_snapshot_encodes_and_decodes() {
+        use prost::Message as _;
+        let s = snap_of(&[], &[], None);
+        assert!(s.greeks.is_empty());
+        let meta = s.meta.as_ref().unwrap();
+        assert_eq!(
+            (meta.schema_version, meta.sent_ns, meta.producer.as_str()),
+            (2, 7, "delta-one")
+        );
+        let back = crate::pb::hedging::live::v1::RiskSnapshot::decode(&*s.encode_to_vec()).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn risk_rows_are_the_union_and_flat_d1_alone_is_omitted() {
+        let s = snap_of(
+            &[fg(AAPL)],
+            &[(MSFT, 5), (IBM, 0), (AAPL, 0)], // IBM flat: no row; AAPL has an EXO line
+            None,
+        );
+        let ids: Vec<u32> = s
+            .greeks
+            .iter()
+            .map(|g| g.underlying.as_ref().unwrap().instrument_id)
+            .collect();
+        assert_eq!(ids, vec![1001, 1002]);
+    }
+
+    #[test]
+    fn firm_delta_is_d1_qty_plus_exo_delta_and_notional_uses_the_mark() {
+        let mut g = fg(AAPL);
+        g.exo_delta_qty_e2 = -300;
+        // 1,000 (D1, e.g. across books) + (-300) EXO = 700 (x1e2 units).
+        let s = snap_of(&[g], &[(AAPL, 1_000)], Some(150_000_000_000));
+        let r = row(&s, AAPL);
+        assert_eq!(r.firm_delta_qty_e2, 700);
+        // 700e-2 units x 150.0 = 1050.0 -> 1_050_000_000_000 (e9).
+        assert_eq!(r.notional_e9, 700 * 150_000_000_000 / 100);
+        assert_eq!(r.notional_e9, 1_050_000_000_000);
+        // No mark: delta still reported, notional 0.
+        let s = snap_of(&[g], &[(AAPL, 1_000)], None);
+        assert_eq!(
+            (row(&s, AAPL).firm_delta_qty_e2, row(&s, AAPL).notional_e9),
+            (700, 0)
+        );
+        // Short side: signs carry through.
+        let s = snap_of(&[], &[(MSFT, -250)], Some(10_000_000_000));
+        assert_eq!(row(&s, MSFT).firm_delta_qty_e2, -250);
+        assert_eq!(row(&s, MSFT).notional_e9, -25_000_000_000);
+    }
+
+    #[test]
+    fn risk_values_saturate_by_sign() {
+        let big = i128::from(i64::MAX) * 4;
+        let mut g = fg(AAPL);
+        g.vega_e9 = big;
+        g.gamma_qty_e2 = -big;
+        g.theta_e9 = big;
+        let s = snap_of(&[g], &[(AAPL, big)], Some(i64::MAX));
+        let r = row(&s, AAPL);
+        assert_eq!(r.vega_e9, i64::MAX);
+        assert_eq!(r.gamma_qty_e2, i64::MIN);
+        assert_eq!(r.theta_e9, i64::MAX);
+        assert_eq!(r.firm_delta_qty_e2, i64::MAX);
+        assert_eq!(r.notional_e9, i64::MAX);
+        let s = snap_of(&[], &[(MSFT, -big)], Some(i64::MAX));
+        assert_eq!(row(&s, MSFT).firm_delta_qty_e2, i64::MIN);
+        assert_eq!(row(&s, MSFT).notional_e9, i64::MIN);
+        // i128 overflow in the delta sum itself saturates, never wraps.
+        let mut g = fg(AAPL);
+        g.exo_delta_qty_e2 = i128::MAX;
+        let s = snap_of(&[g], &[(AAPL, 10)], Some(i64::MAX));
+        assert_eq!(row(&s, AAPL).firm_delta_qty_e2, i64::MAX);
+        assert_eq!(row(&s, AAPL).notional_e9, i64::MAX);
+    }
+
+    #[test]
+    fn risk_levels_flags_and_thresholds_come_from_inputs() {
+        let mut g = fg(AAPL);
+        g.vega = Level::Warn;
+        g.gamma = Level::Hard;
+        g.suspect = true;
+        g.flagged = true;
+        g.theta_e9 = -9;
+        g.div_sens_e9 = 8;
+        g.rho_e9 = -7;
+        let exo = [(AAPL, g)].into_iter().collect();
+        let other = TierOneLimits {
+            vega_warn_e9: 1,
+            vega_hard_e9: 2,
+            gamma_warn_qty_e2: 3,
+            gamma_hard_qty_e2: 4,
+            rho_warn_e9: 5,
+            rho_hard_e9: 6,
+        };
+        let s = risk_snapshot_to_pb(&exo, &BTreeMap::new(), |_| None, &other, "x".into(), 1);
+        let r = row(&s, AAPL);
+        use risk_snapshot::LimitLevel as L;
+        assert_eq!(
+            (r.vega_level, r.gamma_level, r.rho_level),
+            (L::Warn as i32, L::Hard as i32, L::Ok as i32)
+        );
+        assert_eq!((r.vega_warn_e9, r.vega_hard_e9), (1, 2));
+        assert_eq!((r.gamma_warn_qty_e2, r.gamma_hard_qty_e2), (3, 4));
+        assert_eq!((r.rho_warn_e9, r.rho_hard_e9), (5, 6));
+        assert!(r.limit_data_suspect && r.greeks_flagged);
+        assert_eq!((r.theta_e9, r.div_sens_e9, r.rho_e9), (-9, 8, -7));
+        // A D1-only row has OK levels, no flags, but still carries the caps.
+        let s = snap_of(&[], &[(MSFT, 1)], None);
+        let r = row(&s, MSFT);
+        assert_eq!(
+            (r.vega_level, r.gamma_level, r.rho_level),
+            (L::Ok as i32, L::Ok as i32, L::Ok as i32)
+        );
+        assert!(!r.limit_data_suspect && !r.greeks_flagged);
+        assert_eq!((r.vega_warn_e9, r.rho_hard_e9), (50, 25));
+    }
+
+    #[test]
+    fn snapshot_from_a_limit_book_matches_hand_sums_and_the_alert_value() {
+        use crate::limits::LimitBook;
+        use std::time::{Duration, Instant};
+        let mut lb = LimitBook::new(
+            caps(),
+            Duration::from_secs(15),
+            &[BookId(3), BookId(4)],
+            &[AAPL, MSFT],
+        );
+        let t = Instant::now();
+        let l = |v, g, r, d, th, dv| ValLine {
+            underlying: Some(AAPL),
+            vega_e9: v,
+            gamma_qty_e2: g,
+            rho_e9: r,
+            delta_qty_e2: d,
+            theta_e9: th,
+            div_sens_e9: dv,
+            n_flagged: 0,
+        };
+        let mk = |book, lines| Valuation {
+            book: BookId(book),
+            as_of_ns: 1,
+            meta_complete: true,
+            lines,
+        };
+        let mut alerts =
+            lb.on_snapshot(Some(BookId(3)), &mk(3, vec![l(30, 7, 3, 1_000, -5, 11)]), t);
+        alerts.extend(lb.on_snapshot(Some(BookId(4)), &mk(4, vec![l(40, 8, 4, -300, -6, 12)]), t));
+        let s = risk_snapshot_to_pb(
+            &lb.firm_greeks(t),
+            &BTreeMap::from([(AAPL, 50_i128)]),
+            |_| Some(100_000_000_000),
+            &lb.limits(),
+            "m".into(),
+            1,
+        );
+        let r = row(&s, AAPL);
+        assert_eq!(r.vega_e9, 70);
+        assert_eq!(r.gamma_qty_e2, 15);
+        assert_eq!(r.rho_e9, 7);
+        assert_eq!(r.theta_e9, -11);
+        assert_eq!(r.div_sens_e9, 23);
+        assert_eq!(r.firm_delta_qty_e2, 50 + 1_000 - 300);
+        // The vega alert (70 >= warn 50) reports the same number the row does.
+        let vega_alert = alerts.iter().rfind(|a| a.greek == Greek::Vega).unwrap();
+        assert_eq!(vega_alert.value, r.vega_e9);
+        assert_eq!(vega_alert.level, Level::Warn);
+        assert_eq!(r.vega_level, risk_snapshot::LimitLevel::Warn as i32);
+        assert_eq!(r.vega_warn_e9, 50);
+    }
+
+    #[test]
+    fn health_status_to_pb_maps_all_fields() {
+        let detail = BTreeMap::from([("nats".to_string(), "connected".to_string())]);
+        let pb = health_status_to_pb(true, detail, "m".into(), 9);
+        assert_eq!(pb.component, "delta-one");
+        assert!(pb.ok);
+        assert_eq!(pb.detail.len(), 1);
+        assert_eq!(pb.detail.get("nats").map(String::as_str), Some("connected"));
+        let meta = pb.meta.unwrap();
+        assert_eq!((meta.schema_version, meta.sent_ns), (1, 9));
+        assert_eq!(meta.producer, "delta-one");
+        assert!(!health_status_to_pb(false, BTreeMap::new(), "m".into(), 1).ok);
     }
 }

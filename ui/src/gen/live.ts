@@ -118,6 +118,15 @@ export interface ExecutionReport {
   leavesQtyE2: bigint;
   /** reject reason etc. */
   text: string;
+  /** true = per-book ALLOCATION report of a netting parent (ADR-014 Amend 1 s3). */
+  allocation: boolean;
+  /**
+   * book_id != 0; last_qty = this book's share; status/cum/leaves are the PARENT's.
+   * false = book-0 parent report, or a direct order's own report.
+   */
+  bookCumQtyE2: bigint;
+  /** "<run_uuid>/<n>" of minting cycle (book-0 + allocation reports); "" for direct order */
+  nettingCycleId: string;
 }
 
 export interface PositionSnapshot {
@@ -142,11 +151,56 @@ export interface RiskSnapshot {
   greeks: RiskSnapshot_NetGreeks[];
 }
 
+export enum RiskSnapshot_LimitLevel {
+  LIMIT_LEVEL_UNSPECIFIED = 0,
+  LIMIT_LEVEL_OK = 1,
+  LIMIT_LEVEL_WARN = 2,
+  LIMIT_LEVEL_HARD = 3,
+  UNRECOGNIZED = -1,
+}
+
+export function riskSnapshot_LimitLevelFromJSON(object: any): RiskSnapshot_LimitLevel {
+  switch (object) {
+    case 0:
+    case "LIMIT_LEVEL_UNSPECIFIED":
+      return RiskSnapshot_LimitLevel.LIMIT_LEVEL_UNSPECIFIED;
+    case 1:
+    case "LIMIT_LEVEL_OK":
+      return RiskSnapshot_LimitLevel.LIMIT_LEVEL_OK;
+    case 2:
+    case "LIMIT_LEVEL_WARN":
+      return RiskSnapshot_LimitLevel.LIMIT_LEVEL_WARN;
+    case 3:
+    case "LIMIT_LEVEL_HARD":
+      return RiskSnapshot_LimitLevel.LIMIT_LEVEL_HARD;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return RiskSnapshot_LimitLevel.UNRECOGNIZED;
+  }
+}
+
+export function riskSnapshot_LimitLevelToJSON(object: RiskSnapshot_LimitLevel): string {
+  switch (object) {
+    case RiskSnapshot_LimitLevel.LIMIT_LEVEL_UNSPECIFIED:
+      return "LIMIT_LEVEL_UNSPECIFIED";
+    case RiskSnapshot_LimitLevel.LIMIT_LEVEL_OK:
+      return "LIMIT_LEVEL_OK";
+    case RiskSnapshot_LimitLevel.LIMIT_LEVEL_WARN:
+      return "LIMIT_LEVEL_WARN";
+    case RiskSnapshot_LimitLevel.LIMIT_LEVEL_HARD:
+      return "LIMIT_LEVEL_HARD";
+    case RiskSnapshot_LimitLevel.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
 export interface RiskSnapshot_NetGreeks {
   underlying:
     | InstrumentRef
     | undefined;
-  /** hedgeable via Delta One */
+  /** Σ D1 position qty (all books) + Σ EXO delta_qty_e2 for this underlying (Amend 1 s1) */
   firmDeltaQtyE2: bigint;
   /** delta notional, underlying ccy */
   notionalE9: bigint;
@@ -162,6 +216,20 @@ export interface RiskSnapshot_NetGreeks {
   thetaE9: bigint;
   /** ccy per +1% absolute div-yield change; monitored only (ADR-008) */
   divSensE9: bigint;
+  vegaLevel: RiskSnapshot_LimitLevel;
+  /** |vega| cap, ccy*1e9 per vol point */
+  vegaWarnE9: bigint;
+  vegaHardE9: bigint;
+  gammaLevel: RiskSnapshot_LimitLevel;
+  /** |gamma| cap, dDelta per +1% spot, qty_e2 */
+  gammaWarnQtyE2: bigint;
+  gammaHardQtyE2: bigint;
+  rhoLevel: RiskSnapshot_LimitLevel;
+  /** |rho| cap, ccy*1e9 per bp */
+  rhoWarnE9: bigint;
+  rhoHardE9: bigint;
+  /** a contributing book is stale/invalid (ADR-014 s3) */
+  limitDataSuspect: boolean;
 }
 
 export interface RiskLimitAlert {
@@ -255,6 +323,8 @@ export interface InternalCrossNotice {
   refPxE9: bigint;
   /** ADR-005 §4; compliance-visible */
   pxPolicyId: string;
+  /** "<run_uuid>/<n>" of producing cycle, or "DIRECT" (ADR-009); equals posttrade.crosses value */
+  nettingCycleId: string;
 }
 
 export interface ReconAlert {
@@ -735,6 +805,9 @@ function createBaseExecutionReport(): ExecutionReport {
     cumQtyE2: 0n,
     leavesQtyE2: 0n,
     text: "",
+    allocation: false,
+    bookCumQtyE2: 0n,
+    nettingCycleId: "",
   };
 }
 
@@ -787,6 +860,18 @@ export const ExecutionReport: MessageFns<ExecutionReport> = {
     }
     if (message.text !== "") {
       writer.uint32(98).string(message.text);
+    }
+    if (message.allocation !== false) {
+      writer.uint32(104).bool(message.allocation);
+    }
+    if (message.bookCumQtyE2 !== 0n) {
+      if (BigInt.asIntN(64, message.bookCumQtyE2) !== message.bookCumQtyE2) {
+        throw new globalThis.Error("value provided for field message.bookCumQtyE2 of type sint64 too large");
+      }
+      writer.uint32(112).sint64(message.bookCumQtyE2);
+    }
+    if (message.nettingCycleId !== "") {
+      writer.uint32(122).string(message.nettingCycleId);
     }
     return writer;
   },
@@ -894,6 +979,30 @@ export const ExecutionReport: MessageFns<ExecutionReport> = {
           message.text = reader.string();
           continue;
         }
+        case 13: {
+          if (tag !== 104) {
+            break;
+          }
+
+          message.allocation = reader.bool();
+          continue;
+        }
+        case 14: {
+          if (tag !== 112) {
+            break;
+          }
+
+          message.bookCumQtyE2 = reader.sint64() as bigint;
+          continue;
+        }
+        case 15: {
+          if (tag !== 122) {
+            break;
+          }
+
+          message.nettingCycleId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -945,6 +1054,17 @@ export const ExecutionReport: MessageFns<ExecutionReport> = {
         ? BigInt(object.leaves_qty_e2)
         : 0n,
       text: isSet(object.text) ? globalThis.String(object.text) : "",
+      allocation: isSet(object.allocation) ? globalThis.Boolean(object.allocation) : false,
+      bookCumQtyE2: isSet(object.bookCumQtyE2)
+        ? BigInt(object.bookCumQtyE2)
+        : isSet(object.book_cum_qty_e2)
+        ? BigInt(object.book_cum_qty_e2)
+        : 0n,
+      nettingCycleId: isSet(object.nettingCycleId)
+        ? globalThis.String(object.nettingCycleId)
+        : isSet(object.netting_cycle_id)
+        ? globalThis.String(object.netting_cycle_id)
+        : "",
     };
   },
 
@@ -986,6 +1106,15 @@ export const ExecutionReport: MessageFns<ExecutionReport> = {
     if (message.text !== "") {
       obj.text = message.text;
     }
+    if (message.allocation !== false) {
+      obj.allocation = message.allocation;
+    }
+    if (message.bookCumQtyE2 !== 0n) {
+      obj.bookCumQtyE2 = message.bookCumQtyE2.toString();
+    }
+    if (message.nettingCycleId !== "") {
+      obj.nettingCycleId = message.nettingCycleId;
+    }
     return obj;
   },
 
@@ -1010,6 +1139,11 @@ export const ExecutionReport: MessageFns<ExecutionReport> = {
       ? BigInt(object.leavesQtyE2)
       : 0n;
     message.text = object.text ?? "";
+    message.allocation = object.allocation ?? false;
+    message.bookCumQtyE2 = (object.bookCumQtyE2 !== undefined && object.bookCumQtyE2 !== null)
+      ? BigInt(object.bookCumQtyE2)
+      : 0n;
+    message.nettingCycleId = object.nettingCycleId ?? "";
     return message;
   },
 };
@@ -1326,6 +1460,16 @@ function createBaseRiskSnapshot_NetGreeks(): RiskSnapshot_NetGreeks {
     rhoE9: 0n,
     thetaE9: 0n,
     divSensE9: 0n,
+    vegaLevel: 0,
+    vegaWarnE9: 0n,
+    vegaHardE9: 0n,
+    gammaLevel: 0,
+    gammaWarnQtyE2: 0n,
+    gammaHardQtyE2: 0n,
+    rhoLevel: 0,
+    rhoWarnE9: 0n,
+    rhoHardE9: 0n,
+    limitDataSuspect: false,
   };
 }
 
@@ -1378,6 +1522,54 @@ export const RiskSnapshot_NetGreeks: MessageFns<RiskSnapshot_NetGreeks> = {
         throw new globalThis.Error("value provided for field message.divSensE9 of type sint64 too large");
       }
       writer.uint32(72).sint64(message.divSensE9);
+    }
+    if (message.vegaLevel !== 0) {
+      writer.uint32(80).int32(message.vegaLevel);
+    }
+    if (message.vegaWarnE9 !== 0n) {
+      if (BigInt.asIntN(64, message.vegaWarnE9) !== message.vegaWarnE9) {
+        throw new globalThis.Error("value provided for field message.vegaWarnE9 of type sint64 too large");
+      }
+      writer.uint32(88).sint64(message.vegaWarnE9);
+    }
+    if (message.vegaHardE9 !== 0n) {
+      if (BigInt.asIntN(64, message.vegaHardE9) !== message.vegaHardE9) {
+        throw new globalThis.Error("value provided for field message.vegaHardE9 of type sint64 too large");
+      }
+      writer.uint32(96).sint64(message.vegaHardE9);
+    }
+    if (message.gammaLevel !== 0) {
+      writer.uint32(104).int32(message.gammaLevel);
+    }
+    if (message.gammaWarnQtyE2 !== 0n) {
+      if (BigInt.asIntN(64, message.gammaWarnQtyE2) !== message.gammaWarnQtyE2) {
+        throw new globalThis.Error("value provided for field message.gammaWarnQtyE2 of type sint64 too large");
+      }
+      writer.uint32(112).sint64(message.gammaWarnQtyE2);
+    }
+    if (message.gammaHardQtyE2 !== 0n) {
+      if (BigInt.asIntN(64, message.gammaHardQtyE2) !== message.gammaHardQtyE2) {
+        throw new globalThis.Error("value provided for field message.gammaHardQtyE2 of type sint64 too large");
+      }
+      writer.uint32(120).sint64(message.gammaHardQtyE2);
+    }
+    if (message.rhoLevel !== 0) {
+      writer.uint32(128).int32(message.rhoLevel);
+    }
+    if (message.rhoWarnE9 !== 0n) {
+      if (BigInt.asIntN(64, message.rhoWarnE9) !== message.rhoWarnE9) {
+        throw new globalThis.Error("value provided for field message.rhoWarnE9 of type sint64 too large");
+      }
+      writer.uint32(136).sint64(message.rhoWarnE9);
+    }
+    if (message.rhoHardE9 !== 0n) {
+      if (BigInt.asIntN(64, message.rhoHardE9) !== message.rhoHardE9) {
+        throw new globalThis.Error("value provided for field message.rhoHardE9 of type sint64 too large");
+      }
+      writer.uint32(144).sint64(message.rhoHardE9);
+    }
+    if (message.limitDataSuspect !== false) {
+      writer.uint32(152).bool(message.limitDataSuspect);
     }
     return writer;
   },
@@ -1461,6 +1653,86 @@ export const RiskSnapshot_NetGreeks: MessageFns<RiskSnapshot_NetGreeks> = {
           message.divSensE9 = reader.sint64() as bigint;
           continue;
         }
+        case 10: {
+          if (tag !== 80) {
+            break;
+          }
+
+          message.vegaLevel = reader.int32() as any;
+          continue;
+        }
+        case 11: {
+          if (tag !== 88) {
+            break;
+          }
+
+          message.vegaWarnE9 = reader.sint64() as bigint;
+          continue;
+        }
+        case 12: {
+          if (tag !== 96) {
+            break;
+          }
+
+          message.vegaHardE9 = reader.sint64() as bigint;
+          continue;
+        }
+        case 13: {
+          if (tag !== 104) {
+            break;
+          }
+
+          message.gammaLevel = reader.int32() as any;
+          continue;
+        }
+        case 14: {
+          if (tag !== 112) {
+            break;
+          }
+
+          message.gammaWarnQtyE2 = reader.sint64() as bigint;
+          continue;
+        }
+        case 15: {
+          if (tag !== 120) {
+            break;
+          }
+
+          message.gammaHardQtyE2 = reader.sint64() as bigint;
+          continue;
+        }
+        case 16: {
+          if (tag !== 128) {
+            break;
+          }
+
+          message.rhoLevel = reader.int32() as any;
+          continue;
+        }
+        case 17: {
+          if (tag !== 136) {
+            break;
+          }
+
+          message.rhoWarnE9 = reader.sint64() as bigint;
+          continue;
+        }
+        case 18: {
+          if (tag !== 144) {
+            break;
+          }
+
+          message.rhoHardE9 = reader.sint64() as bigint;
+          continue;
+        }
+        case 19: {
+          if (tag !== 152) {
+            break;
+          }
+
+          message.limitDataSuspect = reader.bool();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -1501,6 +1773,56 @@ export const RiskSnapshot_NetGreeks: MessageFns<RiskSnapshot_NetGreeks> = {
         : isSet(object.div_sens_e9)
         ? BigInt(object.div_sens_e9)
         : 0n,
+      vegaLevel: isSet(object.vegaLevel)
+        ? riskSnapshot_LimitLevelFromJSON(object.vegaLevel)
+        : isSet(object.vega_level)
+        ? riskSnapshot_LimitLevelFromJSON(object.vega_level)
+        : 0,
+      vegaWarnE9: isSet(object.vegaWarnE9)
+        ? BigInt(object.vegaWarnE9)
+        : isSet(object.vega_warn_e9)
+        ? BigInt(object.vega_warn_e9)
+        : 0n,
+      vegaHardE9: isSet(object.vegaHardE9)
+        ? BigInt(object.vegaHardE9)
+        : isSet(object.vega_hard_e9)
+        ? BigInt(object.vega_hard_e9)
+        : 0n,
+      gammaLevel: isSet(object.gammaLevel)
+        ? riskSnapshot_LimitLevelFromJSON(object.gammaLevel)
+        : isSet(object.gamma_level)
+        ? riskSnapshot_LimitLevelFromJSON(object.gamma_level)
+        : 0,
+      gammaWarnQtyE2: isSet(object.gammaWarnQtyE2)
+        ? BigInt(object.gammaWarnQtyE2)
+        : isSet(object.gamma_warn_qty_e2)
+        ? BigInt(object.gamma_warn_qty_e2)
+        : 0n,
+      gammaHardQtyE2: isSet(object.gammaHardQtyE2)
+        ? BigInt(object.gammaHardQtyE2)
+        : isSet(object.gamma_hard_qty_e2)
+        ? BigInt(object.gamma_hard_qty_e2)
+        : 0n,
+      rhoLevel: isSet(object.rhoLevel)
+        ? riskSnapshot_LimitLevelFromJSON(object.rhoLevel)
+        : isSet(object.rho_level)
+        ? riskSnapshot_LimitLevelFromJSON(object.rho_level)
+        : 0,
+      rhoWarnE9: isSet(object.rhoWarnE9)
+        ? BigInt(object.rhoWarnE9)
+        : isSet(object.rho_warn_e9)
+        ? BigInt(object.rho_warn_e9)
+        : 0n,
+      rhoHardE9: isSet(object.rhoHardE9)
+        ? BigInt(object.rhoHardE9)
+        : isSet(object.rho_hard_e9)
+        ? BigInt(object.rho_hard_e9)
+        : 0n,
+      limitDataSuspect: isSet(object.limitDataSuspect)
+        ? globalThis.Boolean(object.limitDataSuspect)
+        : isSet(object.limit_data_suspect)
+        ? globalThis.Boolean(object.limit_data_suspect)
+        : false,
     };
   },
 
@@ -1533,6 +1855,36 @@ export const RiskSnapshot_NetGreeks: MessageFns<RiskSnapshot_NetGreeks> = {
     if (message.divSensE9 !== 0n) {
       obj.divSensE9 = message.divSensE9.toString();
     }
+    if (message.vegaLevel !== 0) {
+      obj.vegaLevel = riskSnapshot_LimitLevelToJSON(message.vegaLevel);
+    }
+    if (message.vegaWarnE9 !== 0n) {
+      obj.vegaWarnE9 = message.vegaWarnE9.toString();
+    }
+    if (message.vegaHardE9 !== 0n) {
+      obj.vegaHardE9 = message.vegaHardE9.toString();
+    }
+    if (message.gammaLevel !== 0) {
+      obj.gammaLevel = riskSnapshot_LimitLevelToJSON(message.gammaLevel);
+    }
+    if (message.gammaWarnQtyE2 !== 0n) {
+      obj.gammaWarnQtyE2 = message.gammaWarnQtyE2.toString();
+    }
+    if (message.gammaHardQtyE2 !== 0n) {
+      obj.gammaHardQtyE2 = message.gammaHardQtyE2.toString();
+    }
+    if (message.rhoLevel !== 0) {
+      obj.rhoLevel = riskSnapshot_LimitLevelToJSON(message.rhoLevel);
+    }
+    if (message.rhoWarnE9 !== 0n) {
+      obj.rhoWarnE9 = message.rhoWarnE9.toString();
+    }
+    if (message.rhoHardE9 !== 0n) {
+      obj.rhoHardE9 = message.rhoHardE9.toString();
+    }
+    if (message.limitDataSuspect !== false) {
+      obj.limitDataSuspect = message.limitDataSuspect;
+    }
     return obj;
   },
 
@@ -1558,6 +1910,24 @@ export const RiskSnapshot_NetGreeks: MessageFns<RiskSnapshot_NetGreeks> = {
     message.rhoE9 = (object.rhoE9 !== undefined && object.rhoE9 !== null) ? BigInt(object.rhoE9) : 0n;
     message.thetaE9 = (object.thetaE9 !== undefined && object.thetaE9 !== null) ? BigInt(object.thetaE9) : 0n;
     message.divSensE9 = (object.divSensE9 !== undefined && object.divSensE9 !== null) ? BigInt(object.divSensE9) : 0n;
+    message.vegaLevel = object.vegaLevel ?? 0;
+    message.vegaWarnE9 = (object.vegaWarnE9 !== undefined && object.vegaWarnE9 !== null)
+      ? BigInt(object.vegaWarnE9)
+      : 0n;
+    message.vegaHardE9 = (object.vegaHardE9 !== undefined && object.vegaHardE9 !== null)
+      ? BigInt(object.vegaHardE9)
+      : 0n;
+    message.gammaLevel = object.gammaLevel ?? 0;
+    message.gammaWarnQtyE2 = (object.gammaWarnQtyE2 !== undefined && object.gammaWarnQtyE2 !== null)
+      ? BigInt(object.gammaWarnQtyE2)
+      : 0n;
+    message.gammaHardQtyE2 = (object.gammaHardQtyE2 !== undefined && object.gammaHardQtyE2 !== null)
+      ? BigInt(object.gammaHardQtyE2)
+      : 0n;
+    message.rhoLevel = object.rhoLevel ?? 0;
+    message.rhoWarnE9 = (object.rhoWarnE9 !== undefined && object.rhoWarnE9 !== null) ? BigInt(object.rhoWarnE9) : 0n;
+    message.rhoHardE9 = (object.rhoHardE9 !== undefined && object.rhoHardE9 !== null) ? BigInt(object.rhoHardE9) : 0n;
+    message.limitDataSuspect = object.limitDataSuspect ?? false;
     return message;
   },
 };
@@ -1933,6 +2303,7 @@ function createBaseInternalCrossNotice(): InternalCrossNotice {
     qtyE2: 0n,
     refPxE9: 0n,
     pxPolicyId: "",
+    nettingCycleId: "",
   };
 }
 
@@ -1967,6 +2338,9 @@ export const InternalCrossNotice: MessageFns<InternalCrossNotice> = {
     }
     if (message.pxPolicyId !== "") {
       writer.uint32(66).string(message.pxPolicyId);
+    }
+    if (message.nettingCycleId !== "") {
+      writer.uint32(74).string(message.nettingCycleId);
     }
     return writer;
   },
@@ -2042,6 +2416,14 @@ export const InternalCrossNotice: MessageFns<InternalCrossNotice> = {
           message.pxPolicyId = reader.string();
           continue;
         }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.nettingCycleId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2077,6 +2459,11 @@ export const InternalCrossNotice: MessageFns<InternalCrossNotice> = {
         : isSet(object.px_policy_id)
         ? globalThis.String(object.px_policy_id)
         : "",
+      nettingCycleId: isSet(object.nettingCycleId)
+        ? globalThis.String(object.nettingCycleId)
+        : isSet(object.netting_cycle_id)
+        ? globalThis.String(object.netting_cycle_id)
+        : "",
     };
   },
 
@@ -2106,6 +2493,9 @@ export const InternalCrossNotice: MessageFns<InternalCrossNotice> = {
     if (message.pxPolicyId !== "") {
       obj.pxPolicyId = message.pxPolicyId;
     }
+    if (message.nettingCycleId !== "") {
+      obj.nettingCycleId = message.nettingCycleId;
+    }
     return obj;
   },
 
@@ -2124,6 +2514,7 @@ export const InternalCrossNotice: MessageFns<InternalCrossNotice> = {
     message.qtyE2 = (object.qtyE2 !== undefined && object.qtyE2 !== null) ? BigInt(object.qtyE2) : 0n;
     message.refPxE9 = (object.refPxE9 !== undefined && object.refPxE9 !== null) ? BigInt(object.refPxE9) : 0n;
     message.pxPolicyId = object.pxPolicyId ?? "";
+    message.nettingCycleId = object.nettingCycleId ?? "";
     return message;
   },
 };

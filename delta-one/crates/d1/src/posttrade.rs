@@ -18,7 +18,7 @@ use d1_posttrade::{
 /// two `TradeLeg`s (buy leg, then sell leg), each `TradeKind::InternalCrossLeg`
 /// and stamped with the same `cross_id`.
 #[must_use]
-pub fn cross_events(cross: &CrossRecord, cycle: NettingCycleId) -> [PostTradeEvent; 3] {
+pub fn cross_events(cross: &CrossRecord) -> [PostTradeEvent; 3] {
     let buy_leg = TradeLeg {
         book: cross.buy_book,
         instrument: cross.instrument,
@@ -45,7 +45,7 @@ pub fn cross_events(cross: &CrossRecord, cycle: NettingCycleId) -> [PostTradeEve
             qty_e2: cross.qty_e2,
             ref_px_e9: cross.ref_px_e9,
             policy_id: cross.policy_id,
-            netting_cycle_id: cycle,
+            netting_cycle_id: cross.netting_cycle_id,
         }),
         PostTradeEvent::Trade(buy_leg),
         PostTradeEvent::Trade(sell_leg),
@@ -147,13 +147,14 @@ mod tests {
             qty_e2: 80_000,
             ref_px_e9: 150_000_000_000,
             policy_id: "ARRIVAL_MID",
+            netting_cycle_id: NettingCycleId::Cycle(7),
         }
     }
 
     #[test]
     fn cross_events_has_cross_plus_two_legs_with_correct_sides_and_books() {
         let cross = sample_cross();
-        let events = cross_events(&cross, NettingCycleId::Cycle(7));
+        let events = cross_events(&cross);
 
         let PostTradeEvent::Cross(c) = &events[0] else {
             panic!("expected Cross first")
@@ -190,8 +191,11 @@ mod tests {
 
     #[test]
     fn cross_events_direct_transfer_stamps_direct_cycle() {
-        let cross = sample_cross();
-        let events = cross_events(&cross, NettingCycleId::Direct);
+        let cross = CrossRecord {
+            netting_cycle_id: NettingCycleId::Direct,
+            ..sample_cross()
+        };
+        let events = cross_events(&cross);
         let PostTradeEvent::Cross(c) = &events[0] else {
             panic!("expected Cross first")
         };

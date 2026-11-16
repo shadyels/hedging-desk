@@ -9,8 +9,8 @@ pub mod convert;
 pub mod error;
 
 use std::path::Path;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use d1_core::{ExecEvent, Order};
@@ -37,7 +37,8 @@ const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// the borrow checker, restructure instead").
 pub struct FixCallbacks {
     inbound_tx: Mutex<rtrb::Producer<ExecEvent>>,
-    logged_on: AtomicBool,
+    /// Shared with `d1.health` (`logged_on_handle`).
+    logged_on: Arc<AtomicBool>,
 }
 
 impl FixCallbacks {
@@ -46,7 +47,7 @@ impl FixCallbacks {
     pub fn new(inbound_tx: rtrb::Producer<ExecEvent>) -> Self {
         Self {
             inbound_tx: Mutex::new(inbound_tx),
-            logged_on: AtomicBool::new(false),
+            logged_on: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -58,14 +59,24 @@ impl FixCallbacks {
     pub fn is_logged_on(&self) -> bool {
         self.logged_on.load(Ordering::Relaxed)
     }
+
+    /// A handle on the same flag, for `d1.health`'s `fix.session` (display
+    /// only). Clone it before the callbacks move into the FIX thread.
+    #[must_use]
+    pub fn logged_on_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.logged_on)
+    }
 }
 
 impl ApplicationCallback for FixCallbacks {
     fn on_logon(&self, _session: &SessionId) {
+        // Relaxed: the flag is display-only for `d1.health`, and the drain loop's
+        // read of it only gates a send that quickfix itself orders.
         self.logged_on.store(true, Ordering::Relaxed);
     }
 
     fn on_logout(&self, _session: &SessionId) {
+        // Relaxed: display-only, see `on_logon`.
         self.logged_on.store(false, Ordering::Relaxed);
     }
 

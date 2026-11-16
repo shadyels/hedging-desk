@@ -92,6 +92,20 @@ pub enum Level {
     Hard,
 }
 
+/// One book's valuation feed as seen at a given instant (ADR-014 §3), for
+/// `d1.health`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValuationState {
+    /// Nothing was ever received for the book (neither accepted nor rejected).
+    None,
+    /// Last snapshot accepted and fresher than `max_age`.
+    Ok,
+    /// Last accepted snapshot is older than `max_age`.
+    Stale,
+    /// The latest snapshot was rejected; no accept since.
+    Invalid,
+}
+
 /// Level of an absolute exposure: `abs >= hard` is `Hard`, `abs >= warn` is
 /// `Warn`. Takes `u128` (the `unsigned_abs` of an `i128` sum), so there is no
 /// `abs()` on `i64` anywhere on this path (`i64::MIN` is representable).
@@ -117,6 +131,12 @@ pub struct ValLine {
     pub gamma_qty_e2: i64,
     /// Desk-position rho, ccy x 1e9 per bp.
     pub rho_e9: i64,
+    /// Desk-position delta, units of underlying x 1e2 (ADR-014 §9).
+    pub delta_qty_e2: i64,
+    /// Desk-position theta, ccy x 1e9 per calendar day.
+    pub theta_e9: i64,
+    /// Desk-position dividend sensitivity, ccy x 1e9 per +1% yield.
+    pub div_sens_e9: i64,
     /// `flagged_greeks.len()`.
     pub n_flagged: usize,
 }
@@ -158,6 +178,11 @@ struct AcceptedLine {
     vega_e9: i64,
     gamma_qty_e2: i64,
     rho_e9: i64,
+    delta_qty_e2: i64,
+    theta_e9: i64,
+    div_sens_e9: i64,
+    /// `n_flagged > 0`: some MC std error breached its configured max.
+    flagged: bool,
 }
 
 #[derive(Debug, Default)]
@@ -178,8 +203,9 @@ struct BookEntry {
 ///
 /// ponytail: no hysteresis -- alerts can flap at MC noise near a limit. Add a
 /// clear-below-warn-minus-margin rule on the first observed flapping or a
-/// book decommission (ADR-014 §3). Books that never published are invisible
-/// here (Delta One cannot know which books EXO values).
+/// book decommission (ADR-014 §3). Books that never published raise no alert
+/// (Delta One cannot know which books EXO values); `d1.health` now surfaces
+/// them as `valuation=none`, and surfaces reject counters (`health::health_detail`).
 ///
 /// ponytail: D1-held listed options contribute no vega (Delta One holds
 /// linear instruments only in P2 and cannot price options). Owner P4.M3.
@@ -202,6 +228,82 @@ struct Acc {
     overflow: bool,
     forced: Vec<String>,
     forced_books: Vec<BookId>,
+}
+
+/// Aggregation scratch for one underlying: the three limited Greeks plus the
+/// monitored-only sums and the flagged bit. Produced by `LimitBook::aggregate`,
+/// the only summation path (`evaluate` and `firm_greeks` both read it).
+#[derive(Default)]
+struct UnderAgg {
+    vega: Acc,
+    gamma: Acc,
+    rho: Acc,
+    delta_qty_e2: i128,
+    theta_e9: i128,
+    div_sens_e9: i128,
+    flagged: bool,
+}
+
+impl UnderAgg {
+    fn acc(&self, greek: Greek) -> &Acc {
+        match greek {
+            Greek::Vega => &self.vega,
+            Greek::Gamma => &self.gamma,
+            Greek::Rho => &self.rho,
+        }
+    }
+
+    fn acc_mut(&mut self, greek: Greek) -> &mut Acc {
+        match greek {
+            Greek::Vega => &mut self.vega,
+            Greek::Gamma => &mut self.gamma,
+            Greek::Rho => &mut self.rho,
+        }
+    }
+
+    /// A contributing book is stale or invalid.
+    fn suspect(&self) -> bool {
+        [Greek::Vega, Greek::Gamma, Greek::Rho]
+            .iter()
+            .any(|&g| !self.acc(g).forced.is_empty())
+    }
+}
+
+/// One underlying's firm-wide EXO-side exposure, for `RiskSnapshot`
+/// (`convert::risk_snapshot_to_pb`). Sums are `i128` (saturated by sign only
+/// at the wire); levels are what the alerts last reported for the key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirmGreeks {
+    /// The underlying.
+    pub underlying: InstrumentId,
+    /// Σ accepted EXO `delta_qty_e2` across books, units x 1e2.
+    pub exo_delta_qty_e2: i128,
+    /// Σ vega, ccy x 1e9 per vol point.
+    pub vega_e9: i128,
+    /// Σ gamma, qty_e2 per +1% spot.
+    pub gamma_qty_e2: i128,
+    /// Σ rho, ccy x 1e9 per bp.
+    pub rho_e9: i128,
+    /// Σ theta, ccy x 1e9 per calendar day.
+    pub theta_e9: i128,
+    /// Σ dividend sensitivity, ccy x 1e9 per +1% yield.
+    pub div_sens_e9: i128,
+    /// Some contributing line had `flagged_greeks`.
+    pub flagged: bool,
+    /// Vega level as last alerted (absent = OK).
+    pub vega: Level,
+    /// Gamma level as last alerted.
+    pub gamma: Level,
+    /// Rho level as last alerted.
+    pub rho: Level,
+    /// A contributing book is stale or invalid (ADR-014 §3).
+    pub suspect: bool,
+}
+
+/// `v` as `i64`, saturated by sign if it does not fit.
+#[must_use]
+pub(crate) fn saturate_i64(v: i128) -> i64 {
+    i64::try_from(v).unwrap_or(if v < 0 { i64::MIN } else { i64::MAX })
 }
 
 impl LimitBook {
@@ -236,6 +338,25 @@ impl LimitBook {
     #[must_use]
     pub fn rejects(&self, book: BookId) -> u64 {
         self.state.get(&book).map_or(0, |e| e.rejects)
+    }
+
+    /// `book`'s valuation feed at `now`. Reuses `forced_reason` for the stale
+    /// test, so staleness has one definition. A book rejected on its first-ever
+    /// snapshot reads `Invalid`; one never heard from reads `None`.
+    #[must_use]
+    pub fn valuation_state(&self, book: BookId, now: Instant) -> ValuationState {
+        let Some(entry) = self.state.get(&book) else {
+            return ValuationState::None;
+        };
+        if entry.invalid.is_some() {
+            ValuationState::Invalid
+        } else if entry.received.is_none() {
+            ValuationState::None
+        } else if self.forced_reason(book, entry, now).is_some() {
+            ValuationState::Stale
+        } else {
+            ValuationState::Ok
+        }
     }
 
     /// One line for the shutdown log: every non-zero reject counter.
@@ -346,6 +467,10 @@ impl LimitBook {
                 vega_e9: line.vega_e9,
                 gamma_qty_e2: line.gamma_qty_e2,
                 rho_e9: line.rho_e9,
+                delta_qty_e2: line.delta_qty_e2,
+                theta_e9: line.theta_e9,
+                div_sens_e9: line.div_sens_e9,
+                flagged: line.n_flagged > 0,
             });
         }
         // Non-decreasing, not strictly increasing: EXO's interval republish
@@ -378,19 +503,27 @@ impl LimitBook {
         })
     }
 
-    /// Aggregate every book's last accepted lines per (underlying, Greek) in
-    /// `i128`, level them, and emit one event per level CHANGE.
-    fn evaluate(&mut self, now: Instant) -> Vec<AlertEvent> {
-        let mut agg: BTreeMap<(InstrumentId, Greek), Acc> = BTreeMap::new();
+    /// The ONE summation path: every book's last accepted lines per underlying
+    /// in `i128`, with the books that make each underlying suspect at `now`.
+    /// A key that left the aggregate (replaced snapshot dropped the
+    /// underlying) is back at sum 0 and must still be able to clear, so every
+    /// underlying with a stored level is present.
+    fn aggregate(&self, now: Instant) -> BTreeMap<InstrumentId, UnderAgg> {
+        let mut agg: BTreeMap<InstrumentId, UnderAgg> = BTreeMap::new();
         for (&book, entry) in &self.state {
             let forced = self.forced_reason(book, entry, now);
             for line in &entry.lines {
+                let under = agg.entry(line.underlying).or_default();
+                under.delta_qty_e2 += i128::from(line.delta_qty_e2);
+                under.theta_e9 += i128::from(line.theta_e9);
+                under.div_sens_e9 += i128::from(line.div_sens_e9);
+                under.flagged |= line.flagged;
                 for (greek, v) in [
                     (Greek::Vega, line.vega_e9),
                     (Greek::Gamma, line.gamma_qty_e2),
                     (Greek::Rho, line.rho_e9),
                 ] {
-                    let acc = agg.entry((line.underlying, greek)).or_default();
+                    let acc = under.acc_mut(greek);
                     match acc.sum.checked_add(i128::from(v)) {
                         Some(s) => acc.sum = s,
                         None => acc.overflow = true,
@@ -404,54 +537,97 @@ impl LimitBook {
                 }
             }
         }
-        // A key that left the aggregate (replaced snapshot dropped the
-        // underlying) is back at sum 0 and must still be able to clear.
-        for key in self.levels.keys() {
-            agg.entry(*key).or_default();
+        for (underlying, _) in self.levels.keys() {
+            agg.entry(*underlying).or_default();
         }
+        agg
+    }
+
+    /// Firm-wide EXO-side exposure per underlying at `now`, for the 1 s
+    /// `RiskSnapshot`. Read-only: levels are those the alerts last reported
+    /// (call after `tick`).
+    #[must_use]
+    pub fn firm_greeks(&self, now: Instant) -> BTreeMap<InstrumentId, FirmGreeks> {
+        let level_of = |u, g| self.levels.get(&(u, g)).copied().unwrap_or(Level::Ok);
+        self.aggregate(now)
+            .into_iter()
+            .map(|(u, a)| {
+                let row = FirmGreeks {
+                    underlying: u,
+                    exo_delta_qty_e2: a.delta_qty_e2,
+                    vega_e9: a.vega.sum,
+                    gamma_qty_e2: a.gamma.sum,
+                    rho_e9: a.rho.sum,
+                    theta_e9: a.theta_e9,
+                    div_sens_e9: a.div_sens_e9,
+                    flagged: a.flagged,
+                    vega: level_of(u, Greek::Vega),
+                    gamma: level_of(u, Greek::Gamma),
+                    rho: level_of(u, Greek::Rho),
+                    suspect: a.suspect(),
+                };
+                (u, row)
+            })
+            .collect()
+    }
+
+    /// The configured caps (for the `RiskSnapshot` threshold fields).
+    #[must_use]
+    pub fn limits(&self) -> TierOneLimits {
+        self.limits
+    }
+
+    /// Level every aggregated (underlying, Greek) and emit one event per level
+    /// CHANGE.
+    fn evaluate(&mut self, now: Instant) -> Vec<AlertEvent> {
+        let agg = self.aggregate(now);
 
         let mut events = Vec::new();
-        for ((underlying, greek), acc) in agg {
-            let (warn, hard) = self.limits.pair(greek);
-            let value = i64::try_from(acc.sum).ok();
-            let natural = if acc.overflow || value.is_none() {
-                Level::Hard
-            } else {
-                level(acc.sum.unsigned_abs(), warn, hard)
-            };
-            let lvl = if natural == Level::Ok && !acc.forced.is_empty() {
-                Level::Warn
-            } else {
-                natural
-            };
-            let prev = self
-                .levels
-                .get(&(underlying, greek))
-                .copied()
-                .unwrap_or(Level::Ok);
-            if lvl == prev {
-                continue;
+        for (underlying, under) in &agg {
+            let underlying = *underlying;
+            for greek in [Greek::Vega, Greek::Gamma, Greek::Rho] {
+                let acc = under.acc(greek);
+                let (warn, hard) = self.limits.pair(greek);
+                let value = i64::try_from(acc.sum).ok();
+                let natural = if acc.overflow || value.is_none() {
+                    Level::Hard
+                } else {
+                    level(acc.sum.unsigned_abs(), warn, hard)
+                };
+                let lvl = if natural == Level::Ok && !acc.forced.is_empty() {
+                    Level::Warn
+                } else {
+                    natural
+                };
+                let prev = self
+                    .levels
+                    .get(&(underlying, greek))
+                    .copied()
+                    .unwrap_or(Level::Ok);
+                if lvl == prev {
+                    continue;
+                }
+                if lvl == Level::Ok {
+                    self.levels.remove(&(underlying, greek));
+                } else {
+                    self.levels.insert((underlying, greek), lvl);
+                }
+                let saturated = saturate_i64(acc.sum);
+                let limit = if lvl == Level::Hard { hard } else { warn };
+                let mut text = event_text(underlying, greek, natural, acc, saturated, (warn, hard));
+                for reason in &acc.forced {
+                    text.push_str("; ");
+                    text.push_str(reason);
+                }
+                events.push(AlertEvent {
+                    underlying,
+                    greek,
+                    level: lvl,
+                    value: saturated,
+                    limit,
+                    text: truncated(&text).to_string(),
+                });
             }
-            if lvl == Level::Ok {
-                self.levels.remove(&(underlying, greek));
-            } else {
-                self.levels.insert((underlying, greek), lvl);
-            }
-            let saturated = value.unwrap_or(if acc.sum < 0 { i64::MIN } else { i64::MAX });
-            let limit = if lvl == Level::Hard { hard } else { warn };
-            let mut text = event_text(underlying, greek, natural, &acc, saturated, (warn, hard));
-            for reason in &acc.forced {
-                text.push_str("; ");
-                text.push_str(reason);
-            }
-            events.push(AlertEvent {
-                underlying,
-                greek,
-                level: lvl,
-                value: saturated,
-                limit,
-                text: truncated(&text).to_string(),
-            });
         }
         events
     }
@@ -540,6 +716,9 @@ mod tests {
             vega_e9: vega,
             gamma_qty_e2: gamma,
             rho_e9: rho,
+            delta_qty_e2: 0,
+            theta_e9: 0,
+            div_sens_e9: 0,
             n_flagged: 0,
         }
     }
@@ -965,5 +1144,221 @@ mod tests {
             fmt_scaled(i128::from(i64::MIN), 100),
             "-92233720368547758.08"
         );
+    }
+
+    // ---- firm_greeks (RiskSnapshot rows) ----
+
+    fn full(u: InstrumentId, v: i64, g: i64, r: i64, d: i64, th: i64, dv: i64) -> ValLine {
+        ValLine {
+            delta_qty_e2: d,
+            theta_e9: th,
+            div_sens_e9: dv,
+            ..line(u, v, g, r)
+        }
+    }
+
+    fn last_levels(events: &[AlertEvent], acc: &mut BTreeMap<(InstrumentId, Greek), Level>) {
+        for e in events {
+            acc.insert((e.underlying, e.greek), e.level);
+        }
+    }
+
+    #[test]
+    fn firm_greeks_sums_two_books_for_all_six_greeks_and_matches_the_alert() {
+        let mut b = lb();
+        let t = Instant::now();
+        let mut ev = b.on_snapshot(
+            Some(BookId(3)),
+            &snap(3, 1, vec![full(AAPL, 30, 7, 3, 1_000, -5, 11)]),
+            t,
+        );
+        ev.extend(b.on_snapshot(
+            Some(BookId(4)),
+            &snap(4, 1, vec![full(AAPL, 40, 8, 4, -300, -6, 12)]),
+            t,
+        ));
+        let rows = b.firm_greeks(t);
+        assert_eq!(rows.len(), 1);
+        let r = rows.get(&AAPL).unwrap();
+        assert_eq!(r.underlying, AAPL);
+        assert_eq!(r.exo_delta_qty_e2, 700);
+        assert_eq!((r.vega_e9, r.gamma_qty_e2, r.rho_e9), (70, 15, 7));
+        assert_eq!((r.theta_e9, r.div_sens_e9), (-11, 23));
+        // Same key, same number as the alert (70 >= warn 50 -> Warn).
+        let alert = ev.iter().rfind(|e| e.greek == Greek::Vega).unwrap();
+        assert_eq!((alert.value, alert.level), (70, Level::Warn));
+        assert_eq!(i128::from(alert.value), r.vega_e9);
+        assert_eq!(
+            (r.vega, r.gamma, r.rho),
+            (Level::Warn, Level::Ok, Level::Ok)
+        );
+        assert!(!r.flagged && !r.suspect);
+    }
+
+    #[test]
+    fn firm_greeks_flagged_follows_any_flagged_line() {
+        let mut b = lb();
+        let t = Instant::now();
+        let mut flagged = line(AAPL, 0, 0, 0);
+        flagged.n_flagged = 2;
+        b.on_snapshot(Some(BookId(3)), &snap(3, 1, vec![flagged]), t);
+        // A later unflagged line on the same underlying must not clear it.
+        b.on_snapshot(
+            Some(BookId(4)),
+            &snap(4, 1, vec![line(AAPL, 0, 0, 0), line(MSFT, 0, 0, 0)]),
+            t,
+        );
+        let rows = b.firm_greeks(t);
+        assert!(rows.get(&AAPL).unwrap().flagged);
+        assert!(!rows.get(&MSFT).unwrap().flagged);
+    }
+
+    #[test]
+    fn row_level_equals_last_alert_level_and_boundaries_are_inclusive() {
+        let mut b = lb();
+        let t = Instant::now();
+        let mut last = BTreeMap::new();
+        // (vega, expected row level): warn=50, hard=100, symmetric negatives.
+        let steps = [
+            (49, Level::Ok),
+            (50, Level::Warn),
+            (99, Level::Warn),
+            (100, Level::Hard),
+            (99, Level::Warn),
+            (49, Level::Ok),
+            (-49, Level::Ok),
+            (-50, Level::Warn),
+            (-99, Level::Warn),
+            (-100, Level::Hard),
+            (0, Level::Ok),
+        ];
+        for (i, (vega, want)) in steps.into_iter().enumerate() {
+            let ev = b.on_snapshot(
+                Some(BookId(3)),
+                &snap(3, 1 + i as u64, vec![line(AAPL, vega, 0, 0)]),
+                t,
+            );
+            last_levels(&ev, &mut last);
+            let row = b.firm_greeks(t).remove(&AAPL).unwrap();
+            assert_eq!(row.vega, want, "vega {vega}");
+            assert_eq!(row.vega_e9, i128::from(vega));
+            for (greek, lvl) in [
+                (Greek::Vega, row.vega),
+                (Greek::Gamma, row.gamma),
+                (Greek::Rho, row.rho),
+            ] {
+                assert_eq!(
+                    lvl,
+                    last.get(&(AAPL, greek)).copied().unwrap_or(Level::Ok),
+                    "row vs last alert for {greek:?} at vega {vega}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn warn_hard_cleared_ends_ok_on_the_row() {
+        let mut b = lb();
+        let t = Instant::now();
+        let mut seen = Vec::new();
+        for (i, vega) in [60, 120, 0].into_iter().enumerate() {
+            b.on_snapshot(
+                Some(BookId(3)),
+                &snap(3, 1 + i as u64, vec![line(AAPL, vega, 0, 0)]),
+                t,
+            );
+            seen.push(b.firm_greeks(t).remove(&AAPL).unwrap().vega);
+        }
+        assert_eq!(seen, vec![Level::Warn, Level::Hard, Level::Ok]);
+    }
+
+    #[test]
+    fn stale_book_is_suspect_and_forces_warn_then_fresh_clears() {
+        let mut b = lb();
+        let t0 = Instant::now();
+        b.on_snapshot(Some(BookId(3)), &snap(3, 1, vec![line(AAPL, 10, 0, 0)]), t0);
+        let at_max = b.firm_greeks(t0 + MAX_AGE);
+        assert!(!at_max.get(&AAPL).unwrap().suspect, "exactly max_age");
+        let late = t0 + MAX_AGE + Duration::from_secs(1);
+        // A pure read: suspect shows at once, and the alerts are still owed.
+        assert!(b.firm_greeks(late).get(&AAPL).unwrap().suspect);
+        assert_eq!(b.tick(late).len(), 3, "firm_greeks did not consume events");
+        let r = b.firm_greeks(late).remove(&AAPL).unwrap();
+        assert!(r.suspect);
+        assert_eq!(
+            (r.vega, r.gamma, r.rho),
+            (Level::Warn, Level::Warn, Level::Warn)
+        );
+        assert_eq!(r.vega_e9, 10, "stale values are kept");
+        b.on_snapshot(
+            Some(BookId(3)),
+            &snap(3, 2, vec![line(AAPL, 10, 0, 0)]),
+            late,
+        );
+        let r = b.firm_greeks(late).remove(&AAPL).unwrap();
+        assert!(!r.suspect);
+        assert_eq!((r.vega, r.gamma, r.rho), (Level::Ok, Level::Ok, Level::Ok));
+    }
+
+    #[test]
+    fn invalid_book_is_suspect_and_forces_warn() {
+        let mut b = lb();
+        let t = Instant::now();
+        b.on_snapshot(Some(BookId(3)), &snap(3, 5, vec![line(AAPL, 10, 0, 0)]), t);
+        // Strictly older as_of_ns: rejected, book invalid.
+        b.on_snapshot(Some(BookId(3)), &snap(3, 4, vec![line(AAPL, 0, 0, 0)]), t);
+        let r = b.firm_greeks(t).remove(&AAPL).unwrap();
+        assert!(r.suspect);
+        assert_eq!(
+            (r.vega, r.gamma, r.rho),
+            (Level::Warn, Level::Warn, Level::Warn)
+        );
+        assert_eq!(r.vega_e9, 10, "last accepted values stay in the row");
+        // A second, healthy book on another underlying is not suspect.
+        b.on_snapshot(Some(BookId(4)), &snap(4, 1, vec![line(MSFT, 1, 0, 0)]), t);
+        assert!(!b.firm_greeks(t).get(&MSFT).unwrap().suspect);
+    }
+
+    #[test]
+    fn firm_greeks_sums_overflow_as_i128_and_levels_saturate_hard() {
+        let t = Instant::now();
+        for sign in [1_i64, -1] {
+            let v = if sign > 0 { i64::MAX } else { i64::MIN };
+            let mut b = lb();
+            b.on_snapshot(
+                Some(BookId(3)),
+                &snap(3, 1, vec![line(AAPL, v, 0, 0), line(AAPL, v, 0, 0)]),
+                t,
+            );
+            let r = b.firm_greeks(t).remove(&AAPL).unwrap();
+            assert_eq!(r.vega_e9, 2 * i128::from(v), "no i64 wrap in the sum");
+            assert_eq!(r.vega, Level::Hard);
+            assert_eq!(saturate_i64(r.vega_e9), v);
+        }
+    }
+
+    #[test]
+    fn firm_greeks_rows_are_underlyings_with_lines_and_levels_come_from_config() {
+        let t = Instant::now();
+        let mut b = lb();
+        assert!(b.firm_greeks(t).is_empty());
+        b.on_snapshot(Some(BookId(3)), &snap(3, 1, vec![line(AAPL, 120, 0, 0)]), t);
+        // Replacement drops AAPL (alert clears) and adds MSFT.
+        b.on_snapshot(Some(BookId(3)), &snap(3, 2, vec![line(MSFT, 1, 0, 0)]), t);
+        let rows = b.firm_greeks(t);
+        assert_eq!(rows.keys().copied().collect::<Vec<_>>(), vec![MSFT]);
+        // The same exposure levels differently under different configured caps.
+        let wide = TierOneLimits {
+            vega_warn_e9: 1_000,
+            vega_hard_e9: 2_000,
+            ..limits()
+        };
+        let mut w = LimitBook::new(wide, MAX_AGE, &[BookId(3)], &[AAPL]);
+        w.on_snapshot(Some(BookId(3)), &snap(3, 1, vec![line(AAPL, 120, 0, 0)]), t);
+        assert_eq!(w.firm_greeks(t).get(&AAPL).unwrap().vega, Level::Ok);
+        assert_eq!(w.limits().vega_hard_e9, 2_000);
+        let mut n = lb();
+        n.on_snapshot(Some(BookId(3)), &snap(3, 1, vec![line(AAPL, 120, 0, 0)]), t);
+        assert_eq!(n.firm_greeks(t).get(&AAPL).unwrap().vega, Level::Hard);
     }
 }
