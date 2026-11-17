@@ -13,7 +13,7 @@ Phase 3. Monitoring dashboard first; manual order entry + kill switch second. Re
 
 1. **Desk risk board:** per-book and firm-net delta by underlying; EXO target vs current position vs in-flight; rehedge band visualization; tracker scorecard per index book — TE, tracking difference, cash drag with limit coloring (`d1.tracker.<book>`, ADR-010).
 2. **Order/execution blotter:** live order state machine view keyed by `ClOrdID`, fills, internal crosses shown explicitly as first-class rows (they are booked trades, not footnotes).
-3. **System health:** NATS lag, last EXO valuation metadata (model, seed, n_paths, git_sha — surfacing invariant #7 from root CLAUDE.md), Kafka producer status, FIX session state.
+3. **System health:** the `d1.health` detail keys named in ADR-014 Amendment 1 s2 (`nats`, `fix.session`, `posttrade`, `posttrade.send_failures`; there is no NATS-lag key), last EXO valuation metadata (model, seed, n_paths, git_sha — surfacing invariant #7 from root CLAUDE.md), and the `exo.health` per-book state.
 4. **Actions (P3.M2): manual ticket, kill switch, hedge-proposal approve/reject:** render `HedgeProposal` with pre/post exposure, modeled cost, validity countdown; approve/reject via `d1.cmd.proposal` with mandatory reject reason. All actions go over NATS request/reply `d1.cmd.*` and require a typed ack from Delta One. The UI must render the *rejection reason* path as carefully as the success path. Kill switch is a command to Delta One; the UI never fakes state locally.
 
 ## Rules

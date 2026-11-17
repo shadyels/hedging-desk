@@ -76,7 +76,7 @@ Health states reuse the same cues. A health fault (`ok=false`, `last_error`, `fa
 - **OK.** Quietest thing on the screen. Glyph and label only, no outline, no tint. Most cells on a healthy board are OK; they must not shout.
 - **WARN.** Applies to a limit at or above warn and below hard, and also to a WARN forced by invalid or stale data (ADR-014 s3). The chip tooltip and the alert ticker show the alert `text` verbatim (rendered as text, never HTML) so the reason is readable.
 - **HARD.** At or above the hard limit. Solid chip, bold value, bar fills in `--state-hard-fg` with the `»` overflow mark if beyond the limit. Never pulses, flashes or plays a sound in P3.M1.
-- **halted.** A book's publication is halted (`exo.alerts.recon` with `publishing_halted`, `exo.health book.N.state = halted:*`). The chip shows the reason after the label. Values already shown stay (they were true when published) in `--text-3`. P3.M2's kill-switch halt reuses this exact cue.
+- **halted.** An EXO book's publication is halted (`exo.alerts.recon` with `publishing_halted`, or `exo.health` `book.<id>.state` = `halted:recon` or `halted:no-snapshot`, ADR-014 s12). Delta One has no halted field (`d1.health` carries none, ADR-014 Amendment 1 s2), so HALTED applies only to EXO books, never to a Delta One component. The chip shows the reason after the label. Values already shown stay (they were true when published) in `--text-3`. P3.M2's kill-switch halt reuses this exact cue.
 - **stale.** At least one message was received for this key in this session, and the last one is older than the threshold. Last value stays visible, italic, in `--text-3`, with its age in the chip (`◔ STALE 47s`). The age ticks up locally.
 - **waiting.** The UI is connected and subscribed, and **no message has ever arrived** for this key in this session. The value is replaced by `–` (en dash). Never `0`, never blank, never a bar. The chip shows how long it has waited (`○ WAITING 1m05s`). Waiting never escalates into stale: no value existed to go stale.
 - **disconnected.** NATS link down. The whole board gets `--disconnected-filter` (greyscale) and a banner under the shell bar: `⊘ DISCONNECTED since 12:04:09Z (last data 22s old)`. Values stay readable in `--text-3`, upright (not italic, to keep it distinct from stale); chips keep glyph and label so the last-known level is legible, but grey. All command controls (P3.M2) are disabled: no ack is possible. On reconnect the UI resubscribes and requests fresh snapshots; every value reads **stale** until its first fresh message arrives.
@@ -101,7 +101,7 @@ A cell shows one chip. When `waiting`, `halted` or `stale` outranks a limit leve
 
 ### Thresholds (proposal, undecided until Slice 1)
 
-Stale threshold = 3 x the producer's cadence, mirroring Delta One's own rule (`valuation_max_age_s` = three of EXO's 5 s republish intervals, `delta-one/d1.toml`). Cadences: `d1.health` / `exo.health` / `d1.positions.<book>` 1 s, `exo.valuations.<book>` 5 s, `d1.risk.firm` 1 s, `d1.tracker.<book>` `sampling_interval_s` from the message (60 s demo). Thresholds are named constants in one module, not literals in components.
+Stale threshold = 3 x the producer's cadence, mirroring Delta One's own rule (`valuation_max_age_s` = three of EXO's 5 s republish intervals, `delta-one/d1.toml`). Cadences: `d1.health` / `exo.health` / `d1.positions.<book>` 1 s, `exo.valuations.<book>` 5 s, `d1.risk.firm` 1 s. The tracker is the exception: its threshold is 2.5 x `sampling_interval_s` from the message (60 s demo), as the registry (`src/bus/subjects.ts`) sets it, not 3 x. Thresholds are named constants in one module, not literals in components.
 
 ## Type
 
@@ -140,12 +140,12 @@ Line height `--lh-tight` 16 px in single-line cells, `--lh-body` 20 px in prose.
 
 - **State chip.** Inline, 18 px tall, `--fs-sm`, padding 0 4 px, glyph + label per the State matrix. One component, one prop (state), used for limits, books and health.
 - **Limit cell** (Greek columns): value, chip, headroom bar. Only vega, gamma and rho have limits (ADR-008, ADR-014 s3 "No delta limit exists"). Delta, theta and div sens show no chip and no bar.
-- **Headroom bar.** 56 x 6 px. Track `--bar-track`. Fill = `|value| / hard limit`, `--bar-fill` neutral while OK; `--state-warn-fg` at or above warn; `--state-hard-fg` at or above hard. A 1 px tick in `--text-3` marks warn and is always drawn (non-colour reading of where WARN begins). Beyond hard the fill is full and a `»` is drawn after it. Limits compare the unsigned exposure (ADR-014 s3), so the bar shows magnitude and the number keeps its sign. Waiting: dotted track, no fill. If the limit value is not known to the UI the bar is replaced by `limit n/a` (see Open questions).
+- **Headroom bar.** 56 x 6 px. Track `--bar-track`. Fill = `|value| / hard limit`, `--bar-fill` neutral while OK; `--state-warn-fg` at or above warn; `--state-hard-fg` at or above hard. A 1 px tick in `--text-3` marks warn and is always drawn (non-colour reading of where WARN begins). Beyond hard the fill is full and a `»` is drawn after it. Limits compare the unsigned exposure (ADR-014 s3), so the bar shows magnitude and the number keeps its sign. Waiting: dotted track, no fill. The caps come from `d1.risk.firm`: each `NetGreeks` carries the absolute warn and hard caps and the limit level (`*_level`, `*_warn_*`, `*_hard_*`, ADR-014 Amendment 1 s1), so the bar is always drawn. `limit n/a` replaces it only if a hard cap arrives as 0 (not populated).
 - **Rehedge band strip.** One line per book: band edges `[ ]` centred on target `T`, position `P`, in-flight `»`. Neutral ink. Text beside it states "inside band" or "outside band" so the strip is not the only carrier.
 - **Sparkline.** 1 px line in `--spark`, last N values of a ring buffer, no axes, no fill, no state hue. Stale: kept, `--text-3`. Waiting: dotted placeholder line.
 - **Tracker card.** `--surface-1` panel: book code (`--fs-lg`), benchmark, kind (ex-post), chip in the title row; TE as the `--fs-kpi` figure, TD, cash drag and cash weight in `--fs-sm`; sparkline; window and freshness line. No tracker limits exist yet, so no limit colouring (Open questions).
 - **Alert ticker.** Newest first, one line per alert: UTC time, chip, `text` verbatim. Level changes only, so it can look empty on a healthy board: "No limit alerts since connect 11:52:07Z".
-- **Blotter row.** Row kinds: `CROSS` (first-class: buy book to sell book, qty, reference price, `px_policy_id`), `ORDER` (book 0 netting parent), `alloc` (book N). Allocation rows are indented `--space-4` under their parent, which has a `▾` / `▸` toggle. Order status (`NEW`, `PARTIALLY_FILLED`, `FILLED`, `CANCELED`, `REJECTED`, `PENDING_CANCEL`, `PENDING_REPLACE`) is plain neutral text; `REJECTED` and the `PENDING_*` pair carry the shape cues `✕` and `◇`, never a hue. List is virtualized with fixed row height; never more than a viewport of rows in the DOM.
+- **Blotter row.** Row kinds: `CROSS` (first-class: buy book to sell book, qty, reference price, `px_policy_id`), `ORDER` (book 0 netting parent), `alloc` (book N). An `alloc` row is an `ExecutionReport` with `allocation = true` and shows its own `book_cum_qty_e2`, never the parent's cumulative (ADR-014 Amendment 1 s3). A CROSS links to its residual ORDER by `netting_cycle_id` together with the instrument id, never by the cycle id alone, because one cycle nets many instruments (ADR-014 Amendment 1 s4); `DIRECT` is a directed transfer with no parent. Allocation rows are indented `--space-4` under their parent, which has a `▾` / `▸` toggle. Order status (`NEW`, `PARTIALLY_FILLED`, `FILLED`, `CANCELED`, `REJECTED`, `PENDING_CANCEL`, `PENDING_REPLACE`) is plain neutral text; `REJECTED` and the `PENDING_*` pair carry the shape cues `✕` and `◇`, never a hue. List is virtualized with fixed row height; never more than a viewport of rows in the DOM.
 - **Banner.** Disconnected banner and the git_sha mismatch strip: `--surface-2`, `--border-strong`, glyph + sentence. The mismatch strip uses the WARN cue.
 
 ## Accessibility
@@ -168,7 +168,7 @@ Regions, top to bottom: firm-net Greeks by underlying (the headline table), per-
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │ Desk Hedging   [Risk board]   Tracker    Blotter    Health                                         ● CONNECTED  12:04:31Z   dark │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-┌─ Firm net Greeks by underlying   (d1.risk.firm, limits: d1.alerts.limits) ───────────────────────────────────────────────────────┐
+┌─ Firm net Greeks by underlying   (d1.risk.firm: levels and caps in it)    ───────────────────────────────────────────────────────┐
 │ Underlying   Delta qty   Notional Gamma  dDelta/1%         Vega  /vol pt            Rho  /bp                 Theta/day Div sens  │
 │ AAPL*        12,300.00  2,411,820  12,400 ●OK    ██·|····   62,000 ▲WARN  ████|···    3,100 ●OK    █··|····       −840      210  │
 │ MSFT         −4,150.00 −1,730,550   8,100 ●OK    █··|····  104,500 ✕HARD  ████|███»  −1,200 ●OK    ···|····     −1,120       95  │
@@ -223,7 +223,7 @@ One card per tracker book. Left to right: live, stale, waiting.
 ┌─ Notes ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │ One card per d1.tracker.<book>. Cards in book_id order. TE, TD, cash drag are ADR-010 ex-post values; units formatted in         │
 │   format.ts.                                                                                                                     │
-│ Sparkline = ring buffer of the last TE values received (neutral ink). Stale threshold = 3 x samplingIntervalS from the message.  │
+│ Sparkline = ring buffer of the last TE values received (neutral ink). Stale threshold = 2.5 x samplingIntervalS from the message.│
 │ Empty (no tracker books configured): "No tracker books. d1.tracker.* has not been configured." Never shown while any message     │
 │   exists.                                                                                                                        │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
@@ -241,7 +241,7 @@ One card per tracker book. Left to right: live, stale, waiting.
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌─ Order and execution blotter   (d1.exec.<book>.<instrument>, d1.crosses) ────────────────────────────────────────────────────────┐
 │   Time      Kind   ClOrdID / CrossId Book      Instr.   Side         Qty         Px  Status                Filled     Leaves     │
-│ ▾ 12:04:29  CROSS  x-0000791         3 → 1     AAPL     —       2,000.00     241.18  booked              2,000.00       0.00     │
+│ ▾ 12:04:29  CROSS  x-0000791         3 → 1     AAPL     —       2,000.00     241.18  residual cl-0000412 2,000.00       0.00     │
 │ ▾ 12:04:29  ORDER  cl-0000412 (net)  0 firm    AAPL     BUY     5,300.00     241.20  PARTIALLY_FILLED    3,100.00   2,200.00     │
 │   12:04:30  alloc  cl-0000412/3      3 EXO-SP  AAPL     BUY     1,900.00     241.20  PARTIALLY_FILLED    1,100.00     800.00     │
 │   12:04:30  alloc  cl-0000412/1      1 D1-CORE AAPL     BUY     3,400.00     241.20  PARTIALLY_FILLED    2,000.00   1,400.00     │
@@ -251,8 +251,10 @@ One card per tracker book. Left to right: live, stale, waiting.
 │                                    ⋮  virtualized: 42 rows in DOM of 1,284, fixed 24 px row height  ⋮                            │
 │ CROSS is its own row kind: buy book → sell book, ref px policy in the detail line (px_policy_id). It is a booked trade, not a    │
 │   footnote.                                                                                                                      │
-│ ORDER (net) = book 0 netting parent; alloc rows (book N) are indented under it, keyed by ClOrdID, deduped by ExecID. ▾ expanded  │
-│   ▸ collapsed.                                                                                                                   │
+│ ORDER (net) = book 0 netting parent; alloc rows (allocation flag, book N) sit indented under it, each with its own               │
+│   book_cum_qty_e2. Orders are keyed by ClOrdID; reports are deduped by (ExecID, book_id), ADR-014 s5. ▾ expanded, ▸ collapsed.   │
+│ A CROSS links to its residual ORDER by netting_cycle_id plus the instrument id, never the cycle id alone (one cycle nets         │
+│   many instruments; ADR-014 Amendment 1 s4). Status column: residual <ClOrdID> | transfer (DIRECT) | no residual | no link.      │
 │ Status is plain text: no state colour. ✕ and ◇ are shape cues only. Newest first; the list does not auto-scroll while a row is   │
 │   selected.                                                                                                                      │
 │ Empty: "No execution events since connect 11:52:07Z."  (never "no orders": exec messages are a stream, there is no snapshot to   │
@@ -270,12 +272,12 @@ One card per tracker book. Left to right: live, stale, waiting.
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌─ Components ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │ Component        State        Detail (as published, d1.health / exo.health detail map)                                           │
-│ Delta One        ●OK          heartbeat 0.8s ago                                                                                 │
+│ Delta One        ✕FAULT       heartbeat 0.8s ago   ok = false: fix.session = logged_out                                          │
 │ EXO              ●OK          heartbeat 0.6s ago   publish: ok   valuation_in_flight: false                                      │
 │ NATS (UI link)   ●OK          connected   reconnects this session: 0                                                             │
-│ NATS lag         ○WAIT        not published yet (d1.health detail key undefined)                                                 │
-│ Kafka producer   ◔STALE 31s   last heartbeat detail 12:04:00Z                                                                    │
-│ FIX session      ✕FAULT       session state as published in the detail map                                                       │
+│ NATS (D1 link)   ●OK          d1.health nats = connected   (connected | pending | disconnected)                                  │
+│ Post-trade       ●OK          posttrade = running   posttrade.send_failures = 0                                                  │
+│ FIX session      ✕FAULT       fix.session = logged_out   (ok = false)                                                            │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌─ Per-book state ───────────────────────────────────────────────┐ ┌─ Last valuation metadata (ValuationSnapshot.valuation) ───────┐
 │ Book       State  (exo.health book.N.state) Last valuation     │ │ Book  model_id       seed  n_paths git_sha           as_of    │
@@ -306,9 +308,11 @@ One card per tracker book. Left to right: live, stale, waiting.
 
 ## Open questions found while designing (do not block this slice)
 
-1. **Headroom bars need the limit values.** `RiskSnapshot` carries no limit or level. Limits live only in `delta-one/d1.toml` and reach the bus inside a `RiskLimitAlert` when a level changes. Either a protocol change (additive fields, ADR required per `protocol/CLAUDE.md`) or the bars degrade to `limit n/a`.
-2. **Limit levels on connect.** Alerts are published on level change only, so a UI that connects mid-state learns a level only at the next change. Fallbacks are `exo.health` `limit.<instrument_id>.<greek>` (EXO's copy of the latest non-cleared level, ADR-014 s12) or adding the level to `RiskSnapshot`. Until a level is known the chip is **waiting**, not OK.
-3. **`d1.risk.firm` is not published yet** (`docs/ROADMAP.md`, Phase 2 notes; `protocol/nats-subjects.md`). The risk board's headline table depends on it.
+Questions 1, 2, 3 and 5 were open when this file was written, before the backend existed. They are settled by ADR-014 Amendment 1 and kept here only as a record.
+
+1. **Headroom bars need the limit values.** Settled: `RiskSnapshot` carries them. Each `NetGreeks` has `vega_*`, `gamma_*` and `rho_*` `_level`, `_warn_*` and `_hard_*` fields (absolute caps from `d1.toml [limits.defaults]`, ADR-014 Amendment 1 s1), so the bars do not degrade to `limit n/a`. That text appears only for a hard cap that arrives as 0.
+2. **Limit levels on connect.** Settled: `d1.risk.firm` is published every 1 s and carries the level, so a UI that connects mid-state learns it from the next snapshot, not only at the next alert. `LIMIT_LEVEL_UNSPECIFIED` means not populated and reads **waiting**, never OK.
+3. **`d1.risk.firm` is published** (ADR-014 Amendment 1 s1; `protocol/nats-subjects.md`). The risk board's headline table reads it.
 4. **No tracker limits exist** (`d1.toml [tracker]` has none; ADR-010 defines none), but `ui/CLAUDE.md` asks for "limit coloring" on TE, TD and cash drag. The cards stay neutral until a limit source exists.
-5. **NATS lag, Kafka producer status and FIX session state** are named in `ui/CLAUDE.md`, but no contract names their keys in the `d1.health` detail map. The health screen renders the map as published and shows "not published yet" for a missing item.
+5. **The `d1.health` detail keys** are named in ADR-014 Amendment 1 s2: `nats`, `fix.session`, `posttrade`, `posttrade.send_failures`, `limits.unattributable_rejects`, `limits.book.<id>.rejects` and `limits.book.<id>.valuation`. There is no lag key and no halted key. The health screen shows "not published yet" for a missing item.
 6. **`ui/CLAUDE.md` lists the tracker scorecard as part of the risk board; the plan for this slice makes it its own screen.** Navigation follows the plan.
