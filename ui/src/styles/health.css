@@ -1,0 +1,80 @@
+/* System health (P3.M1 Slice 6). Tokens only (DESIGN.md). Colour comes only from StateChip (health semantics);
+   everything else is neutral ink. Reuses .panel, .grid, .waiting, .empty, .foot from risk.css and shell.css. */
+.health {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gutter);
+  margin-top: var(--gutter);
+}
+.health-pair {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--gutter);
+}
+.health .sub {
+  margin: var(--space-3) 0 var(--space-1);
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+}
+.health .grid + .sub {
+  margin-top: var(--space-4);
+}
+.health .grid code,
+.health .hline code {
+  font-family: var(--font-mono);
+  color: var(--text-2);
+}
+
+/* Neutral label: not a fault, not live data. Solid outline, no hue, no fill (the word is the cue). */
+.ntag {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 var(--space-1);
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  border: var(--border-w) solid var(--border-strong);
+  border-radius: var(--radius);
+}
+.bad {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+/* git_sha mismatch strip: banner on --surface-2 with the WARN cue (DESIGN.md "Banner"). */
+.hbanner {
+  margin: 0 0 var(--space-2);
+  padding: var(--space-2);
+  background: var(--surface-2);
+  border: var(--border-w) solid var(--border-strong);
+  border-radius: var(--radius);
+  font-size: var(--fs-sm);
+}
+.hbanner ul {
+  margin: var(--space-1) 0 0;
+  padding-left: var(--space-4);
+  font-family: var(--font-mono);
+}
+.hline {
+  margin: 0 0 var(--space-2);
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+.hash .wire-text {
+  max-width: 66ch;
+}
+
+/* A stale panel keeps its last chips legible but greyed: hue on old data could read as a live health state. */
+.health [data-fresh="stale"] .chip {
+  color: var(--text-3);
+  background: transparent;
+  border-color: var(--text-3);
+  font-weight: var(--fw-regular);
+}
+.health [data-fresh="stale"] .ntag {
+  color: var(--text-3);
+  border-color: var(--text-3);
+}

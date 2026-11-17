@@ -40,7 +40,10 @@ function sendHealth(id: string, component: string, ok = true) {
   });
 }
 const row = (pattern: string) => {
-  const th = screen.getByText(pattern, { selector: "code" }).closest("tr");
+  // Scoped to the subjects table: the health screen also names these subjects in its panel headers.
+  const th = within(screen.getByRole("table", { name: "Bus subjects" }))
+    .getByText(pattern, { selector: "code" })
+    .closest("tr");
   if (!th) throw new Error(`no row for ${pattern}`);
   return within(th);
 };
@@ -156,7 +159,7 @@ describe("wire text is text", () => {
     act(up);
     sendHealth("x1", payload);
     expect(container.querySelector("img")).toBeNull();
-    const cell = container.querySelector(".wire-text");
+    const cell = container.querySelector(".subjects .wire-text");
     expect(cell?.textContent).toBe(`${payload}: ok`);
     expect(cell?.getAttribute("title")).toBe(`${payload}: ok`);
     expect(cell?.children.length).toBe(0);

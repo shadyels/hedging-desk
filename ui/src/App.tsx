@@ -10,6 +10,7 @@ import { MISSING, formatAge, formatUtcTime } from "./format";
 import type { HealthStatus } from "./gen/live";
 import { useBus, type Entry } from "./store";
 import { BlotterBoard } from "./blotter/BlotterBoard";
+import { HealthBoard } from "./health/HealthBoard";
 import { RiskBoard } from "./risk/RiskBoard";
 import { TrackerBoard } from "./tracker/TrackerBoard";
 import { useNow } from "./useNow";
@@ -102,6 +103,7 @@ export function App() {
         <RiskBoard />
         <TrackerBoard now={now} />
         <BlotterBoard now={now} />
+        <HealthBoard now={now} />
         <table className="subjects">
           <caption>Bus subjects</caption>
           <thead>
