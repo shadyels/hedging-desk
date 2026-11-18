@@ -30,10 +30,16 @@ function LimitCell({
   fresh: Freshness;
 }) {
   const h = headroom(value, warn, hard);
+  const st = limitChipState(level);
+  // Tint only a live value (DESIGN.md state matrix): stale and disconnected values stay --text-3.
+  const tint =
+    fresh.state === "ok" && (st === "warn" || st === "hard") ? st : undefined;
   return (
     <td className="r">
       <span className="limit-cell">
-        <span className="num">{fmt(value)}</span>
+        <span className="num" data-level={tint}>
+          {fmt(value)}
+        </span>
         <LimitChip level={level} fresh={fresh} />
         {h.kind === "na" ? (
           <span className="na">limit n/a</span>
@@ -76,9 +82,6 @@ function Row({ g, fresh }: { g: RiskSnapshot_NetGreeks; fresh: Freshness }) {
         ) : null}
       </th>
       <td className="num r">{qty2(g.firmDeltaQtyE2)}</td>
-      <td className="num r na" title="No firm-level rehedge band is published">
-        {MISSING}
-      </td>
       <td className="num r">{money0(g.notionalE9)}</td>
       <LimitCell
         value={g.vegaE9}
@@ -157,9 +160,6 @@ export function FirmTable({ now }: { now: number }) {
                 Delta qty
               </th>
               <th scope="col" className="r">
-                Rehedge band
-              </th>
-              <th scope="col" className="r">
                 Notional ccy
               </th>
               <th scope="col" className="r">
@@ -187,11 +187,11 @@ export function FirmTable({ now }: { now: number }) {
         </table>
       )}
       <p className="foot">
-        Delta has no limit (ADR-014 s3): it is hedged. No firm-level rehedge
-        band is published; bands are per book and instrument, in the target
-        panel. Theta and div sens are monitored, no limit. Bar = |value| / hard
-        limit, tick = warn, » = beyond hard. * = MC std error above config max.
-        Chip levels come from Delta One.
+        Delta has no limit (ADR-014 s3): it is hedged against EXO targets, see
+        the target panel for each book&apos;s band. Theta and div sens are
+        monitored, no limit. Bar = |value| / hard limit, tick = warn, » = beyond
+        hard. * = MC std error above config max. Chip levels come from Delta
+        One.
       </p>
     </section>
   );

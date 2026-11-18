@@ -8,7 +8,7 @@
  *   ok            fresh, or an event-driven / undecided subject (those show an age, never a verdict)
  */
 import type { ConnState, Entry } from "../store";
-import { staleThresholdMs, type SubjectSpec } from "./subjects";
+import { NEVER, staleThresholdMs, type SubjectSpec } from "./subjects";
 
 export type FreshState = "disconnected" | "waiting" | "stale" | "ok";
 
@@ -17,6 +17,13 @@ export interface Freshness {
   /** waiting: time spent waiting. stale/ok: age of the last message. disconnected: age of last data, if any. null: unknown. */
   ageMs: number | null;
 }
+
+/**
+ * Event-driven subject (alerts, exec, crosses, targets): a stream with no snapshot and no cadence. Nothing
+ * arriving is not a wait, so a panel for one reads "none since connect", never WAITING with a running clock.
+ */
+export const isEventSubject = (spec: SubjectSpec): boolean =>
+  spec.staleAfterMs === NEVER;
 
 export function freshness(
   spec: SubjectSpec,

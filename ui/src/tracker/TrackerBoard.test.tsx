@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { SUBJECTS, keyOf } from "../bus/subjects";
 import { TrackerAnalytics, TrackerAnalytics_Kind } from "../gen/live";
 import { busSink, flushBus, resetBus } from "../store";
+import { ink, loadCss, token } from "../testCss";
 import { useNow } from "../useNow";
 import { PRICE_ONLY_NOTE } from "./model";
 import { TrackerBoard } from "./TrackerBoard";
@@ -135,5 +136,67 @@ describe("tracker scorecard", () => {
       expect(v.getAttribute("data-level")).toBeNull();
       expect(v.getAttribute("style")).toBeNull();
     }
+  });
+});
+
+describe("tracker card presentation", () => {
+  test("F5: a tracker value follows the board's disconnected dimming, it does not pin --text", () => {
+    const off = loadCss("tracker", "shell");
+    try {
+      const { container } = render(
+        <main className="board" data-disconnected="true">
+          <Host />
+        </main>,
+      );
+      up();
+      send(tracker("a", 1));
+      const dim = (el: Element | null) => ink(el);
+      const val = container.querySelector(".tval");
+      const kpi = container.querySelector(".tval.kpi");
+      expect(dim(val)).toBe("var(--text-3)");
+      expect(dim(kpi)).toBe("var(--text-3)");
+      // and the rule itself does not name --text
+      const rule = Array.from(document.styleSheets)
+        .flatMap((s) => Array.from(s.cssRules))
+        .find((r) => r instanceof CSSStyleRule && r.selectorText === ".tval");
+      expect(rule).toBeDefined();
+      expect((rule as CSSStyleRule).style.color).not.toBe("var(--text)");
+    } finally {
+      off();
+    }
+  });
+
+  test("F8: the KPI figure is weight 600 and ordinary values are not", () => {
+    const off = loadCss("tracker");
+    try {
+      const { container } = render(<Host />);
+      up();
+      send(tracker("a", 1));
+      const kpi = container.querySelector(".tval.kpi") as Element;
+      const plain = container.querySelectorAll(".tval:not(.kpi)")[0] as Element;
+      expect(getComputedStyle(kpi).fontWeight).toBe("var(--fw-bold)");
+      expect(token("--fw-bold")).toBe("600");
+      expect(getComputedStyle(plain).fontWeight).not.toBe("var(--fw-bold)");
+    } finally {
+      off();
+    }
+  });
+
+  test("F9: a stale card carries a readable stale cue and its age at the top, above the values", () => {
+    const { container } = render(<Host />);
+    up();
+    send(tracker("a", 1));
+    expect(container.querySelector(".tstale")).toBeNull(); // live card: no strip
+    tick(200_000);
+    const card = container.querySelector(".tcard") as HTMLElement;
+    const strip = card.querySelector(".tstale") as HTMLElement;
+    expect(strip.textContent).toContain("STALE 3m20s");
+    expect(strip.textContent).toContain("last known values");
+    expect(strip.textContent).toContain("last message 12:04:09Z");
+    // first thing after the title row, before any value
+    expect(strip.nextElementSibling?.className).toBe("tlist");
+    expect(
+      card.querySelector('.chip[data-state="stale"]')?.textContent,
+    ).toContain("STALE 3m20s");
   });
 });

@@ -132,6 +132,13 @@ function TrackerCard({
         fresh={fresh}
         ageLabel="updated"
       />
+      {fresh.state === "stale" ? (
+        <p className="tstale num">
+          <span className="tstale-glyph" aria-hidden="true" /> STALE
+          {fresh.ageMs === null ? "" : ` ${formatAge(fresh.ageMs)}`}: last known
+          values, last message {formatUtcTime(entry.receivedAtMs)}
+        </p>
+      ) : null}
       <dl className="tlist">
         <div className="trow trow-kpi">
           <dt title="tracking_error_ann_e9">Tracking error (ann.)</dt>
@@ -161,11 +168,6 @@ function TrackerCard({
         <span title="window_end_ns - window_start_ns, Delta One feed clock">
           window {span === null ? MISSING : formatAge(span)}
         </span>
-        {fresh.state === "stale" ? (
-          <>
-            {" · "}last message {formatUtcTime(entry.receivedAtMs)}
-          </>
-        ) : null}
       </p>
       <p className="tnote">{PRICE_ONLY_NOTE}</p>
     </section>

@@ -2,7 +2,7 @@
  * Monitoring shell (P3.M1 Slice 1): connection status and per-subject state. The four screens
  * (ui/CLAUDE.md "Screens") are built on top of this in later slices.
  */
-import { freshness } from "./bus/freshness";
+import { freshness, isEventSubject } from "./bus/freshness";
 import { SUBJECT_IDS, SUBJECTS, type SubjectId } from "./bus/subjects";
 import { StateChip, type ChipState } from "./components/StateChip";
 import { WireText } from "./components/WireText";
@@ -11,6 +11,7 @@ import type { HealthStatus } from "./gen/live";
 import { useBus, type Entry } from "./store";
 import { BlotterBoard } from "./blotter/BlotterBoard";
 import { HealthBoard } from "./health/HealthBoard";
+import { NoneSince } from "./risk/parts";
 import { RiskBoard } from "./risk/RiskBoard";
 import { TrackerBoard } from "./tracker/TrackerBoard";
 import { useNow } from "./useNow";
@@ -36,17 +37,23 @@ function SubjectRow({ id, now }: { id: SubjectId; now: number }) {
         : formatAge(fresh.ageMs)
       : null;
   const last: Entry | null = st.last;
+  // An event subject that has delivered nothing reads "none since connect": no WAITING chip, no clock.
+  const none = fresh.state === "waiting" && isEventSubject(spec);
   return (
     <tr>
       <th scope="row">
         <code>{spec.pattern}</code>
       </th>
       <td>
-        <StateChip
-          state={state}
-          {...(fault ? { label: "FAULT" } : {})}
-          clock={clock}
-        />
+        {none ? (
+          <NoneSince />
+        ) : (
+          <StateChip
+            state={state}
+            {...(fault ? { label: "FAULT" } : {})}
+            clock={clock}
+          />
+        )}
       </td>
       <td className="num r">{st.count}</td>
       <td className="num r">
@@ -69,10 +76,12 @@ export function App() {
   const duplicates = useBus((s) => s.duplicates);
   const now = useNow();
   const up = conn.status === "connected";
+  // First dial: nothing was lost, so this is CONNECTING, not DISCONNECTED, and there is no time to show.
+  const connecting = conn.status === "connecting";
   const since =
     conn.disconnectedSinceMs === null
-      ? MISSING
-      : formatUtcTime(conn.disconnectedSinceMs);
+      ? ""
+      : ` since ${formatUtcTime(conn.disconnectedSinceMs)}`;
   const lastData =
     conn.lastDataAtMs === null
       ? "no data received"
@@ -94,9 +103,19 @@ export function App() {
       </header>
       {!up && (
         <div className="banner" role="status">
-          <span className="banner-glyph" aria-hidden="true" />
-          DISCONNECTED since {since} ({lastData}
-          {retry})
+          <span
+            className="banner-glyph"
+            data-kind={connecting ? "connecting" : "lost"}
+            aria-hidden="true"
+          />
+          {connecting ? (
+            "CONNECTING to NATS, no data yet"
+          ) : (
+            <>
+              DISCONNECTED{since} ({lastData}
+              {retry})
+            </>
+          )}
         </div>
       )}
       <main className="board" data-disconnected={!up}>

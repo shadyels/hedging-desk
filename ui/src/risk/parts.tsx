@@ -1,23 +1,45 @@
 import type { ReactNode } from "react";
 import type { Freshness } from "../bus/freshness";
 import { StateChip } from "../components/StateChip";
-import { formatAge } from "../format";
+import { formatAge, formatUtcTime } from "../format";
+import { useBus } from "../store";
 import { limitChipState, type Headroom, type LimitChipState } from "./model";
 import type { RiskSnapshot_LimitLevel } from "../gen/live";
 
-/** Panel title row. A fresh panel shows the age of its last message; anything else shows its state chip. */
+/**
+ * "none since connect 12:04:09Z": plain text for an event subject that has delivered nothing (DESIGN.md
+ * "Waiting is not stale"). An event stream has no snapshot, so silence is not a wait: no chip, no clock.
+ */
+export function NoneSince() {
+  const since = useBus((s) => s.conn.firstConnectedAtMs);
+  return (
+    <span className="none-since">
+      {since === null
+        ? "not connected yet"
+        : `none since connect ${formatUtcTime(since)}`}
+    </span>
+  );
+}
+
+/**
+ * Panel title row. A fresh panel shows the age of its last message; anything else shows its state chip.
+ * `event` marks an event-driven subject (never stale): while nothing has arrived it reads "none since
+ * connect HH:MM:SSZ" as plain text instead of a WAITING chip with a running clock.
+ */
 export function PanelHead({
   id,
   title,
   fresh,
   note,
   ageLabel = "last msg",
+  event = false,
 }: {
   id: string;
   title: ReactNode;
   fresh: Freshness;
   note?: ReactNode;
   ageLabel?: string;
+  event?: boolean;
 }) {
   const age = fresh.ageMs === null ? null : formatAge(fresh.ageMs);
   return (
@@ -29,6 +51,8 @@ export function PanelHead({
           age === null ? null : (
             `${ageLabel} ${age} ago`
           )
+        ) : event && fresh.state === "waiting" ? (
+          <NoneSince />
         ) : (
           <StateChip
             state={fresh.state}
@@ -55,6 +79,11 @@ export function WaitingBody({
       {extra ? <> {extra}</> : null}
     </p>
   );
+}
+
+/** Body of an event panel that has received nothing: an explanation, plain text, no dotted waiting outline. The "none since connect" fact is in the panel head. */
+export function NoneYetBody({ children }: { children: ReactNode }) {
+  return <p className="none-yet">{children}</p>;
 }
 
 const TRAIL = { warn: "▲", hard: "✕" } as const;

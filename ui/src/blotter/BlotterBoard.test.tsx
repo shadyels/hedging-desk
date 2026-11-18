@@ -252,21 +252,21 @@ describe("waiting and event age", () => {
     const { container } = render(<Host />);
     up();
     tick(300_000);
-    expect(
-      container.querySelectorAll('.chip[data-state="waiting"]').length,
-    ).toBe(2); // exec in the head, crosses in the meta line
+    // F3: event subjects never show a WAITING chip or a clock; they say "none since connect".
+    expect(container.querySelector('.chip[data-state="waiting"]')).toBeNull();
     expect(container.querySelector('.chip[data-state="stale"]')).toBeNull();
-    expect(container.textContent).toContain("Waiting for the first");
+    expect(container.querySelectorAll(".none-since").length).toBe(2); // exec in the head, crosses in the meta line
+    expect(container.textContent).toContain("none since connect 12:04:09Z");
+    expect(container.textContent).not.toMatch(/Waiting|WAITING/);
     expect(container.textContent).not.toContain("last event");
 
     sendExec({ clOrdId: "cl-1" });
     tick(600_000);
     expect(container.textContent).toContain("last event 10m00s ago");
     expect(container.querySelector('.chip[data-state="stale"]')).toBeNull();
-    // crosses has still never delivered: waiting, not stale
-    expect(
-      container.querySelectorAll('.chip[data-state="waiting"]').length,
-    ).toBe(1);
+    // crosses has still never delivered: "none since connect", not stale, not waiting
+    expect(container.querySelector('.chip[data-state="waiting"]')).toBeNull();
+    expect(container.querySelectorAll(".none-since")).toHaveLength(1);
   });
 
   test("the event subjects are never stale at any age", () => {

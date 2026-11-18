@@ -7,7 +7,7 @@ import { formatUtcTime } from "../format";
 import type { RiskLimitAlert } from "../gen/live";
 import { useBus } from "../store";
 import { asAlert } from "./model";
-import { PanelHead, WaitingBody } from "./parts";
+import { NoneYetBody, PanelHead } from "./parts";
 
 /** cleared = back inside warn (OK); breached = hard; otherwise warn. */
 export const alertChipState = (a: RiskLimitAlert): ChipState =>
@@ -25,10 +25,6 @@ export function AlertTicker({ now }: { now: number }) {
   );
   // Event-driven subject: freshness never returns "stale", only waiting / ok (age) / disconnected.
   const fresh = freshness(SUBJECTS.limitAlerts, st.last, conn, now);
-  const since =
-    conn.firstConnectedAtMs === null
-      ? null
-      : formatUtcTime(conn.firstConnectedAtMs);
   return (
     <section className="panel" aria-labelledby="p-alerts">
       <PanelHead
@@ -37,16 +33,12 @@ export function AlertTicker({ now }: { now: number }) {
         note={<code>d1.alerts.limits</code>}
         fresh={fresh}
         ageLabel="last event"
+        event
       />
       {rows.length === 0 ? (
-        <WaitingBody
-          what={<code>d1.alerts.limits</code>}
-          extra={
-            since === null
-              ? null
-              : `No limit alerts since connect ${since}. Alerts are sent on level change only.`
-          }
-        />
+        <NoneYetBody>
+          Alerts are sent on level change only, so a healthy board stays empty.
+        </NoneYetBody>
       ) : (
         <ul className="ticker">
           {rows.map((e) => {

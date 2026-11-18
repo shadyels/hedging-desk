@@ -146,3 +146,6 @@
 .chip[data-state="disconnected"] .chip-glyph::before {
   content: var(--glyph-disconnected);
 }
+.banner-glyph[data-kind="connecting"]::before {
+  content: var(--glyph-waiting);
+}

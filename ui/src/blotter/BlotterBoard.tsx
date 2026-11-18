@@ -19,7 +19,7 @@ import {
   formatUtcTime,
 } from "../format";
 import type { InstrumentRef } from "../gen/common";
-import { PanelHead, WaitingBody } from "../risk/parts";
+import { NoneSince, NoneYetBody, PanelHead } from "../risk/parts";
 import { useBus } from "../store";
 import {
   buildBlotter,
@@ -233,7 +233,7 @@ function CrossCells({ row }: { row: CrossRow }) {
   );
 }
 
-/** Event-driven subject status: waiting chip until the first event, then "last event Ns ago". Never stale. */
+/** Event-driven subject status: "none since connect" until the first event, then "last event Ns ago". Never stale, never a waiting clock. */
 function EventStatus({ id, now }: { id: "exec" | "crosses"; now: number }) {
   const conn = useBus((s) => s.conn);
   const last = useBus((s) => s.subjects[id].last);
@@ -241,6 +241,8 @@ function EventStatus({ id, now }: { id: "exec" | "crosses"; now: number }) {
   const age = f.ageMs === null ? null : formatAge(f.ageMs);
   return f.state === "ok" ? (
     <>{age === null ? null : `last event ${age} ago`}</>
+  ) : f.state === "waiting" ? (
+    <NoneSince />
   ) : (
     <StateChip
       state={f.state}
@@ -364,6 +366,7 @@ export function BlotterBoard({ now }: { now: number }) {
           note={<code>d1.exec.&lt;book&gt;.&lt;instrument&gt;</code>}
           fresh={fresh}
           ageLabel="last event"
+          event
         />
         <p className="bl-meta num">
           <span>
@@ -384,14 +387,10 @@ export function BlotterBoard({ now }: { now: number }) {
           </span>
         </p>
         {flat.length === 0 ? (
-          <WaitingBody
-            what={
-              <>
-                <code>d1.exec.*.*</code> or <code>d1.crosses</code>
-              </>
-            }
-            extra="Exec messages are a stream with no snapshot: an empty blotter means none seen yet, not no orders."
-          />
+          <NoneYetBody>
+            Exec messages are a stream with no snapshot: an empty blotter means
+            none seen yet, not no orders.
+          </NoneYetBody>
         ) : (
           <div
             className="bl-table"

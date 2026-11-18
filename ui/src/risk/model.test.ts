@@ -1,12 +1,16 @@
 import { describe, expect, test } from "vitest";
 import { formatQtyE2 } from "../format";
+import { parseD1, parseExo } from "../health/model";
 import {
+  HealthStatus,
+  ReconAlert,
   RiskSnapshot_LimitLevel as L,
   PositionSnapshot,
   TargetPosition,
 } from "../gen/live";
 import type { Entry } from "../store";
 import {
+  bookViews,
   gapQtyE2,
   headroom,
   insideBand,
@@ -174,5 +178,70 @@ describe("join", () => {
     );
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ target: -9n, position: 4n, inflight: 2n });
+  });
+});
+
+describe("bookViews: book list and halt state come from the wire", () => {
+  const exo = (detail: Record<string, string>) =>
+    parseExo(HealthStatus.fromPartial({ component: "exo", ok: true, detail }));
+  const d1 = (detail: Record<string, string>) =>
+    parseD1(
+      HealthStatus.fromPartial({ component: "delta-one", ok: true, detail }),
+    );
+  const alert = (bookId: number, halted: boolean, at = 0): Entry => ({
+    value: ReconAlert.fromPartial({ bookId, publishingHalted: halted }),
+    receivedAtMs: at,
+  });
+
+  test("the union of exo.health, d1.health and recon alert books, sorted, no valuation needed", () => {
+    const v = bookViews(
+      [],
+      exo({ "book.9.state": "publishing", "book.3.state": "awaiting_marks" }),
+      d1({ "limits.book.5.rejects": "0", "limits.book.9.valuation": "ok" }),
+      [alert(12, false)],
+    );
+    expect(v.map((b) => b.bookId)).toEqual([3, 5, 9, 12]);
+    expect(v.every((b) => b.rows.length === 0)).toBe(true);
+    expect(v.find((b) => b.bookId === 3)?.exoState).toBe("awaiting_marks");
+    expect(v.find((b) => b.bookId === 5)?.exoState).toBeUndefined();
+  });
+
+  test("halt reasons: halted:<reason> from exo.health, recon from an alert, none otherwise", () => {
+    const v = bookViews(
+      [],
+      exo({
+        "book.1.state": "halted:recon",
+        "book.2.state": "halted:no-snapshot",
+        "book.3.state": "publishing",
+        "book.4.state": "awaiting_snapshot",
+      }),
+      null,
+      [alert(7, true)],
+    );
+    const reasons = (id: number) => v.find((b) => b.bookId === id)?.haltReasons;
+    expect(reasons(1)).toEqual(["recon"]);
+    expect(reasons(2)).toEqual(["no-snapshot"]);
+    expect(reasons(3)).toEqual([]);
+    expect(reasons(4)).toEqual([]);
+    expect(reasons(7)).toEqual(["recon"]); // alert only, exo.health silent about the book
+  });
+
+  test("the latest alert per book decides; a live health state outvotes an alert", () => {
+    const ring = [alert(1, true, 1), alert(1, false, 2), alert(2, true, 3)];
+    const v = bookViews([], null, null, ring);
+    expect(v.find((b) => b.bookId === 1)?.haltReasons).toEqual([]);
+    expect(v.find((b) => b.bookId === 2)?.haltReasons).toEqual(["recon"]);
+    const w = bookViews([], exo({ "book.2.state": "publishing" }), null, ring);
+    expect(w.find((b) => b.bookId === 2)?.haltReasons).toEqual([]);
+  });
+
+  test("an unknown halted-looking token is not a halt (the wire carries two values)", () => {
+    const v = bookViews(
+      [],
+      exo({ "book.1.state": "halted:<b>x</b>" }),
+      null,
+      [],
+    );
+    expect(v[0]?.haltReasons).toEqual([]);
   });
 });

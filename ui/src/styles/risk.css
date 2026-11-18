@@ -213,3 +213,27 @@
 .ticker .num {
   color: var(--text-2);
 }
+
+/* Event subject with nothing received: plain text, no outline (a dotted outline means WAITING). */
+.none-yet {
+  margin: 0;
+  padding: var(--space-2) 0;
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+}
+
+/* Limit values follow the wire level (DESIGN.md state matrix): WARN in warn ink, HARD in hard ink at weight 600.
+   Only set while the value is live; stale and disconnected values stay --text-3. */
+.limit-cell .num[data-level="warn"] {
+  color: var(--state-warn-fg);
+}
+.limit-cell .num[data-level="hard"] {
+  color: var(--state-hard-fg);
+  font-weight: var(--fw-bold);
+}
+
+/* halted: last values kept in --text-3, upright (italic is stale) (DESIGN.md "halted"). */
+.grid tr[data-fresh="halted"] td,
+.grid tr[data-fresh="halted"] th {
+  color: var(--text-3);
+}

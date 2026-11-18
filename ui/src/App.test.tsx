@@ -1,6 +1,7 @@
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { App } from "./App";
+import { isEventSubject } from "./bus/freshness";
 import { SUBJECTS } from "./bus/subjects";
 import { StateChip, CHIP_LABEL, type ChipState } from "./components/StateChip";
 import { HealthStatus } from "./gen/live";
@@ -58,13 +59,22 @@ describe("shell", () => {
     }
   });
 
-  test("before the link is up: disconnected banner, board greyed, nothing reads OK", () => {
+  test("F4: first load reads CONNECTING, never DISCONNECTED and never 'since –'", () => {
     const { container } = render(<App />);
-    expect(screen.getByRole("status").textContent).toContain(
-      "DISCONNECTED since 12:04:09Z",
+    act(() =>
+      busSink.onStatus(
+        "connecting",
+        { attempt: 0, nextRetryAtMs: null },
+        Date.now(),
+      ),
     );
-    expect(screen.getByRole("status").textContent).toContain(
-      "no data received",
+    const banner = screen.getByRole("status").textContent ?? "";
+    expect(banner).toContain("CONNECTING");
+    expect(banner).not.toContain("DISCONNECTED");
+    expect(banner).not.toMatch(/since/);
+    expect(banner).not.toContain("–");
+    expect(container.querySelector(".bar-conn")?.textContent).toContain(
+      "CONNECTING",
     );
     expect(
       container.querySelector("main")?.getAttribute("data-disconnected"),
@@ -72,17 +82,40 @@ describe("shell", () => {
     expect(container.querySelector('.chip[data-state="ok"]')).toBeNull();
   });
 
-  test("connected: banner gone, every subject WAITING (never received), none STALE", () => {
+  test("F4: a lost link (never a first dial) is DISCONNECTED with its time, and the first failed dial too", () => {
+    render(<App />);
+    act(() =>
+      busSink.onStatus(
+        "reconnecting",
+        { attempt: 1, nextRetryAtMs: Date.now() + 1_000 },
+        Date.now(),
+      ),
+    );
+    const banner = screen.getByRole("status").textContent ?? "";
+    expect(banner).toContain("DISCONNECTED since 12:04:09Z");
+    expect(banner).not.toContain("CONNECTING");
+    expect(banner).toContain("no data received");
+  });
+
+  test("connected: banner gone, every cadence subject WAITING (never received), event subjects 'none since connect', none STALE", () => {
     const { container } = render(<App />);
     act(up);
     expect(screen.queryByRole("status")).toBeNull();
     expect(
       container.querySelector("main")?.getAttribute("data-disconnected"),
     ).toBe("false");
+    const events = Object.values(SUBJECTS).filter(isEventSubject);
+    expect(events.length).toBe(5); // alerts, recon, exec, crosses, targets
     expect(
       container.querySelectorAll('.subjects .chip[data-state="waiting"]')
         .length,
-    ).toBe(Object.keys(SUBJECTS).length);
+    ).toBe(Object.keys(SUBJECTS).length - events.length);
+    expect(container.querySelectorAll(".subjects .none-since")).toHaveLength(
+      events.length,
+    );
+    expect(
+      row("d1.alerts.limits").getByText(/none since connect 12:04:09Z/),
+    ).toBeDefined();
     expect(container.querySelector('.chip[data-state="stale"]')).toBeNull();
   });
 

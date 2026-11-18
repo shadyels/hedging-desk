@@ -5,9 +5,11 @@
  */
 import type { ChipState } from "../components/StateChip";
 import type { WithMeta } from "../bus/subjects";
+import { cueFor, type D1Health, type ExoHealth } from "../health/model";
 import {
   RiskSnapshot_LimitLevel as Level,
   type PositionSnapshot,
+  type ReconAlert,
   type RiskLimitAlert,
   type RiskSnapshot,
   type TargetPosition,
@@ -37,6 +39,11 @@ export const asValuation = (
 ): ValuationSnapshot | null =>
   v && "bookPvE9" in v && Array.isArray((v as { lines?: unknown }).lines)
     ? (v as ValuationSnapshot)
+    : null;
+
+export const asRecon = (v: WithMeta | undefined): ReconAlert | null =>
+  v && "publishingHalted" in v && typeof v.publishingHalted === "boolean"
+    ? (v as ReconAlert)
     : null;
 
 export const asAlert = (v: WithMeta | undefined): RiskLimitAlert | null =>
@@ -270,4 +277,79 @@ export function valuationRows(entries: Record<string, Entry>): ValuationRow[] {
       a.symbol.localeCompare(b.symbol) ||
       a.instrumentId - b.instrumentId,
   );
+}
+
+// ---- Books: the union of every book the wire names, with its halt state --------------------------
+
+/** One book as the Books table sees it. `rows` is empty until the book has published a valuation (WAITING). */
+export interface BookView {
+  bookId: number;
+  rows: ValuationRow[];
+  /** exo.health `book.<id>.state`, verbatim, or undefined if exo.health does not carry the book. */
+  exoState: string | undefined;
+  /** Halt reasons, e.g. ["recon"] or ["no-snapshot"]. Empty = not halted. */
+  haltReasons: string[];
+  /** Latest exo.alerts.recon for the book while it says publishing_halted = true (the views that disagree). */
+  reconAlert: ReconAlert | null;
+}
+
+/** Book ids are digits-only u32 tokens (health/model.ts), so `Number` is exact and they are ids, not money. */
+const asBookId = (id: string) => Number(id);
+
+/**
+ * Book list and halt state from what is actually published: valuations, exo.health `book.<id>.*`,
+ * d1.health `limits.book.<id>.*` (every configured book) and exo.alerts.recon. Nothing is hard-coded.
+ *
+ * HALTED (DESIGN.md "halted", ADR-014 s12): exo.health `book.<id>.state` = `halted:recon` | `halted:no-snapshot`,
+ * or a recon alert with publishing_halted = true. There is no Delta One halt: d1.health carries no halted
+ * field (ADR-014 Amendment 1 s2), so HALTED never comes from a D1 source.
+ *
+ * Source order: exo.health's state, when it carries one for the book, decides. A recon alert is the fallback
+ * only when it does not. Alerts are sent on transitions only and an EXO restart clears a halt without a
+ * "cleared" alert (ADR-014 s8), so a stale `publishing_halted = true` must never outvote a live health state.
+ */
+export function bookViews(
+  valuations: readonly ValuationRow[],
+  exo: ExoHealth | null,
+  d1: D1Health | null,
+  recon: readonly Entry[],
+): BookView[] {
+  // Latest-per-book comes from the subject ring (reconAlerts.ringSize, an untuned size already on the
+  // ring-size ledger row in subjects.ts): a book whose last alert was evicted by newer ones reads as having none.
+  const alerts = new Map<number, ReconAlert>();
+  for (const e of recon) {
+    const a = asRecon(e.value);
+    if (a) alerts.set(a.bookId, a);
+  }
+  const ids = new Set<number>([
+    ...valuations.map((r) => r.bookId),
+    ...(exo?.books ?? []).map((b) => asBookId(b.id)),
+    ...(d1?.books ?? []).map((b) => asBookId(b.id)),
+    ...alerts.keys(),
+  ]);
+  const exoStates = new Map(
+    (exo?.books ?? []).map((b) => [asBookId(b.id), b.state] as const),
+  );
+  return [...ids]
+    .sort((a, b) => a - b)
+    .map((bookId) => {
+      const exoState = exoStates.get(bookId);
+      const alert = alerts.get(bookId);
+      const reconAlert = alert?.publishingHalted ? alert : null;
+      const haltReasons =
+        exoState !== undefined
+          ? cueFor("exoBook", exoState).tone === "halted"
+            ? [exoState.slice("halted:".length)]
+            : []
+          : reconAlert
+            ? ["recon"]
+            : [];
+      return {
+        bookId,
+        rows: valuations.filter((r) => r.bookId === bookId),
+        exoState,
+        haltReasons,
+        reconAlert,
+      };
+    });
 }
