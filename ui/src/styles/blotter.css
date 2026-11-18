@@ -75,10 +75,12 @@
 }
 .bl-cols {
   display: grid;
-  /* Every column is sized to its longest value (ClOrdID: 20 digits + " (net)"); Detail (the reject reason)
-     takes all the leftover width, so the table fills the panel. */
+  /* Every column is sized to its longest value: ClOrdID / CrossId 36ch (a cross id is a 36-character UUID; an order's
+     is 20 digits + " (net)"), Status / link 29ch ("residual " + a 20-digit ClOrdID). Detail (the reject reason)
+     takes all the leftover width, so the table fills the panel. The header and every row share this one list; the
+     table is wider than a 1280 px panel, so its .xscroll region scrolls (header and rows together). */
   grid-template-columns:
-    var(--space-6) 9ch 6ch 27ch 15ch 8ch 5ch 11ch 9ch 19ch 15ch 11ch
+    var(--space-6) 9ch 6ch 36ch 15ch 8ch 5ch 11ch 9ch 29ch 15ch 11ch
     minmax(8ch, 1fr);
   align-items: center;
   column-gap: var(--space-2);
@@ -89,8 +91,11 @@
 .bl-cols > * {
   min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* .c-full cells (a cross's id and its residual link) hold values that must be read whole: no ellipsis. */
+.bl-cols > :not(.c-full) {
+  text-overflow: ellipsis;
 }
 .bl-cols .r {
   text-align: right;

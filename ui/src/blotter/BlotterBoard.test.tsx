@@ -759,3 +759,101 @@ describe("instrument names, ClOrdID width, allocation headers", () => {
     expect(a[10]?.getAttribute("title")).toContain("book_cum_qty_e2");
   });
 });
+
+describe("cross values in a scrolling region", () => {
+  const UUID = "0198f5c2-7a3e-7c41-9b0d-4e6f1a2b3c4d"; // a 36-character cross id
+  const LONG = "18446744073709551615"; // a 20-digit ClOrdID
+  const css = blotterCss.replace(/\/\*[^]*?\*\//g, "");
+  const tracks = (/grid-template-columns:([^;]+);/.exec(css)?.[1] ?? "")
+    .trim()
+    .split(/\s+(?![^(]*\))/);
+  const sendLinked = () => {
+    sendExec({
+      clOrdId: LONG,
+      execId: "v1",
+      nettingCycleId: "run/v",
+      status: S.ORD_STATUS_NEW,
+    });
+    sendCross({ crossId: UUID, nettingCycleId: "run/v" });
+  };
+
+  test("a cross's id and residual link are not ellipsized and carry the full value in a title", () => {
+    const { container } = render(<Host />);
+    up();
+    sendLinked();
+    const row = container.querySelector('[data-kind="cross"]');
+    const id = row?.querySelector(".c-id");
+    const status = row?.querySelector(".c-status");
+    for (const cell of [id, status])
+      expect(cell?.classList.contains("c-full")).toBe(true);
+    expect(id?.querySelector(".wire-text")?.getAttribute("title")).toBe(UUID);
+    expect(status?.textContent).toBe(`residual ${LONG}`);
+    expect(status?.querySelector(".wire-text")?.getAttribute("title")).toBe(
+      LONG,
+    );
+    // jsdom has no layout: assert on the declared tracks and the one ellipsis rule.
+    expect(parseFloat(tracks[3] ?? "")).toBeGreaterThanOrEqual(UUID.length);
+    expect(parseFloat(tracks[9] ?? "")).toBeGreaterThanOrEqual(
+      `residual ${LONG}`.length,
+    );
+    const withEllipsis = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(
+      (m) => /text-overflow/.test(m[2] ?? ""),
+    );
+    expect(withEllipsis.map((m) => m[1]?.trim())).toEqual([
+      ".bl-cols > :not(.c-full)",
+    ]);
+  });
+
+  test("the table is an XScroll region named for it, focusable only while it overflows", () => {
+    const sw = Object.getOwnPropertyDescriptor(
+      HTMLElement.prototype,
+      "scrollWidth",
+    );
+    const cw = Object.getOwnPropertyDescriptor(
+      HTMLElement.prototype,
+      "clientWidth",
+    );
+    const widths = { scroll: 2000, client: 1200 };
+    Object.defineProperty(HTMLElement.prototype, "scrollWidth", {
+      configurable: true,
+      get: () => widths.scroll,
+    });
+    Object.defineProperty(HTMLElement.prototype, "clientWidth", {
+      configurable: true,
+      get: () => widths.client,
+    });
+    try {
+      const { container, getByRole } = render(<Host />);
+      up();
+      sendLinked();
+      const region = getByRole("region", { name: "Blotter table" });
+      expect(region.classList.contains("xscroll")).toBe(true);
+      expect(region.getAttribute("tabindex")).toBe("0");
+      // the header scrolls with the body: both sit inside the one region
+      expect(region.querySelector('[role="columnheader"]')).not.toBeNull();
+      expect(region.querySelector(".bl-scroll")).toBe(
+        container.querySelector(".bl-scroll"),
+      );
+    } finally {
+      if (sw) Object.defineProperty(HTMLElement.prototype, "scrollWidth", sw);
+      if (cw) Object.defineProperty(HTMLElement.prototype, "clientWidth", cw);
+    }
+  });
+
+  test("the header grid and the body grid use the same track list", () => {
+    const { container } = render(<Host />);
+    up();
+    sendLinked();
+    const head = container.querySelector('.bl-head [role="row"]');
+    const body = container.querySelector('.bl-body [role="row"]');
+    expect(head?.classList.contains("bl-cols")).toBe(true);
+    expect(body?.classList.contains("bl-cols")).toBe(true);
+    // one declaration, on .bl-cols, with no override for the header or the body
+    expect(css.match(/grid-template-columns/g)).toHaveLength(1);
+    expect(tracks).toHaveLength(13);
+    expect(head?.querySelectorAll('[role="columnheader"]').length).toBe(
+      tracks.length,
+    );
+    expect(body?.querySelectorAll('[role="cell"]').length).toBe(tracks.length);
+  });
+});

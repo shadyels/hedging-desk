@@ -248,7 +248,7 @@ One card per tracker book. Left to right: live, stale, waiting.
 │   11:52:07Z                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌─ Order and execution blotter   (d1.exec.<book>.<instrument>, d1.crosses) ────────────────────────────────────────────────────────┐
-│   Time      Kind   ClOrdID / CrossId Book      Instr.   Side         Qty         Px  Status                Filled     Leaves     │
+│   Time      Kind   ClOrdID / CrossId Book      Instr.   Side Qty / Fill qty      Px  Status  Filled / Book filled     Leaves     │
 │ ▾ 12:04:29  CROSS  x-0000791         3 → 1     AAPL     —       2,000.00     241.18  residual cl-0000412 2,000.00       0.00     │
 │ ▾ 12:04:29  ORDER  cl-0000412 (net)  0 firm    AAPL     BUY     5,300.00     241.20  PARTIALLY_FILLED    3,100.00   2,200.00     │
 │   12:04:30  alloc  cl-0000412/3      3 EXO-SP  AAPL     BUY     1,900.00     241.20  PARTIALLY_FILLED    1,100.00     800.00     │

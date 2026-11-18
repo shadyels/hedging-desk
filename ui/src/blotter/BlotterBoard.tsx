@@ -192,7 +192,7 @@ function CrossCells({ row }: { row: CrossRow }) {
       <span role="cell" className="c-tog" />
       <Time ms={row.atMs} />
       <span role="cell">CROSS</span>
-      <span role="cell" className="c-id">
+      <span role="cell" className="c-id c-full">
         <WireText value={row.crossId} />
       </span>
       <span role="cell" title="buy book, sell book">
@@ -210,7 +210,7 @@ function CrossCells({ row }: { row: CrossRow }) {
       </span>
       <span
         role="cell"
-        className="c-status"
+        className="c-status c-full"
         title={
           row.nettingCycleId === ""
             ? "no netting_cycle_id on the notice"
