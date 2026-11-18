@@ -15,6 +15,7 @@ import {
   type TargetPosition,
   type ValuationSnapshot,
 } from "../gen/live";
+import { instrumentLabel } from "../refdata";
 import type { Entry } from "../store";
 
 // ---- Guards: the store holds WithMeta; each panel reads one subject, so a field check is enough ----
@@ -100,7 +101,8 @@ export function headroom(value: bigint, warn: bigint, hard: bigint): Headroom {
 export interface BandRow {
   bookId: number;
   instrumentId: number;
-  symbol: string;
+  /** instrumentLabel(instrumentId): the wire carries no symbol (src/refdata.ts). */
+  label: string;
   target: bigint | null;
   band: bigint | null;
   targetAtMs: number | null;
@@ -129,18 +131,14 @@ export function joinTargetsPositions(
   positions: Record<string, Entry>,
 ): BandRow[] {
   const rows = new Map<string, BandRow>();
-  const get = (
-    bookId: number,
-    instrumentId: number,
-    symbol: string,
-  ): BandRow => {
+  const get = (bookId: number, instrumentId: number): BandRow => {
     const k = rowKey(bookId, instrumentId);
     let r = rows.get(k);
     if (!r) {
       r = {
         bookId,
         instrumentId,
-        symbol,
+        label: instrumentLabel(instrumentId),
         target: null,
         band: null,
         targetAtMs: null,
@@ -155,11 +153,7 @@ export function joinTargetsPositions(
   for (const e of Object.values(targets)) {
     const t = asTarget(e.value);
     if (!t) continue;
-    const r = get(
-      t.bookId,
-      t.instrument?.instrumentId ?? 0,
-      t.instrument?.symbol ?? "",
-    );
+    const r = get(t.bookId, t.instrument?.instrumentId ?? 0);
     r.target = t.targetQtyE2;
     r.band = t.bandQtyE2;
     r.targetAtMs = e.receivedAtMs;
@@ -168,11 +162,7 @@ export function joinTargetsPositions(
     const p = asPositions(e.value);
     if (!p) continue;
     for (const l of p.lines) {
-      const r = get(
-        p.bookId,
-        l.instrument?.instrumentId ?? 0,
-        l.instrument?.symbol ?? "",
-      );
+      const r = get(p.bookId, l.instrument?.instrumentId ?? 0);
       r.position = l.qtyE2;
       r.inflight = l.inflightQtyE2;
       r.positionAtMs = e.receivedAtMs;
@@ -180,7 +170,7 @@ export function joinTargetsPositions(
   }
   return [...rows.values()].sort(
     (a, b) =>
-      a.symbol.localeCompare(b.symbol) ||
+      a.label.localeCompare(b.label) ||
       a.instrumentId - b.instrumentId ||
       a.bookId - b.bookId,
   );
@@ -191,8 +181,8 @@ export function joinTargetsPositions(
 export interface ValuationRow {
   bookId: number;
   instrumentId: number;
-  /** "" when the book published no product lines. */
-  symbol: string;
+  /** instrumentLabel(instrumentId); "" when the book published no product lines. */
+  label: string;
   model: string;
   nPaths: number;
   seed: bigint;
@@ -236,7 +226,7 @@ export function valuationRows(entries: Record<string, Entry>): ValuationRow[] {
         ...base,
         ...zero,
         instrumentId: 0,
-        symbol: "",
+        label: "",
         flagged: [],
         hasLines: false,
       });
@@ -251,7 +241,7 @@ export function valuationRows(entries: Record<string, Entry>): ValuationRow[] {
           ...base,
           ...zero,
           instrumentId: id,
-          symbol: l.underlying?.symbol ?? "",
+          label: instrumentLabel(id),
           flagged: [],
           hasLines: true,
         };
@@ -274,7 +264,7 @@ export function valuationRows(entries: Record<string, Entry>): ValuationRow[] {
   return out.sort(
     (a, b) =>
       a.bookId - b.bookId ||
-      a.symbol.localeCompare(b.symbol) ||
+      a.label.localeCompare(b.label) ||
       a.instrumentId - b.instrumentId,
   );
 }

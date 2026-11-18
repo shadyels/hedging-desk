@@ -588,3 +588,53 @@ describe("F7: no firm-level rehedge band column", () => {
     expect(firm.textContent).not.toContain("No firm-level rehedge band");
   });
 });
+
+describe("instrument names come from reference data, not the wire", () => {
+  // D1 and EXO send the id only; the decoy symbol proves nothing on the wire is rendered.
+  const wire = (id: number) => ({
+    instrumentId: id,
+    symbol: "WIRE-DECOY",
+    instrumentClass: 0,
+    currency: "",
+  });
+  test("firm, books and target/band panels label ids; an unknown id is explicit, never a dash", () => {
+    const { container } = render(<RiskBoard />);
+    up();
+    send(
+      "riskFirm",
+      "d1.risk.firm",
+      RiskSnapshot.fromPartial({
+        meta: { msgId: "ref-firm" },
+        greeks: [{ underlying: wire(1001) }, { underlying: wire(777) }],
+      }),
+    );
+    send(
+      "valuations",
+      "exo.valuations.3",
+      ValuationSnapshot.fromPartial({
+        meta: { msgId: "ref-val" },
+        bookId: 3,
+        valuation: { modelId: "m", seed: 1n, nPaths: 1 },
+        lines: [{ underlying: wire(1002), deltaQtyE2: 1n }],
+      }),
+    );
+    send(
+      "targets",
+      "exo.targets.3.2001",
+      TargetPosition.fromPartial({
+        meta: { msgId: "ref-tgt" },
+        bookId: 3,
+        instrument: wire(2001),
+        targetQtyE2: 1n,
+        bandQtyE2: 1n,
+      }),
+    );
+    const firm = panel(container, "p-firm");
+    expect(firm.textContent).toContain("AAPL");
+    expect(firm.textContent).toContain("id 777 (not in reference data)");
+    expect(firm.querySelector('[title="instrument_id 1001"]')).not.toBeNull();
+    expect(panel(container, "p-books").textContent).toContain("MSFT");
+    expect(panel(container, "p-band").textContent).toContain("SPX");
+    expect(container.textContent).not.toContain("WIRE-DECOY");
+  });
+});

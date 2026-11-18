@@ -11,6 +11,7 @@ import {
 } from "react";
 import { freshness } from "../bus/freshness";
 import { SUBJECTS } from "../bus/subjects";
+import { Instrument } from "../components/Instrument";
 import { StateChip } from "../components/StateChip";
 import { WireText } from "../components/WireText";
 import { XScroll } from "../components/XScroll";
@@ -60,7 +61,7 @@ const px = (v: bigint) => (v > 0n ? formatPxE9(v, PX_DECIMALS) : MISSING);
 
 function Instr({ i }: { i: InstrumentRef | undefined }) {
   if (!i) return <>{MISSING}</>;
-  return <WireText value={i.symbol || String(i.instrumentId)} />;
+  return <Instrument id={i.instrumentId} />;
 }
 
 function Cells({
@@ -259,7 +260,8 @@ function EventStatus({ id, now }: { id: "exec" | "crosses"; now: number }) {
   );
 }
 
-const HEADERS: [string, string][] = [
+/** [header, class, tooltip]. Qty and Filled hold different things per row kind, so each header names both. */
+const HEADERS: [string, string, string?][] = [
   ["", "c-tog"],
   ["Time (UTC)", ""],
   ["Kind", ""],
@@ -267,10 +269,18 @@ const HEADERS: [string, string][] = [
   ["Book", ""],
   ["Instr.", ""],
   ["Side", ""],
-  ["Qty", "r"],
+  [
+    "Qty / Fill qty",
+    "r",
+    "ORDER and CROSS: quantity. ALLOC: Fill qty, this book's share of the fill (last_qty_e2).",
+  ],
   ["Px", "r"],
   ["Status / link", ""],
-  ["Filled", "r"],
+  [
+    "Filled / Book filled",
+    "r",
+    "ORDER: cumulative filled. ALLOC: Book filled, cumulative to this book (book_cum_qty_e2).",
+  ],
   ["Leaves", "r"],
   ["Detail", ""],
 ];
@@ -542,11 +552,12 @@ export function BlotterBoard({ now }: { now: number }) {
             >
               <div className="bl-head" role="rowgroup">
                 <div className="bl-row bl-cols" role="row" aria-rowindex={1}>
-                  {HEADERS.map(([h, cls], i) => (
+                  {HEADERS.map(([h, cls, tip], i) => (
                     <span
                       key={i}
                       role="columnheader"
                       className={cls}
+                      title={tip}
                       aria-label={h === "" ? "Expand" : undefined}
                     >
                       {h}
@@ -611,9 +622,9 @@ export function BlotterBoard({ now }: { now: number }) {
           className="bl-foot"
           title="Allocation rows show the book's own book_cum_qty_e2, never the parent's cumulative (ADR-014 Amendment 1 s3). A cross links to its residual order by netting_cycle_id and instrument id (Amendment 1 s4). Reports dedupe on (exec_id, book_id) (ADR-014 s5)."
         >
-          Newest first, by first arrival. ALLOC rows sit under their ORDER: qty
-          is the book&apos;s share, filled its own cumulative. Time is UTC,
-          browser arrival.
+          Newest first, by first arrival. ALLOC rows sit under their ORDER: Fill
+          qty is the book&apos;s share, Book filled its own cumulative. Time is
+          UTC, browser arrival.
         </p>
       </section>
     </section>

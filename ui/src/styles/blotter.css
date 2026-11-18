@@ -75,10 +75,11 @@
 }
 .bl-cols {
   display: grid;
-  /* Every column is sized to its longest value; Detail (the reject reason) takes all the leftover width. */
+  /* Every column is sized to its longest value (ClOrdID: 20 digits + " (net)"); Detail (the reject reason)
+     takes all the leftover width, so the table fills the panel. */
   grid-template-columns:
-    var(--space-6) 10ch 6ch 19ch 16ch 7ch 5ch 11ch 10ch 19ch 11ch 11ch
-    minmax(16ch, 1fr);
+    var(--space-6) 9ch 6ch 27ch 15ch 8ch 5ch 11ch 9ch 19ch 15ch 11ch
+    minmax(8ch, 1fr);
   align-items: center;
   column-gap: var(--space-2);
   padding: 0 var(--row-pad-x);
@@ -100,6 +101,10 @@
   background: var(--surface-2);
   border-bottom: var(--border-w) solid var(--border);
   color: var(--text-2);
+}
+/* The labels use the small sans face, but the grid itself keeps the table's mono size so every ch track is
+   the same width in the header as in the rows (a header track in 11px sans ch drifted left of its column). */
+.bl-head .bl-cols > * {
   font-family: var(--font-sans);
   font-size: var(--fs-xs);
 }

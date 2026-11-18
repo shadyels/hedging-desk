@@ -32,11 +32,23 @@ const up = () =>
     ),
   );
 const tick = (ms: number) => act(() => void vi.advanceTimersByTime(ms));
-const tracker = (id: string, book: number, symbol = "SPX", te = 3_820_000n) =>
+// D1 puts only the id on the benchmark InstrumentRef (2001 = SPX in universe.json); `symbol` is a decoy.
+const tracker = (
+  id: string,
+  book: number,
+  benchId = 2001,
+  symbol = "",
+  te = 3_820_000n,
+) =>
   TrackerAnalytics.fromPartial({
     meta: { msgId: `${id}-${seq++}` }, // the store dedupes on msg_id across tests
     bookId: book,
-    benchmark: { instrumentId: 9, symbol, instrumentClass: 2, currency: "USD" },
+    benchmark: {
+      instrumentId: benchId,
+      symbol,
+      instrumentClass: 2,
+      currency: "USD",
+    },
     kind: TrackerAnalytics_Kind.KIND_EX_POST,
     trackingErrorAnnE9: te,
     trackingDiffE9: -1_240_000n,
@@ -77,7 +89,7 @@ describe("tracker scorecard", () => {
     const { container } = render(<Host />);
     up();
     send(tracker("a", 2));
-    send(tracker("b", 1, "NDX"));
+    send(tracker("b", 1));
     const cards = container.querySelectorAll(".tcard");
     expect(cards).toHaveLength(2);
     expect(cards[0]?.textContent).toContain("book 1"); // book_id order
@@ -118,13 +130,44 @@ describe("tracker scorecard", () => {
     expect(card.textContent).toContain("last message 12:04:09Z");
   });
 
-  test("wire strings are literal text", () => {
+  test("the title names the benchmark from reference data: book 1 reads SPX", () => {
+    const { container } = render(<Host />);
+    up();
+    send(tracker("a", 1));
+    expect(container.querySelector(".tcard h3")?.textContent).toContain(
+      "book 1 vs SPX",
+    );
+    // the id stays auditable in a tooltip
+    expect(
+      container.querySelector('.tcard [title="instrument_id 2001"]'),
+    ).not.toBeNull();
+  });
+
+  test("a benchmark with no id falls back to the book's benchmark in reference data; an unknown id is labelled", () => {
+    const { container } = render(<Host />);
+    up();
+    send(tracker("a", 1, 0));
+    send(tracker("b", 2, 9));
+    send(tracker("c", 3, 0));
+    const cards = container.querySelectorAll(".tcard");
+    expect(cards[0]?.textContent).toContain("book 1 vs SPX");
+    expect(cards[1]?.textContent).toContain(
+      "book 2 vs id 9 (not in reference data)",
+    );
+    expect(cards[2]?.textContent).toContain(
+      "book 3 vs no benchmark in reference data",
+    );
+  });
+
+  test("a symbol on the wire is never rendered, as markup or as text", () => {
     const evil = '<img src=x onerror="alert(1)"><script>x()</script>';
     const { container } = render(<Host />);
     up();
-    send(tracker("a", 1, evil));
+    send(tracker("a", 1, 2001, evil));
     expect(container.querySelector("img, script")).toBeNull();
-    expect(container.querySelector(".tcard")?.textContent).toContain(evil);
+    const text = container.querySelector(".tcard")?.textContent ?? "";
+    expect(text).toContain("book 1 vs SPX");
+    expect(text).not.toContain(evil);
   });
 
   test("no limit state class or colour token on any tracker value", () => {

@@ -1,5 +1,6 @@
 import { freshness, type Freshness } from "../bus/freshness";
 import { SUBJECTS } from "../bus/subjects";
+import { Instrument } from "../components/Instrument";
 import { StateChip } from "../components/StateChip";
 import { WireText } from "../components/WireText";
 import { XScroll } from "../components/XScroll";
@@ -165,7 +166,7 @@ export function BooksTable({ now }: { now: number }) {
                             )}
                           </span>
                         ) : r.hasLines ? (
-                          <WireText value={r.symbol || MISSING} />
+                          <Instrument id={r.instrumentId} />
                         ) : (
                           <span className="na">no product lines</span>
                         )}

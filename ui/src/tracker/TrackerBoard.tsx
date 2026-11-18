@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { freshness } from "../bus/freshness";
 import { SUBJECTS } from "../bus/subjects";
-import { WireText } from "../components/WireText";
+import { Instrument } from "../components/Instrument";
 import {
   MISSING,
   formatAge,
@@ -10,6 +10,7 @@ import {
   formatUtcTime,
 } from "../format";
 import type { TrackerAnalytics } from "../gen/live";
+import { benchmarkFor } from "../refdata";
 import { PanelHead, WaitingBody } from "../risk/parts";
 import { useBus, type Entry } from "../store";
 import {
@@ -107,6 +108,9 @@ function TrackerCard({
   const fresh = freshness(SUBJECTS.tracker, entry, conn, now);
   const span = windowSpanMs(m);
   const hid = `p-tracker-${id}`;
+  // The wire names the benchmark by id only; a missing id falls back to the book's benchmark in reference data.
+  const benchId =
+    m.benchmark?.instrumentId || benchmarkFor(m.bookId)?.instrumentId;
   return (
     <section
       className="panel tcard"
@@ -119,7 +123,11 @@ function TrackerCard({
           <>
             book {m.bookId}
             {" vs "}
-            <WireText value={m.benchmark?.symbol || MISSING} />{" "}
+            {benchId === undefined ? (
+              "no benchmark in reference data"
+            ) : (
+              <Instrument id={benchId} />
+            )}{" "}
             <span className="tkind">{kindLabel(m.kind)}</span>
           </>
         }

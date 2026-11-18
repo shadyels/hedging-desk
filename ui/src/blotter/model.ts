@@ -14,6 +14,7 @@ import {
   type InternalCrossNotice,
 } from "../gen/live";
 import { MISSING } from "../format";
+import { instrumentLabel } from "../refdata";
 import type { Entry } from "../store";
 
 export const asExec = (v: WithMeta | undefined): ExecutionReport | null =>
@@ -305,7 +306,7 @@ export interface BlotterFilter {
   kind: "" | KindLabel;
   /** Book id as text ("0" = the firm netting parent). */
   book: string;
-  /** Symbol, or the instrument id when the symbol is empty. */
+  /** The reference-data symbol (src/refdata.ts). */
   instrument: string;
   /** A statusLabel(), e.g. "FILLED". */
   status: string;
@@ -322,8 +323,9 @@ export const NO_FILTER: BlotterFilter = {
 export const isFiltered = (f: BlotterFilter): boolean =>
   Object.values(f).some((v) => v !== "");
 
-export const instrumentLabel = (i: InstrumentRef | undefined): string =>
-  i ? i.symbol || String(i.instrumentId) : "";
+/** The row's instrument as its reference-data symbol ("" when the report names none). */
+export const rowInstrument = (i: InstrumentRef | undefined): string =>
+  i ? instrumentLabel(i.instrumentId) : "";
 
 /** Every book a row touches: a cross connects two. */
 export const rowBooks = (r: FlatRow): number[] =>
@@ -334,7 +336,7 @@ export const matchKind = (r: FlatRow, kind: string): boolean =>
 export const matchBook = (r: FlatRow, book: string): boolean =>
   book === "" || rowBooks(r).some((b) => String(b) === book);
 export const matchInstrument = (r: FlatRow, instrument: string): boolean =>
-  instrument === "" || instrumentLabel(r.instrument) === instrument;
+  instrument === "" || rowInstrument(r.instrument) === instrument;
 /** `status` is the row's own, or the parent's for an allocation; undefined for a cross. */
 export const matchStatus = (
   status: OrdStatus | undefined,
@@ -405,7 +407,7 @@ export function filterOptions(
   const statuses = new Set<string>();
   for (const it of items) {
     for (const b of rowBooks(it)) books.add(b);
-    instruments.add(instrumentLabel(it.instrument));
+    instruments.add(rowInstrument(it.instrument));
     if (it.kind === "order") {
       statuses.add(statusLabel(it.status));
       for (const a of it.allocs) books.add(a.bookId);

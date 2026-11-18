@@ -1,13 +1,14 @@
 import { useMemo } from "react";
 import { freshness, type Freshness } from "../bus/freshness";
 import { SUBJECTS } from "../bus/subjects";
-import { WireText } from "../components/WireText";
+import { Instrument } from "../components/Instrument";
 import { XScroll } from "../components/XScroll";
-import { MISSING, formatE9, formatQtyE2 } from "../format";
+import { formatE9, formatQtyE2 } from "../format";
 import type {
   RiskSnapshot_LimitLevel,
   RiskSnapshot_NetGreeks,
 } from "../gen/live";
+import { instrumentLabel } from "../refdata";
 import { useBus } from "../store";
 import { headroom, limitChipState, asRisk } from "./model";
 import { HeadroomBar, LimitChip, PanelHead, WaitingBody } from "./parts";
@@ -60,7 +61,7 @@ function Row({ g, fresh }: { g: RiskSnapshot_NetGreeks; fresh: Freshness }) {
   return (
     <tr>
       <th scope="row">
-        <WireText value={g.underlying?.symbol || MISSING} />
+        <Instrument id={g.underlying?.instrumentId ?? 0} />
         {g.greeksFlagged ? (
           <span
             className="flag"
@@ -124,8 +125,8 @@ export function FirmTable({ now }: { now: number }) {
       snap
         ? [...snap.greeks].sort(
             (a, b) =>
-              (a.underlying?.symbol ?? "").localeCompare(
-                b.underlying?.symbol ?? "",
+              instrumentLabel(a.underlying?.instrumentId ?? 0).localeCompare(
+                instrumentLabel(b.underlying?.instrumentId ?? 0),
               ) ||
               (a.underlying?.instrumentId ?? 0) -
                 (b.underlying?.instrumentId ?? 0),

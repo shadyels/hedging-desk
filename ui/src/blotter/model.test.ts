@@ -29,12 +29,12 @@ import {
 } from "./model";
 
 const AAPL = {
-  instrumentId: 1,
-  symbol: "AAPL",
+  instrumentId: 1001, // the wire carries the id only; the symbol comes from refdata
+  symbol: "",
   instrumentClass: 1,
   currency: "USD",
 };
-const MSFT = { ...AAPL, instrumentId: 2, symbol: "MSFT" };
+const MSFT = { ...AAPL, instrumentId: 1002 };
 
 let t = 1000;
 const exec = (p: Partial<ExecutionReport>): Entry => ({
@@ -297,9 +297,9 @@ describe("allocation children", () => {
 describe("cross lineage by netting_cycle_id", () => {
   const parent = (instrument = AAPL) =>
     exec({
-      execId: `E-${instrument.symbol}`,
+      execId: `E-${instrument.instrumentId}`,
       instrument,
-      clOrdId: `cl-${instrument.symbol}`,
+      clOrdId: `cl-${instrument.instrumentId}`,
       status: S.ORD_STATUS_NEW,
       leavesQtyE2: 100n,
       nettingCycleId: "run/9",
@@ -313,8 +313,8 @@ describe("cross lineage by netting_cycle_id", () => {
     const [x] = crosses(m);
     expect(x?.link).toEqual({
       kind: "order",
-      orderKey: "o:1|cl-AAPL",
-      clOrdId: "cl-AAPL",
+      orderKey: "o:1001|cl-1001",
+      clOrdId: "cl-1001",
     });
   });
 
@@ -448,15 +448,17 @@ describe("N4: filters are pure functions", () => {
     expect(matchBook(row("x-1"), "")).toBe(true);
   });
 
-  test("instrument: by symbol, falling back to the id when there is none", () => {
+  test("instrument: by reference-data symbol; an id outside it gets the explicit label", () => {
     expect(matchInstrument(row("cl-A"), "AAPL")).toBe(true);
     expect(matchInstrument(row("cl-B"), "AAPL")).toBe(false);
     expect(matchInstrument(row("x-2"), "MSFT")).toBe(true);
     const nameless = buildBlotter(
-      [exec({ instrument: { ...AAPL, symbol: "", instrumentId: 77 } })],
+      [exec({ instrument: { ...AAPL, instrumentId: 77 } })],
       [],
     ).items[0];
-    expect(nameless && matchInstrument(nameless, "77")).toBe(true);
+    expect(
+      nameless && matchInstrument(nameless, "id 77 (not in reference data)"),
+    ).toBe(true);
   });
 
   test("status: an order's own, an allocation inherits its parent's, a cross has none", () => {

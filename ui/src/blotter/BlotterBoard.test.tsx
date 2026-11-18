@@ -15,6 +15,7 @@ import {
 } from "../gen/live";
 import { busSink, flushBus, initialState, resetBus } from "../store";
 import { useNow } from "../useNow";
+import blotterCss from "../styles/blotter.css?raw";
 import { BlotterBoard, DEFAULT_ROW_H as ROW_H } from "./BlotterBoard";
 
 let seq = 0;
@@ -46,8 +47,8 @@ function Host() {
   return <BlotterBoard now={useNow()} />;
 }
 const AAPL = {
-  instrumentId: 1,
-  symbol: "AAPL",
+  instrumentId: 1001, // the wire carries the id only; the symbol comes from refdata
+  symbol: "",
   instrumentClass: 1,
   currency: "USD",
 };
@@ -384,7 +385,7 @@ describe("arrow-key row selection", () => {
 });
 
 describe("N4: filter row", () => {
-  const MSFT = { ...AAPL, instrumentId: 2, symbol: "MSFT" };
+  const MSFT = { ...AAPL, instrumentId: 1002 };
   const pick = (c: HTMLElement, label: string, value: string) =>
     fireEvent.change(getByLabelText(c, label), { target: { value } });
   const ids = (c: HTMLElement) =>
@@ -657,5 +658,104 @@ describe("wire text is text", () => {
     expect(container.textContent).toContain(evil);
     expect(container.textContent).toContain("<img onerror=alert(2)>");
     expect(container.textContent).toContain("REJECTED");
+  });
+});
+
+describe("instrument names, ClOrdID width, allocation headers", () => {
+  const LONG = "18446744073709551615"; // a 20-digit ClOrdID
+  const cellsOf = (row: Element) =>
+    Array.from(row.querySelectorAll<HTMLElement>('[role="cell"]'));
+  const send3 = () => {
+    sendExec(
+      {
+        clOrdId: LONG,
+        execId: "w1",
+        nettingCycleId: "run/w",
+        status: S.ORD_STATUS_PARTIALLY_FILLED,
+      },
+      {
+        clOrdId: LONG,
+        execId: "w1",
+        bookId: 3,
+        allocation: true,
+        nettingCycleId: "run/w",
+        lastQtyE2: 110_000n,
+        bookCumQtyE2: 220_000n,
+      },
+    );
+    sendCross({ crossId: "x-w", nettingCycleId: "run/w" });
+  };
+
+  test("orders, allocations and crosses label the instrument from reference data; the id stays in the tooltip", () => {
+    const { container } = render(<Host />);
+    up();
+    sendExec({
+      clOrdId: "unk",
+      execId: "w2",
+      instrument: { ...AAPL, instrumentId: 555 },
+    });
+    send3();
+    for (const kind of ["order", "alloc", "cross"]) {
+      const row = container.querySelector(`[data-kind="${kind}"]`);
+      const instr = cellsOf(row as Element)[5];
+      expect(instr?.textContent).toBe("AAPL");
+      expect(
+        instr?.querySelector('[title="instrument_id 1001"]'),
+      ).not.toBeNull();
+    }
+    expect(container.textContent).toContain("id 555 (not in reference data)");
+  });
+
+  test("the ClOrdID column keeps the whole 20-digit id (and the tooltip carries it), on parents and allocations", () => {
+    const { container } = render(<Host />);
+    up();
+    send3();
+    for (const kind of ["order", "alloc"]) {
+      const id = container
+        .querySelector(`[data-kind="${kind}"] .c-id`)
+        ?.querySelector(".wire-text");
+      expect(id?.textContent).toBe(LONG);
+      expect(id?.getAttribute("title")).toBe(LONG);
+    }
+    // jsdom has no layout: assert on the declared track. 20 digits + " (net)" must fit; the 4th track is ClOrdID.
+    const cols = /grid-template-columns:([^;]+);/.exec(blotterCss)?.[1] ?? "";
+    const tracks = cols
+      .replace(/\/\*[^]*?\*\//g, "")
+      .trim()
+      .split(/\s+(?![^(]*\))/);
+    expect(tracks).toHaveLength(13);
+    expect(parseFloat(tracks[3] ?? "")).toBeGreaterThanOrEqual(
+      (LONG + " (net)").length,
+    );
+    expect(tracks[3]).toMatch(/ch$/);
+  });
+
+  test("Detail takes the leftover width: it is the only flexible track", () => {
+    const cols = /grid-template-columns:([^;]+);/.exec(blotterCss)?.[1] ?? "";
+    expect(cols.match(/fr\b/g)).toHaveLength(1);
+    expect(cols.trim()).toMatch(/minmax\(\d+ch, 1fr\)$/);
+  });
+
+  test("Qty and Filled headers name what an allocation row holds; allocation cells match", () => {
+    const { container } = render(<Host />);
+    up();
+    send3();
+    const heads = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="columnheader"]'),
+    );
+    const qty = heads.find((h) => h.textContent?.includes("Fill qty"));
+    const filled = heads.find((h) => h.textContent?.includes("Book filled"));
+    expect(qty?.textContent).toBe("Qty / Fill qty");
+    expect(filled?.textContent).toBe("Filled / Book filled");
+    // the parent's meaning is still on the header
+    expect(qty?.getAttribute("title")).toContain("ORDER");
+    expect(filled?.getAttribute("title")).toContain("cumulative filled");
+    const a = cellsOf(
+      container.querySelector('[data-kind="alloc"]') as Element,
+    );
+    expect(a[7]?.textContent).toBe("1,100.00"); // Fill qty = last_qty_e2
+    expect(a[7]?.getAttribute("title")).toContain("last_qty_e2");
+    expect(a[10]?.textContent).toBe("2,200.00"); // Book filled = book_cum_qty_e2
+    expect(a[10]?.getAttribute("title")).toContain("book_cum_qty_e2");
   });
 });

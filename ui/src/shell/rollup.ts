@@ -9,6 +9,7 @@ import { formatAge } from "../format";
 import { asHealth } from "../health/model";
 import { asRisk, limitChipState } from "../risk/model";
 import { useBookViews } from "../risk/useBookViews";
+import { instrumentLabel } from "../refdata";
 import { useBus } from "../store";
 
 /** Worst first. */
@@ -88,7 +89,7 @@ export function useRollup(now: number): Rollup {
       });
   }
   for (const g of asRisk(subjects.riskFirm.last?.value)?.greeks ?? []) {
-    const sym = g.underlying?.symbol ?? "";
+    const sym = instrumentLabel(g.underlying?.instrumentId ?? 0);
     for (const [greek, level] of [
       ["vega", g.vegaLevel],
       ["gamma", g.gammaLevel],

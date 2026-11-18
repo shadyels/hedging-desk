@@ -1,8 +1,8 @@
 import { useMemo } from "react";
 import { freshness } from "../bus/freshness";
 import { SUBJECTS } from "../bus/subjects";
+import { Instrument } from "../components/Instrument";
 import { StateChip } from "../components/StateChip";
-import { WireText } from "../components/WireText";
 import { XScroll } from "../components/XScroll";
 import { MISSING, formatAge, formatQtyE2 } from "../format";
 import { useBus } from "../store";
@@ -79,7 +79,7 @@ export function TargetBand({ now }: { now: number }) {
                 return (
                   <tr key={`${r.bookId}:${r.instrumentId}`}>
                     <th scope="row">
-                      <WireText value={r.symbol || String(r.instrumentId)} />
+                      <Instrument id={r.instrumentId} />
                     </th>
                     <td className="num">book {r.bookId}</td>
                     <td className="num r">
