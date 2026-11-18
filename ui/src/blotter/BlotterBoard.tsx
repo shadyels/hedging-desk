@@ -1,10 +1,12 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   useCallback,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent,
   type UIEvent,
 } from "react";
 import { freshness } from "../bus/freshness";
@@ -317,12 +319,48 @@ export function BlotterBoard({ now }: { now: number }) {
     initialRect: { width: 0, height: rowH * INITIAL_ROWS },
   });
 
-  const onScroll = (e: UIEvent<HTMLDivElement>) => {
-    const top = e.currentTarget.scrollTop;
+  /** The scroll position is the user's: remember the top row (so arrivals are pinned) and hold the tail while away from 0. */
+  const hold = (el: HTMLElement) => {
+    const top = el.scrollTop;
     const idx = Math.floor(top / rowH);
     const row = flat[idx];
     anchor.current = row ? { key: row.key, delta: top - idx * rowH } : null;
     setPausedAt((p) => (top > 0 ? (p ?? flat[0]?.key ?? null) : null));
+  };
+  const onScroll = (e: UIEvent<HTMLDivElement>) => hold(e.currentTarget);
+
+  // Selection is a row key, never an index: arrivals shift indexes, not keys. A key that leaves the list clears.
+  const [selected, setSelected] = useState<string | null>(null);
+  const selIdx = selected === null ? undefined : indexOf.get(selected);
+  if (selected !== null && selIdx === undefined) setSelected(null);
+  const uid = useId();
+  const rowId = (i: number) => `${uid}-r${i}`;
+
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    const el = e.currentTarget;
+    if (e.target !== el || e.altKey || e.ctrlKey || e.metaKey) return; // keys inside a row's own button stay native
+    const last = flat.length - 1;
+    let next: number;
+    if (e.key === "ArrowDown") next = Math.min((selIdx ?? -1) + 1, last);
+    else if (e.key === "ArrowUp") next = Math.max((selIdx ?? 1) - 1, 0);
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = last;
+    else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      const row = selIdx === undefined ? undefined : flat[selIdx];
+      if (row?.kind === "order" && row.allocs.length > 0) toggle(row.key);
+      return;
+    } else return;
+    e.preventDefault();
+    const row = flat[next];
+    if (!row) return;
+    setSelected(row.key);
+    // Bring the row into the viewport (it may be outside the virtualized window), then count it as scrolling.
+    const top = next * rowH;
+    if (top < el.scrollTop) el.scrollTop = top;
+    else if (top + rowH > el.scrollTop + el.clientHeight)
+      el.scrollTop = top + rowH - el.clientHeight;
+    hold(el);
   };
 
   // Pause-scroll: rows arrive at the top, so while scrolled away the anchored row is pinned to the same
@@ -523,6 +561,10 @@ export function BlotterBoard({ now }: { now: number }) {
                 tabIndex={0}
                 aria-label="Blotter rows, newest first"
                 onScroll={onScroll}
+                onKeyDown={onKeyDown}
+                aria-activedescendant={
+                  selIdx === undefined ? undefined : rowId(selIdx)
+                }
               >
                 <div
                   className="bl-body"
@@ -534,9 +576,15 @@ export function BlotterBoard({ now }: { now: number }) {
                     return (
                       <div
                         key={v.key}
+                        id={rowId(v.index)}
                         role="row"
                         aria-rowindex={v.index + 2}
-                        className="bl-row bl-cols"
+                        aria-selected={row.key === selected}
+                        className={
+                          row.key === selected
+                            ? "bl-row bl-cols is-selected"
+                            : "bl-row bl-cols"
+                        }
                         data-kind={row.kind}
                         data-key={row.key}
                         style={{ transform: `translateY(${v.start}px)` }}

@@ -194,6 +194,195 @@ describe("pause-scroll", () => {
   });
 });
 
+describe("arrow-key row selection", () => {
+  const key = (c: HTMLElement, k: string) =>
+    fireEvent.keyDown(scroller(c), { key: k });
+  const selected = (c: HTMLElement) =>
+    rowEls(c).filter((r) => r.getAttribute("aria-selected") === "true");
+  /** The id of the selected row's ClOrdID cell text, or null. */
+  const selText = (c: HTMLElement) => selected(c)[0]?.textContent ?? null;
+  /** Oldest to newest: leaf cl-k-a, then parent cl-k-p with two allocations, then leaf cl-k-z. Shown newest first. */
+  const fixture = () => {
+    sendExec({ clOrdId: "cl-k-a", execId: "K1" });
+    sendExec(
+      { clOrdId: "cl-k-p", execId: "K2", nettingCycleId: "run/k" },
+      {
+        clOrdId: "cl-k-p",
+        execId: "K2",
+        bookId: 3,
+        allocation: true,
+        nettingCycleId: "run/k",
+        lastQtyE2: 1n,
+        bookCumQtyE2: 1n,
+      },
+      {
+        clOrdId: "cl-k-p",
+        execId: "K2",
+        bookId: 4,
+        allocation: true,
+        nettingCycleId: "run/k",
+        lastQtyE2: 1n,
+        bookCumQtyE2: 1n,
+      },
+    );
+    sendExec({ clOrdId: "cl-k-z", execId: "K3" });
+  };
+  const kinds = (c: HTMLElement) => rowEls(c).map((r) => r.dataset["kind"]);
+
+  test("nothing is selected until a key is pressed; Down and Up walk every visible row, child rows included", () => {
+    const { container } = render(<Host />);
+    up();
+    fixture();
+    expect(kinds(container)).toEqual([
+      "order",
+      "order",
+      "alloc",
+      "alloc",
+      "order",
+    ]);
+    expect(selected(container)).toHaveLength(0);
+    expect(scroller(container).hasAttribute("aria-activedescendant")).toBe(
+      false,
+    );
+    const seen: (string | undefined)[] = [];
+    for (let i = 0; i < 5; i++) {
+      key(container, "ArrowDown");
+      expect(selected(container)).toHaveLength(1);
+      seen.push(selected(container)[0]?.dataset["kind"]);
+    }
+    expect(seen).toEqual(["order", "order", "alloc", "alloc", "order"]);
+    key(container, "ArrowDown"); // clamps at the last row
+    expect(selText(container)).toContain("cl-k-a");
+    key(container, "ArrowUp");
+    expect(selected(container)[0]?.dataset["kind"]).toBe("alloc");
+    key(container, "ArrowUp");
+    key(container, "ArrowUp");
+    expect(selText(container)).toContain("cl-k-p");
+    key(container, "ArrowUp");
+    key(container, "ArrowUp"); // clamps at the first row
+    expect(selText(container)).toContain("cl-k-z");
+  });
+
+  test("Home and End go to the first and last row", () => {
+    const { container } = render(<Host />);
+    up();
+    fixture();
+    key(container, "End");
+    expect(selText(container)).toContain("cl-k-a");
+    key(container, "Home");
+    expect(selText(container)).toContain("cl-k-z");
+  });
+
+  test("the selected row is marked: aria-selected, the class, and the scroller's aria-activedescendant", () => {
+    const { container } = render(<Host />);
+    up();
+    fixture();
+    key(container, "ArrowDown");
+    const [row] = selected(container);
+    expect(row?.classList.contains("is-selected")).toBe(true);
+    expect(row?.id).not.toBe("");
+    expect(scroller(container).getAttribute("aria-activedescendant")).toBe(
+      row?.id,
+    );
+    expect(
+      rowEls(container).filter(
+        (r) => r.getAttribute("aria-selected") === "false",
+      ),
+    ).toHaveLength(4);
+    expect(scroller(container).tabIndex).toBe(0);
+  });
+
+  test("Enter and Space toggle a parent; on a leaf they do nothing", () => {
+    const { container } = render(<Host />);
+    up();
+    fixture();
+    key(container, "Enter"); // nothing selected yet
+    expect(kinds(container)).toHaveLength(5);
+    key(container, "ArrowDown"); // leaf cl-k-z
+    key(container, "Enter");
+    key(container, " ");
+    expect(kinds(container)).toHaveLength(5);
+    key(container, "ArrowDown"); // parent cl-k-p
+    key(container, "Enter");
+    expect(kinds(container)).toEqual(["order", "order", "order"]);
+    expect(selText(container)).toContain("cl-k-p"); // still selected, now collapsed
+    key(container, " ");
+    expect(kinds(container)).toHaveLength(5);
+  });
+
+  test("the selection is a key: a new row arriving does not move it", () => {
+    const { container } = render(<Host />);
+    up();
+    fixture();
+    key(container, "ArrowDown");
+    key(container, "ArrowDown");
+    expect(selText(container)).toContain("cl-k-p");
+    sendExec({ clOrdId: "cl-k-new", execId: "K4" });
+    expect(rowEls(container)[0]?.textContent).toContain("cl-k-new");
+    expect(selected(container)).toHaveLength(1);
+    expect(selText(container)).toContain("cl-k-p");
+    key(container, "ArrowDown");
+    expect(selected(container)[0]?.dataset["kind"]).toBe("alloc");
+  });
+
+  test("a selected row removed by a filter clears the selection, it does not jump", () => {
+    const { container } = render(<Host />);
+    up();
+    fixture();
+    sendCross({ crossId: "x-k", nettingCycleId: "" });
+    key(container, "ArrowDown"); // the cross, newest
+    key(container, "ArrowDown"); // cl-k-z
+    expect(selText(container)).toContain("cl-k-z");
+    fireEvent.change(getByLabelText(container, "Kind"), {
+      target: { value: "CROSS" },
+    });
+    expect(rowEls(container)).toHaveLength(1);
+    expect(selected(container)).toHaveLength(0);
+    expect(scroller(container).hasAttribute("aria-activedescendant")).toBe(
+      false,
+    );
+    fireEvent.change(getByLabelText(container, "Kind"), {
+      target: { value: "" },
+    });
+    expect(selected(container)).toHaveLength(0); // does not come back on its own
+  });
+
+  test("moving past the viewport scrolls the row into view and pauses the live tail", () => {
+    const { container, getByRole, queryByRole } = render(<Host />);
+    up();
+    sendExec(
+      ...Array.from({ length: 80 }, (_, i) => ({
+        clOrdId: `cl-kb-${i}`,
+        execId: `kb${i}`,
+      })),
+    );
+    const el = scroller(container);
+    for (let i = 0; i < 20; i++) key(container, "ArrowDown"); // row 19: last one in the 20-row viewport
+    expect(el.scrollTop).toBe(0);
+    expect(queryByRole("button", { name: /resume/ })).toBeNull();
+    key(container, "ArrowDown"); // row 20: just outside
+    expect(el.scrollTop).toBe(ROW_H);
+    key(container, "End");
+    expect(el.scrollTop).toBe(ROW_H * 60);
+    fireEvent.scroll(el); // a browser fires this after the programmatic scroll; jsdom does not
+    expect(selText(container)).toContain("cl-kb-0"); // the oldest, last row, is rendered and selected
+    const before = firstVisible(container);
+    sendExec(
+      ...Array.from({ length: 3 }, (_, i) => ({
+        clOrdId: `cl-kn-${i}`,
+        execId: `kn${i}`,
+      })),
+    );
+    expect(firstVisible(container)).toBe(before);
+    expect(selText(container)).toContain("cl-kb-0");
+    fireEvent.click(getByRole("button", { name: "3 new, resume" }));
+    expect(el.scrollTop).toBe(0);
+    key(container, "Home");
+    expect(el.scrollTop).toBe(0);
+    expect(queryByRole("button", { name: /resume/ })).toBeNull();
+  });
+});
+
 describe("N4: filter row", () => {
   const MSFT = { ...AAPL, instrumentId: 2, symbol: "MSFT" };
   const pick = (c: HTMLElement, label: string, value: string) =>

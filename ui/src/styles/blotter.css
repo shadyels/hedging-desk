@@ -127,6 +127,10 @@
 .bl-body .bl-row:hover {
   background: var(--row-hover);
 }
+.bl-body .bl-row.is-selected {
+  background: var(--row-selected);
+  box-shadow: inset var(--select-edge) 0 0 var(--text); /* a non-colour cue (DESIGN.md "Spacing") */
+}
 .bl-row[data-kind="alloc"] {
   color: var(--text-2);
 }
