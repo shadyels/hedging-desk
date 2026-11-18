@@ -5,18 +5,61 @@
 }
 .blotter .panel {
   position: relative;
-  overflow-x: hidden;
+}
+/* Filters left, counts right; wraps below 1280 px rather than clipping. */
+.bl-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-1) var(--space-4);
+  margin-bottom: var(--space-2);
+}
+.bl-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  font-size: var(--fs-sm);
+}
+.bl-filters label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--text-2);
+}
+.bl-filters select,
+.bl-filters input,
+.bl-clear {
+  height: var(--space-6);
+  box-sizing: border-box;
+  padding: 0 var(--space-1);
+  border: var(--border-w) solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+}
+.bl-filters input {
+  width: 18ch;
+}
+.bl-clear {
+  padding: 0 var(--space-2);
+  cursor: pointer;
+}
+.bl-clear:hover {
+  background: var(--surface-3);
+}
+.bl-count {
+  color: var(--text-2);
 }
 .bl-meta {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-1) var(--space-4);
-  margin: 0 0 var(--space-2);
+  margin: 0;
   color: var(--text-3);
   font-size: var(--fs-xs);
-}
-.bl-meta code {
-  font-family: var(--font-mono);
 }
 .bl-foot {
   margin: var(--space-2) 0 0;
@@ -32,9 +75,9 @@
 }
 .bl-cols {
   display: grid;
+  /* Every column is sized to its longest value; Detail (the reject reason) takes all the leftover width. */
   grid-template-columns:
-    var(--space-6) 10ch 7ch minmax(18ch, 1.4fr)
-    16ch 9ch 6ch 14ch 12ch 20ch 14ch 14ch
+    var(--space-6) 10ch 6ch 19ch 16ch 7ch 5ch 11ch 10ch 19ch 11ch 11ch
     minmax(16ch, 1fr);
   align-items: center;
   column-gap: var(--space-2);
@@ -66,11 +109,9 @@
   overflow-x: hidden;
   scrollbar-gutter: stable;
 }
-.bl-scroll:focus-visible,
-.bl-tog:focus-visible,
-.bl-resume:focus-visible {
-  outline: var(--focus-ring);
-  outline-offset: var(--focus-offset);
+/* Wider than the panel only when the columns' minimums do not fit: the region then scrolls and takes focus. */
+.xscroll > .bl-table {
+  min-width: min-content;
 }
 .bl-body {
   position: relative;

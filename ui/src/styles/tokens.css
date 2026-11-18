@@ -49,8 +49,8 @@
   --row-h-compact: 22px;
   --row-pad-x: var(--space-2);
 
-  /* Layout. Desktop only; nothing below --page-min-w is designed. */
-  --page-min-w: 1280px;
+  /* Layout. Desktop only (1280 px and up are designed), but the page itself has no min-width: a classic
+     scrollbar would make a 1280 px floor overflow the viewport. Tables fit or scroll in their own panel. */
   --bar-h: 32px;
   --gutter: 8px;
   --panel-pad: 8px;
@@ -184,12 +184,36 @@
 /* ---- Base ------------------------------------------------------------------ */
 body {
   margin: 0;
-  min-width: var(--page-min-w);
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-sans);
   font-size: var(--fs-md);
   line-height: var(--lh-body);
+}
+
+/* Themed selection and scrollbars: neutral ink from the tokens, so both themes follow the toggle. */
+:root {
+  scrollbar-color: var(--border-strong) var(--surface-2);
+}
+::selection {
+  background: var(--text-2);
+  color: var(--bg);
+}
+
+/* One focus ring for every interactive element and every focusable scroller (DESIGN.md "Spacing"). Scrollers
+   clip an outside ring, so theirs sits inside the edge. */
+a[href]:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-offset);
+}
+.xscroll:focus-visible,
+.bl-scroll:focus-visible {
+  outline-offset: calc(var(--space-half) * -1);
 }
 
 /* Any element showing a number. Right-aligned in tables (DESIGN.md "Numbers"). */

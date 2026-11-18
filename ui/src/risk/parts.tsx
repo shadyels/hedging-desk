@@ -29,6 +29,7 @@ export function NoneSince() {
 export function PanelHead({
   id,
   title,
+  hint,
   fresh,
   note,
   ageLabel = "last msg",
@@ -36,6 +37,8 @@ export function PanelHead({
 }: {
   id: string;
   title: ReactNode;
+  /** Tooltip on the title: the NATS subject pattern and any ADR citation (kept off the visible panel). */
+  hint?: string;
   fresh: Freshness;
   note?: ReactNode;
   ageLabel?: string;
@@ -44,7 +47,9 @@ export function PanelHead({
   const age = fresh.ageMs === null ? null : formatAge(fresh.ageMs);
   return (
     <div className="panel-head">
-      <h2 id={id}>{title}</h2>
+      <h3 id={id} title={hint}>
+        {title}
+      </h3>
       {note ? <span className="panel-note">{note}</span> : null}
       <span className="panel-status">
         {fresh.state === "ok" ? (

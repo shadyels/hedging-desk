@@ -120,7 +120,7 @@ describe("risk board states", () => {
     expect(alerts.textContent).not.toMatch(/waiting/i);
     // exo.alerts.recon is an event subject too: its line sits in the Books panel.
     expect(panel(container, "p-books").textContent).toContain(
-      "exo.alerts.recon: none since connect 12:04:09Z",
+      "Recon alerts: none since connect 12:04:09Z",
     );
     const before = container.textContent;
     tick(65_000);
@@ -427,7 +427,7 @@ describe("F1: HALTED reaches the books table", () => {
       "EXO view 5.00, D1 view 3.00",
     );
     expect(panel(container, "p-books").textContent).toContain(
-      "exo.alerts.recon: 1 since connect, last 12:04:09Z",
+      "Recon alerts: 1 since connect, last 12:04:09Z",
     );
     sendRecon(false);
     expect(chipOf(r())?.getAttribute("data-state")).toBe("ok");
@@ -486,18 +486,52 @@ describe("F2: books on the wire with no valuation are WAITING", () => {
     tick(10_000);
     expect(
       bookRows(container).map((r) => r.querySelector("th")?.textContent),
-    ).toEqual(["book 41", "book 57", "book 63"]);
-    for (const book of [57, 63]) {
-      const r = rowOf(container, book);
-      expect(chipOf(r)?.getAttribute("data-state")).toBe("waiting");
-      expect(chipOf(r)?.textContent).toBe("WAITING 10s");
-      expect(r.textContent).toContain("no valuation yet");
-      const cells = Array.from(r.querySelectorAll("td.num"));
-      expect(cells.length).toBeGreaterThan(0);
-      for (const c of cells) expect(c.textContent).toBe("–");
-    }
-    expect(rowOf(container, 57).textContent).toContain("awaiting_marks");
+    ).toEqual(["book 41", "book 57"]);
+    const r = rowOf(container, 57);
+    expect(chipOf(r)?.getAttribute("data-state")).toBe("waiting");
+    expect(chipOf(r)?.textContent).toBe("WAITING 10s");
+    expect(r.textContent).toContain("no valuation yet");
+    const cells = Array.from(r.querySelectorAll("td.num"));
+    expect(cells.length).toBeGreaterThan(0);
+    for (const c of cells) expect(c.textContent).toBe("–");
+    expect(r.textContent).toContain("awaiting_marks");
     expect(chipOf(rowOf(container, 41))?.getAttribute("data-state")).toBe("ok");
+  });
+
+  test("N10: books only Delta One names, valuation none, are one neutral line and never WAITING rows", () => {
+    const { container } = render(<RiskBoard />);
+    up();
+    sendVal(41);
+    sendHealth("d1Health", {
+      "limits.book.41.valuation": "ok",
+      "limits.book.63.valuation": "none",
+      "limits.book.64.valuation": "none",
+      // a book Delta One HAS valued, but with no EXO row yet on the UI, is not "normal": it stays a row
+      "limits.book.70.valuation": "ok",
+    });
+    tick(10_000);
+    expect(
+      bookRows(container).map((r) => r.querySelector("th")?.textContent),
+    ).toEqual(["book 41", "book 70"]);
+    expect(chipOf(rowOf(container, 70))?.getAttribute("data-state")).toBe(
+      "waiting",
+    );
+    const books = panel(container, "p-books");
+    expect(books.textContent).toContain(
+      "no EXO valuation for books 63, 64 (normal)",
+    );
+    expect(books.textContent).not.toMatch(/book 63|book 64/);
+  });
+
+  test("N10: with only Delta One books, the panel still waits for EXO and shows the line", () => {
+    const { container } = render(<RiskBoard />);
+    up();
+    sendHealth("d1Health", { "limits.book.63.valuation": "none" });
+    const books = panel(container, "p-books");
+    expect(books.querySelector("table")).toBeNull();
+    expect(books.textContent).toContain(
+      "no EXO valuation for books 63 (normal)",
+    );
   });
 });
 

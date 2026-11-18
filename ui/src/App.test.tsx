@@ -13,11 +13,20 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(T0);
   resetBus();
+  window.location.hash = "";
 });
 afterEach(() => {
   cleanup(); // vitest has no globals, so RTL does not auto-clean
   vi.useRealTimers();
+  window.location.hash = "";
+  document.documentElement.removeAttribute("data-theme");
 });
+
+/** The bus subject table lives on the Health screen; the hash picks the screen before the first render. */
+const renderHealth = () => {
+  window.location.hash = "#health";
+  return render(<App />);
+};
 
 const up = () =>
   busSink.onStatus(
@@ -50,11 +59,12 @@ const row = (pattern: string) => {
 };
 
 describe("shell", () => {
-  test("lists every registry subject", () => {
-    render(<App />);
+  test("the Health screen lists every registry subject", () => {
+    renderHealth();
+    const table = within(screen.getByRole("table", { name: "Bus subjects" }));
     for (const spec of Object.values(SUBJECTS)) {
       expect(
-        screen.getAllByText(spec.pattern, { selector: "code" }).length,
+        table.getAllByText(spec.pattern, { selector: "code" }).length,
       ).toBeGreaterThan(0);
     }
   });
@@ -98,7 +108,7 @@ describe("shell", () => {
   });
 
   test("connected: banner gone, every cadence subject WAITING (never received), event subjects 'none since connect', none STALE", () => {
-    const { container } = render(<App />);
+    const { container } = renderHealth();
     act(up);
     expect(screen.queryByRole("status")).toBeNull();
     expect(
@@ -120,14 +130,14 @@ describe("shell", () => {
   });
 
   test("waiting shows a clock that ticks locally", () => {
-    render(<App />);
+    renderHealth();
     act(up);
     tick(65_000);
     expect(row("d1.health").getByText(/WAITING 1m05s/)).toBeDefined();
   });
 
   test("ok, then stale with its age, while a silent subject stays waiting", () => {
-    render(<App />);
+    renderHealth();
     act(up);
     sendHealth("h1", "delta-one");
     expect(row("d1.health").getByText(/^OK/)).toBeDefined();
@@ -137,7 +147,7 @@ describe("shell", () => {
   });
 
   test("a health fault uses the HARD cue with the word FAULT", () => {
-    const { container } = render(<App />);
+    const { container } = renderHealth();
     act(up);
     sendHealth("h2", "delta-one", false);
     expect(row("d1.health").getByText(/FAULT/)).toBeDefined();
@@ -188,7 +198,7 @@ describe("wire text is text", () => {
   const payload = "<img src=x onerror=\"document.title='pwned'\">";
 
   test("a hostile wire string renders as literal text, no element is created", () => {
-    const { container } = render(<App />);
+    const { container } = renderHealth();
     act(up);
     sendHealth("x1", payload);
     expect(container.querySelector("img")).toBeNull();

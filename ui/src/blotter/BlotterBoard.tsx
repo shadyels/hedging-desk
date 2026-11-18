@@ -11,6 +11,7 @@ import { freshness } from "../bus/freshness";
 import { SUBJECTS } from "../bus/subjects";
 import { StateChip } from "../components/StateChip";
 import { WireText } from "../components/WireText";
+import { XScroll } from "../components/XScroll";
 import {
   MISSING,
   formatAge,
@@ -22,12 +23,17 @@ import type { InstrumentRef } from "../gen/common";
 import { NoneSince, NoneYetBody, PanelHead } from "../risk/parts";
 import { useBus } from "../store";
 import {
+  KINDS,
+  NO_FILTER,
   buildBlotter,
-  flatten,
+  filterOptions,
+  flattenFiltered,
+  isFiltered,
   sideLabel,
   statusGlyph,
   statusLabel,
   type AllocRow,
+  type BlotterFilter,
   type CrossRow,
   type FlatRow,
   type OrderRow,
@@ -145,7 +151,7 @@ function AllocCells({ row }: { row: AllocRow }) {
     <>
       <span role="cell" className="c-tog" />
       <Time ms={row.atMs} />
-      <span role="cell">alloc</span>
+      <span role="cell">ALLOC</span>
       <span role="cell" className="c-id c-alloc">
         <WireText value={row.clOrdId} />/{row.bookId}
       </span>
@@ -281,9 +287,14 @@ export function BlotterBoard({ now }: { now: number }) {
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+  const [filter, setFilter] = useState<BlotterFilter>(NO_FILTER);
   const flat = useMemo(
-    () => flatten(model.items, collapsed),
-    [model.items, collapsed],
+    () => flattenFiltered(model.items, collapsed, filter),
+    [model.items, collapsed, filter],
+  );
+  const options = useMemo(
+    () => filterOptions(model.items, filter),
+    [model.items, filter],
   );
   const indexOf = useMemo(
     () => new Map(flat.map((r, i) => [r.key, i])),
@@ -294,7 +305,7 @@ export function BlotterBoard({ now }: { now: number }) {
   const scroller = useRef<HTMLDivElement>(null);
   /** The row at the top of the viewport and how far the viewport sits below its top edge. */
   const anchor = useRef<{ key: string; delta: number } | null>(null);
-  /** Set while the user is scrolled away from the top; holds the newest top-level row at the time. */
+  /** Set while the user is scrolled away from the top; holds the newest shown row at the time. */
   const [pausedAt, setPausedAt] = useState<string | null>(null);
 
   const virt = useVirtualizer({
@@ -311,7 +322,7 @@ export function BlotterBoard({ now }: { now: number }) {
     const idx = Math.floor(top / rowH);
     const row = flat[idx];
     anchor.current = row ? { key: row.key, delta: top - idx * rowH } : null;
-    setPausedAt((p) => (top > 0 ? (p ?? model.items[0]?.key ?? null) : null));
+    setPausedAt((p) => (top > 0 ? (p ?? flat[0]?.key ?? null) : null));
   };
 
   // Pause-scroll: rows arrive at the top, so while scrolled away the anchored row is pinned to the same
@@ -336,6 +347,15 @@ export function BlotterBoard({ now }: { now: number }) {
     [],
   );
 
+  // A new filter is a new list: go back to the top, live, with nothing held (the anchored row may be gone).
+  const refilter = (patch: Partial<BlotterFilter>) => {
+    const el = scroller.current;
+    if (el) el.scrollTop = 0;
+    anchor.current = null;
+    setPausedAt(null);
+    setFilter((f) => ({ ...f, ...patch }));
+  };
+
   const resume = () => {
     const el = scroller.current;
     if (el) {
@@ -351,11 +371,8 @@ export function BlotterBoard({ now }: { now: number }) {
     conn.firstConnectedAtMs === null
       ? MISSING
       : formatUtcTime(conn.firstConnectedAtMs);
-  let newCount = 0;
-  if (pausedAt !== null) {
-    const i = model.items.findIndex((r) => r.key === pausedAt);
-    newCount = i < 0 ? model.items.length : i;
-  }
+  const newCount =
+    pausedAt === null ? 0 : (indexOf.get(pausedAt) ?? flat.length);
 
   return (
     <section className="blotter" aria-labelledby="p-blotter">
@@ -363,103 +380,192 @@ export function BlotterBoard({ now }: { now: number }) {
         <PanelHead
           id="p-blotter"
           title="Order and execution blotter"
-          note={<code>d1.exec.&lt;book&gt;.&lt;instrument&gt;</code>}
+          hint="d1.exec.<book>.<instrument> and d1.crosses: event streams with no snapshot"
           fresh={fresh}
           ageLabel="last event"
           event
         />
-        <p className="bl-meta num">
-          <span>
-            {execSt.count} execution event{execSt.count === 1 ? "" : "s"} since
-            connect {fromConnect}
-          </span>
-          <span>
-            <code>d1.crosses</code> {crossSt.count} ·{" "}
-            <EventStatus id="crosses" now={now} />
-          </span>
-          <span title="Reports repeating an (exec_id, book_id) already shown, and crosses repeating a cross_id, within the retained window">
-            {model.duplicates} duplicate{model.duplicates === 1 ? "" : "s"}{" "}
-            ignored
-          </span>
-          <span>
-            window {SUBJECTS.exec.ringSize} reports, {SUBJECTS.crosses.ringSize}{" "}
-            crosses
-          </span>
-        </p>
-        {flat.length === 0 ? (
-          <NoneYetBody>
-            Exec messages are a stream with no snapshot: an empty blotter means
-            none seen yet, not no orders.
-          </NoneYetBody>
-        ) : (
-          <div
-            className="bl-table"
-            role="table"
-            aria-label="Orders, allocations and crosses"
-            aria-rowcount={flat.length + 1}
-          >
-            <div className="bl-head" role="rowgroup">
-              <div className="bl-row bl-cols" role="row" aria-rowindex={1}>
-                {HEADERS.map(([h, cls], i) => (
-                  <span
-                    key={i}
-                    role="columnheader"
-                    className={cls}
-                    aria-label={h === "" ? "Expand" : undefined}
-                  >
-                    {h}
-                  </span>
-                ))}
-              </div>
-            </div>
-            <div
-              className="bl-scroll"
-              role="rowgroup"
-              ref={scroller}
-              tabIndex={0}
-              aria-label="Blotter rows, newest first"
-              onScroll={onScroll}
-            >
-              <div
-                className="bl-body"
-                style={{ height: `${virt.getTotalSize()}px` }}
+        <div className="bl-bar">
+          <div className="bl-filters" role="group" aria-label="Blotter filters">
+            <label>
+              Kind
+              <select
+                value={filter.kind}
+                onChange={(e) =>
+                  refilter({ kind: e.target.value as BlotterFilter["kind"] })
+                }
               >
-                {virt.getVirtualItems().map((v) => {
-                  const row = flat[v.index];
-                  if (!row) return null;
-                  return (
-                    <div
-                      key={v.key}
-                      role="row"
-                      aria-rowindex={v.index + 2}
-                      className="bl-row bl-cols"
-                      data-kind={row.kind}
-                      data-key={row.key}
-                      style={{ transform: `translateY(${v.start}px)` }}
-                    >
-                      <Cells
-                        row={row}
-                        collapsed={collapsed.has(row.key)}
-                        toggle={toggle}
-                      />
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-            {pausedAt !== null && newCount > 0 ? (
-              <button type="button" className="bl-resume" onClick={resume}>
-                {newCount} new, resume
-              </button>
+                <option value="">all</option>
+                {KINDS.map((k) => (
+                  <option key={k} value={k}>
+                    {k}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Book
+              <select
+                value={filter.book}
+                onChange={(e) => refilter({ book: e.target.value })}
+              >
+                <option value="">all</option>
+                {options.books.map((b) => (
+                  <option key={b} value={String(b)}>
+                    {b === 0 ? "0 firm" : b}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Instrument
+              <select
+                value={filter.instrument}
+                onChange={(e) => refilter({ instrument: e.target.value })}
+              >
+                <option value="">all</option>
+                {options.instruments.map((i) => (
+                  <option key={i} value={i}>
+                    {i}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Status
+              <select
+                value={filter.status}
+                onChange={(e) => refilter({ status: e.target.value })}
+              >
+                <option value="">all</option>
+                {options.statuses.map((t) => (
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              ClOrdID
+              <input
+                type="search"
+                value={filter.text}
+                placeholder="ClOrdID / CrossId"
+                autoComplete="off"
+                spellCheck={false}
+                onChange={(e) => refilter({ text: e.target.value })}
+              />
+            </label>
+            {isFiltered(filter) ? (
+              <>
+                <button
+                  type="button"
+                  className="bl-clear"
+                  onClick={() => refilter(NO_FILTER)}
+                >
+                  Clear
+                </button>
+                <span className="bl-count num" aria-live="polite">
+                  {flat.length} row{flat.length === 1 ? "" : "s"} match
+                </span>
+              </>
             ) : null}
           </div>
+          <p className="bl-meta num">
+            <span
+              title={`d1.exec.<book>.<instrument>. Retained window: ${SUBJECTS.exec.ringSize} reports, ${SUBJECTS.crosses.ringSize} crosses.`}
+            >
+              {execSt.count} execution event{execSt.count === 1 ? "" : "s"}{" "}
+              since connect {fromConnect}
+            </span>
+            <span title="d1.crosses">
+              {crossSt.count} cross{crossSt.count === 1 ? "" : "es"} ·{" "}
+              <EventStatus id="crosses" now={now} />
+            </span>
+            <span title="Reports repeating an (exec_id, book_id) already shown, and crosses repeating a cross_id, within the retained window">
+              {model.duplicates} duplicate{model.duplicates === 1 ? "" : "s"}{" "}
+              ignored
+            </span>
+          </p>
+        </div>
+        {flat.length === 0 ? (
+          <NoneYetBody>
+            {model.items.length === 0
+              ? "Exec messages are a stream with no snapshot: an empty blotter means none seen yet, not no orders."
+              : "No row matches the filters."}
+          </NoneYetBody>
+        ) : (
+          <XScroll label="Blotter table">
+            <div
+              className="bl-table"
+              role="table"
+              aria-label="Orders, allocations and crosses"
+              aria-rowcount={flat.length + 1}
+            >
+              <div className="bl-head" role="rowgroup">
+                <div className="bl-row bl-cols" role="row" aria-rowindex={1}>
+                  {HEADERS.map(([h, cls], i) => (
+                    <span
+                      key={i}
+                      role="columnheader"
+                      className={cls}
+                      aria-label={h === "" ? "Expand" : undefined}
+                    >
+                      {h}
+                    </span>
+                  ))}
+                </div>
+              </div>
+              <div
+                className="bl-scroll"
+                role="rowgroup"
+                ref={scroller}
+                tabIndex={0}
+                aria-label="Blotter rows, newest first"
+                onScroll={onScroll}
+              >
+                <div
+                  className="bl-body"
+                  style={{ height: `${virt.getTotalSize()}px` }}
+                >
+                  {virt.getVirtualItems().map((v) => {
+                    const row = flat[v.index];
+                    if (!row) return null;
+                    return (
+                      <div
+                        key={v.key}
+                        role="row"
+                        aria-rowindex={v.index + 2}
+                        className="bl-row bl-cols"
+                        data-kind={row.kind}
+                        data-key={row.key}
+                        style={{ transform: `translateY(${v.start}px)` }}
+                      >
+                        <Cells
+                          row={row}
+                          collapsed={collapsed.has(row.key)}
+                          toggle={toggle}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+              {pausedAt !== null && newCount > 0 ? (
+                <button type="button" className="bl-resume" onClick={resume}>
+                  {newCount} new, resume
+                </button>
+              ) : null}
+            </div>
+          </XScroll>
         )}
-        <p className="bl-foot">
-          Newest first, by first arrival. Allocation rows are indented under
-          their parent order; their qty is the book&apos;s share and filled is
-          its own cumulative, never the parent&apos;s. A cross links to its
-          residual order by netting_cycle_id and instrument. Time is browser
-          arrival, UTC.
+        <p
+          className="bl-foot"
+          title="Allocation rows show the book's own book_cum_qty_e2, never the parent's cumulative (ADR-014 Amendment 1 s3). A cross links to its residual order by netting_cycle_id and instrument id (Amendment 1 s4). Reports dedupe on (exec_id, book_id) (ADR-014 s5)."
+        >
+          Newest first, by first arrival. ALLOC rows sit under their ORDER: qty
+          is the book&apos;s share, filled its own cumulative. Time is UTC,
+          browser arrival.
         </p>
       </section>
     </section>

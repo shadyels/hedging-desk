@@ -6,6 +6,9 @@
   gap: var(--gutter);
   margin-top: var(--gutter);
 }
+.health + .panel {
+  margin-top: var(--gutter);
+}
 .health-pair {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);

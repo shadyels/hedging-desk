@@ -10,10 +10,8 @@ export function RiskBoard() {
   return (
     <div className="risk">
       <FirmTable now={now} />
-      <div className="risk-pair">
-        <BooksTable now={now} />
-        <TargetBand now={now} />
-      </div>
+      <BooksTable now={now} />
+      <TargetBand now={now} />
       <AlertTicker now={now} />
     </div>
   );

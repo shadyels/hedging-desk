@@ -1,80 +1,44 @@
 /**
- * Monitoring shell (P3.M1 Slice 1): connection status and per-subject state. The four screens
- * (ui/CLAUDE.md "Screens") are built on top of this in later slices.
+ * Monitoring shell: product name, four screen tabs, trust roll-up, connection, UTC clock and theme. One screen is
+ * shown at a time; the tab lives in the URL hash. The screens are in risk/, tracker/, blotter/ and health/.
  */
-import { freshness, isEventSubject } from "./bus/freshness";
-import { SUBJECT_IDS, SUBJECTS, type SubjectId } from "./bus/subjects";
-import { StateChip, type ChipState } from "./components/StateChip";
-import { WireText } from "./components/WireText";
-import { MISSING, formatAge, formatUtcTime } from "./format";
-import type { HealthStatus } from "./gen/live";
-import { useBus, type Entry } from "./store";
+import { StateChip } from "./components/StateChip";
+import { formatAge, formatUtcTime } from "./format";
 import { BlotterBoard } from "./blotter/BlotterBoard";
 import { HealthBoard } from "./health/HealthBoard";
-import { NoneSince } from "./risk/parts";
+import { SubjectsTable } from "./health/SubjectsTable";
 import { RiskBoard } from "./risk/RiskBoard";
+import { SCREENS, useScreen, useTheme, type ScreenId } from "./shell/nav";
+import { useRollup } from "./shell/rollup";
+import { TabBar } from "./shell/TabBar";
+import { useBus } from "./store";
 import { TrackerBoard } from "./tracker/TrackerBoard";
 import { useNow } from "./useNow";
 
-const isHealth = (v: unknown): v is HealthStatus =>
-  typeof v === "object" &&
-  v !== null &&
-  typeof (v as Partial<HealthStatus>).component === "string";
-
-function SubjectRow({ id, now }: { id: SubjectId; now: number }) {
-  const conn = useBus((s) => s.conn);
-  const st = useBus((s) => s.subjects[id]);
-  const spec = SUBJECTS[id];
-  const fresh = freshness(spec, st.last, conn, now);
-  const health = st.last && isHealth(st.last.value) ? st.last.value : null;
-  const fault = fresh.state === "ok" && health !== null && !health.ok;
-  const state: ChipState = fault ? "hard" : fresh.state;
-  // Waiting and stale carry a clock; an event-driven subject shows its age in the Last column instead.
-  const clock =
-    fresh.state === "waiting" || fresh.state === "stale"
-      ? fresh.ageMs === null
-        ? null
-        : formatAge(fresh.ageMs)
-      : null;
-  const last: Entry | null = st.last;
-  // An event subject that has delivered nothing reads "none since connect": no WAITING chip, no clock.
-  const none = fresh.state === "waiting" && isEventSubject(spec);
-  return (
-    <tr>
-      <th scope="row">
-        <code>{spec.pattern}</code>
-      </th>
-      <td>
-        {none ? (
-          <NoneSince />
-        ) : (
-          <StateChip
-            state={state}
-            {...(fault ? { label: "FAULT" } : {})}
-            clock={clock}
-          />
-        )}
-      </td>
-      <td className="num r">{st.count}</td>
-      <td className="num r">
-        {last ? formatAge(now - last.receivedAtMs) : MISSING}
-      </td>
-      <td className="num r">{st.decodeErrors}</td>
-      <td>
-        {health ? (
-          <WireText
-            value={`${health.component}: ${health.ok ? "ok" : "fault"}`}
-          />
-        ) : null}
-      </td>
-    </tr>
-  );
+function Screen({ id, now }: { id: ScreenId; now: number }) {
+  switch (id) {
+    case "risk":
+      return <RiskBoard />;
+    case "tracker":
+      return <TrackerBoard now={now} />;
+    case "blotter":
+      return <BlotterBoard now={now} />;
+    case "health":
+      return (
+        <>
+          <HealthBoard now={now} />
+          <SubjectsTable now={now} />
+        </>
+      );
+  }
 }
 
 export function App() {
   const conn = useBus((s) => s.conn);
-  const duplicates = useBus((s) => s.duplicates);
   const now = useNow();
+  const [screen, go] = useScreen();
+  const [theme, toggleTheme] = useTheme();
+  const trust = useRollup(now);
   const up = conn.status === "connected";
   // First dial: nothing was lost, so this is CONNECTING, not DISCONNECTED, and there is no time to show.
   const connecting = conn.status === "connecting";
@@ -90,16 +54,39 @@ export function App() {
     conn.status === "reconnecting" && conn.nextRetryAtMs !== null
       ? `, attempt ${conn.attempt}, retry in ${formatAge(Math.max(0, conn.nextRetryAtMs - now))}`
       : "";
+  const label = SCREENS.find((s) => s.id === screen)?.label ?? "";
   return (
     <>
       <header className="bar">
-        <strong>Desk Hedging</strong>
+        <h1 className="bar-name">Desk Hedging</h1>
+        <TabBar active={screen} onSelect={go} />
+        <span
+          className="bar-trust"
+          title={
+            trust.reasons.length > 0
+              ? trust.reasons.join("; ")
+              : "Every feed is fresh and no limit is above OK"
+          }
+        >
+          Data <StateChip state={trust.state} label={trust.label} />
+        </span>
         <span className="bar-conn">
           <StateChip
             state={up ? "ok" : "disconnected"}
             label={up ? "CONNECTED" : conn.status.toUpperCase()}
           />
         </span>
+        <time className="bar-clock num" dateTime={new Date(now).toISOString()}>
+          {formatUtcTime(now)}
+        </time>
+        <button
+          type="button"
+          className="bar-theme"
+          onClick={toggleTheme}
+          title={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+        >
+          {theme}
+        </button>
       </header>
       {!up && (
         <div className="banner" role="status">
@@ -119,37 +106,14 @@ export function App() {
         </div>
       )}
       <main className="board" data-disconnected={!up}>
-        <RiskBoard />
-        <TrackerBoard now={now} />
-        <BlotterBoard now={now} />
-        <HealthBoard now={now} />
-        <table className="subjects">
-          <caption>Bus subjects</caption>
-          <thead>
-            <tr>
-              <th scope="col">Subject</th>
-              <th scope="col">State</th>
-              <th scope="col" className="r">
-                Messages
-              </th>
-              <th scope="col" className="r">
-                Last
-              </th>
-              <th scope="col" className="r">
-                Decode errors
-              </th>
-              <th scope="col">Detail</th>
-            </tr>
-          </thead>
-          <tbody>
-            {SUBJECT_IDS.map((id) => (
-              <SubjectRow key={id} id={id} now={now} />
-            ))}
-          </tbody>
-        </table>
-        <p className="foot">
-          Duplicates dropped: {duplicates}. Counts are since connect.
-        </p>
+        <div
+          role="tabpanel"
+          id={`panel-${screen}`}
+          aria-labelledby={`tab-${screen}`}
+        >
+          <h2 className="sr-only">{label}</h2>
+          <Screen id={screen} now={now} />
+        </div>
       </main>
     </>
   );

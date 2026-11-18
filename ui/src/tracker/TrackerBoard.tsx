@@ -15,6 +15,7 @@ import { useBus, type Entry } from "../store";
 import {
   DEMO_TITLE,
   PRICE_ONLY_NOTE,
+  PRICE_ONLY_SHORT,
   TRACKER_BASIS_IS_DEMO,
   asTracker,
   kindLabel,
@@ -129,6 +130,7 @@ function TrackerCard({
             </span>
           ) : undefined
         }
+        hint="d1.tracker.<book>: ex-post ADR-010 values, neutral ink (no tracker limit exists)"
         fresh={fresh}
         ageLabel="updated"
       />
@@ -159,17 +161,17 @@ function TrackerCard({
       </dl>
       <Sparkline ring={ring} />
       <p className="tmeta num">
-        <span title="n_obs">n_obs {m.nObs}</span>
+        <span title="n_obs">{m.nObs} obs</span>
         {" · "}
-        <span title="sampling_interval_s">
-          sampling_interval_s {m.samplingIntervalS}
-        </span>
+        <span title="sampling_interval_s">every {m.samplingIntervalS} s</span>
         {" · "}
         <span title="window_end_ns - window_start_ns, Delta One feed clock">
           window {span === null ? MISSING : formatAge(span)}
         </span>
       </p>
-      <p className="tnote">{PRICE_ONLY_NOTE}</p>
+      <p className="tnote" title={PRICE_ONLY_NOTE}>
+        {PRICE_ONLY_SHORT}
+      </p>
     </section>
   );
 }
@@ -190,13 +192,15 @@ export function TrackerBoard({ now }: { now: number }) {
   );
   const fresh = freshness(SUBJECTS.tracker, st.last, conn, now);
   return (
-    <section className="tracker" aria-labelledby="p-tracker">
-      <h2 id="p-tracker" className="tracker-title">
-        Tracker scorecard <code>d1.tracker.&lt;book&gt;</code>
-      </h2>
+    <section className="tracker" aria-label="Tracker scorecard">
       {cards.length === 0 ? (
         <section className="panel" aria-label="Tracker waiting">
-          <PanelHead id="p-tracker-wait" title="Tracker books" fresh={fresh} />
+          <PanelHead
+            id="p-tracker-wait"
+            title="Tracker books"
+            hint="d1.tracker.<book>"
+            fresh={fresh}
+          />
           <WaitingBody
             what={<code>d1.tracker.*</code>}
             extra="The bus does not list which books are tracker books, so none can be shown as waiting individually."

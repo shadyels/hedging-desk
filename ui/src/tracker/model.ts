@@ -27,6 +27,10 @@ export const TRACKER_BASIS_IS_DEMO = true;
 export const DEMO_TITLE =
   "Benchmark composition and cash yield are DEMO placeholders until P4.M6 (ADR-010).";
 
+/** What the card says; the ADR-010 quote below is its tooltip. */
+export const PRICE_ONLY_SHORT =
+  "Price-only benchmark: dividends land in tracking difference.";
+
 /** ADR-010 "Demo honesty", quoted. Same text on every card. */
 export const PRICE_ONLY_NOTE =
   "Price-only benchmark: the benchmark return is price-only while book NAV is total return, so constituent dividends land entirely in tracking difference (ADR-010).";

@@ -13,11 +13,6 @@
   flex-direction: column;
   gap: var(--gutter);
 }
-.risk-pair {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: var(--gutter);
-}
 
 .panel {
   background: var(--surface-1);
@@ -25,6 +20,9 @@
   border-radius: var(--radius);
   padding: 0 var(--panel-pad) var(--panel-pad);
   min-width: 0;
+}
+/* A table's own horizontal scroller. Focusable (tabindex set in XScroll) only while it actually overflows. */
+.xscroll {
   overflow-x: auto;
 }
 .panel-head {
@@ -34,7 +32,7 @@
   height: var(--space-6);
   font-size: var(--fs-md);
 }
-.panel-head h2 {
+.panel-head h3 {
   margin: 0;
   font-size: var(--fs-md);
   font-weight: var(--fw-medium);
@@ -42,9 +40,6 @@
 .panel-note {
   color: var(--text-3);
   font-size: var(--fs-xs);
-}
-.panel-note code {
-  font-family: var(--font-mono);
 }
 .panel-status {
   margin-left: auto;

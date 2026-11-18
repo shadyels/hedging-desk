@@ -1,4 +1,10 @@
-import { act, cleanup, fireEvent, render } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  getByLabelText,
+  render,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { freshness } from "../bus/freshness";
 import { SUBJECTS, keyOf } from "../bus/subjects";
@@ -185,6 +191,164 @@ describe("pause-scroll", () => {
     sendExec({ clOrdId: "cl-new", execId: "b" });
     expect(rowEls(container)[0]?.textContent).toContain("cl-new");
     expect(queryByRole("button", { name: /resume/ })).toBeNull();
+  });
+});
+
+describe("N4: filter row", () => {
+  const MSFT = { ...AAPL, instrumentId: 2, symbol: "MSFT" };
+  const pick = (c: HTMLElement, label: string, value: string) =>
+    fireEvent.change(getByLabelText(c, label), { target: { value } });
+  const ids = (c: HTMLElement) =>
+    rowEls(c).map(
+      (r) => r.querySelector(".c-id")?.textContent?.replace(" (net)", "") ?? "",
+    );
+  const opts = (c: HTMLElement, label: string) =>
+    Array.from((getByLabelText(c, label) as HTMLSelectElement).options).map(
+      (o) => o.value,
+    );
+
+  test("the controls mount before any data arrives, and are labelled", () => {
+    const { container, getByRole } = render(<Host />);
+    up();
+    expect(getByRole("group", { name: "Blotter filters" })).toBeDefined();
+    for (const l of ["Kind", "Book", "Instrument", "Status", "ClOrdID"])
+      expect(getByLabelText(container, l)).toBeDefined();
+    expect(opts(container, "Kind")).toEqual(["", "ORDER", "ALLOC", "CROSS"]);
+    expect(opts(container, "Book")).toEqual([""]);
+  });
+
+  test("options are built from the ring; each filter narrows the rows; Clear restores them", () => {
+    const { container, getByRole, queryByRole } = render(<Host />);
+    up();
+    sendExec(
+      { clOrdId: "cl-aapl", execId: "f1", status: S.ORD_STATUS_FILLED },
+      {
+        clOrdId: "cl-msft",
+        execId: "f2",
+        instrument: MSFT,
+        bookId: 4,
+        status: S.ORD_STATUS_REJECTED,
+      },
+    );
+    sendCross({ crossId: "x-77", buyBookId: 8, sellBookId: 9 });
+    expect(opts(container, "Instrument")).toEqual(["", "AAPL", "MSFT"]);
+    expect(opts(container, "Book")).toEqual(["", "0", "4", "8", "9"]);
+    expect(opts(container, "Status")).toEqual(["", "FILLED", "REJECTED"]);
+    expect(rowEls(container)).toHaveLength(3);
+
+    pick(container, "Instrument", "MSFT");
+    expect(ids(container)).toEqual(["cl-msft"]);
+    pick(container, "Instrument", "");
+    pick(container, "Status", "FILLED");
+    expect(ids(container)).toEqual(["cl-aapl"]);
+    pick(container, "Status", "");
+    pick(container, "Kind", "CROSS");
+    expect(ids(container)).toEqual(["x-77"]);
+    pick(container, "Kind", "");
+    pick(container, "Book", "9"); // the sell side of the cross
+    expect(ids(container)).toEqual(["x-77"]);
+    pick(container, "Book", "");
+    fireEvent.change(getByLabelText(container, "ClOrdID"), {
+      target: { value: "CL-MS" },
+    });
+    expect(ids(container)).toEqual(["cl-msft"]);
+    expect(container.querySelector(".bl-count")?.textContent).toBe(
+      "1 row match",
+    );
+
+    fireEvent.change(getByLabelText(container, "ClOrdID"), {
+      target: { value: "no such id" },
+    });
+    expect(container.querySelector(".bl-scroll")).toBeNull();
+    expect(container.textContent).toContain("No row matches the filters.");
+    expect(container.textContent).not.toContain("none seen yet");
+    fireEvent.click(getByRole("button", { name: "Clear" }));
+    expect(rowEls(container)).toHaveLength(3);
+    expect(queryByRole("button", { name: "Clear" })).toBeNull();
+  });
+
+  test("the filter row does not break pause-scroll: the held row stays put while matching rows arrive", () => {
+    const { container, getByRole } = render(<Host />);
+    up();
+    sendExec(
+      ...Array.from({ length: 80 }, (_, i) => ({
+        clOrdId: `cl-${i}`,
+        execId: `q${i}`,
+      })),
+      { clOrdId: "other", execId: "q-other", instrument: MSFT },
+    );
+    pick(container, "Instrument", "AAPL");
+    const el = scroller(container);
+    expect(el.scrollTop).toBe(0);
+    el.scrollTop = ROW_H * 12;
+    fireEvent.scroll(el);
+    const before = firstVisible(container);
+    expect(before).toBeDefined();
+
+    sendExec(
+      ...Array.from({ length: 5 }, (_, i) => ({
+        clOrdId: `new-${i}`,
+        execId: `qn${i}`,
+      })),
+    );
+    expect(el.scrollTop).toBe(ROW_H * 17);
+    expect(firstVisible(container)).toBe(before);
+    // a row the filter hides does not count as new and does not move the viewport
+    sendExec({ clOrdId: "hidden", execId: "qh", instrument: MSFT });
+    expect(el.scrollTop).toBe(ROW_H * 17);
+    expect(getByRole("button", { name: "5 new, resume" })).toBeDefined();
+
+    // changing the filter is a new list: back to the top, nothing held, no resume button
+    pick(container, "Instrument", "MSFT");
+    expect(scroller(container).scrollTop).toBe(0);
+    expect(container.querySelector(".bl-resume")).toBeNull();
+    expect(ids(container)).toEqual(["hidden", "other"]);
+  });
+});
+
+describe("N5: status cues and kind labels", () => {
+  test("each status row shows its own glyph and its label; kinds read ORDER, ALLOC, CROSS", () => {
+    const { container } = render(<Host />);
+    up();
+    const all = [
+      S.ORD_STATUS_NEW,
+      S.ORD_STATUS_PARTIALLY_FILLED,
+      S.ORD_STATUS_FILLED,
+      S.ORD_STATUS_CANCELED,
+      S.ORD_STATUS_REJECTED,
+      S.ORD_STATUS_PENDING_CANCEL,
+      S.ORD_STATUS_PENDING_REPLACE,
+    ];
+    sendExec(
+      ...all.map((status, i) => ({
+        clOrdId: `s-${i}`,
+        execId: `s${i}`,
+        status,
+      })),
+    );
+    sendExec({
+      clOrdId: "s-0",
+      execId: "sa",
+      bookId: 3,
+      allocation: true,
+      lastQtyE2: 1n,
+      bookCumQtyE2: 1n,
+    });
+    sendCross({ crossId: "x-k" });
+    const cells = Array.from(
+      container.querySelectorAll<HTMLElement>('[data-kind="order"] .c-status'),
+    );
+    expect(cells).toHaveLength(7);
+    const glyphs = cells.map(
+      (c) => c.querySelector("[aria-hidden]")?.textContent,
+    );
+    expect(glyphs.every((g) => g)).toBe(true);
+    expect(new Set(glyphs).size).toBe(7);
+    expect(new Set(cells.map((c) => c.textContent)).size).toBe(7);
+    const kinds = Array.from(
+      container.querySelectorAll<HTMLElement>(".bl-row[data-kind]"),
+    ).map((r) => r.querySelectorAll('[role="cell"]')[2]?.textContent);
+    expect(new Set(kinds)).toEqual(new Set(["ORDER", "ALLOC", "CROSS"]));
   });
 });
 

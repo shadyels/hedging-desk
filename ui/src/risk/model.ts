@@ -291,6 +291,11 @@ export interface BookView {
   haltReasons: string[];
   /** Latest exo.alerts.recon for the book while it says publishing_halted = true (the views that disagree). */
   reconAlert: ReconAlert | null;
+  /**
+   * Named only by d1.health with `limits.book.<id>.valuation = none`: never accepted or rejected, which is normal
+   * for a book EXO does not value (ADR-014 s3). Not a Books row (it would read WAITING forever); shown as one neutral line.
+   */
+  d1Only: boolean;
 }
 
 /** Book ids are digits-only u32 tokens (health/model.ts), so `Number` is exact and they are ids, not money. */
@@ -327,6 +332,16 @@ export function bookViews(
     ...(d1?.books ?? []).map((b) => asBookId(b.id)),
     ...alerts.keys(),
   ]);
+  const named = new Set<number>([
+    ...valuations.map((r) => r.bookId),
+    ...(exo?.books ?? []).map((b) => asBookId(b.id)),
+    ...alerts.keys(),
+  ]);
+  const d1None = new Set(
+    (d1?.books ?? [])
+      .filter((b) => b.valuation === "none")
+      .map((b) => asBookId(b.id)),
+  );
   const exoStates = new Map(
     (exo?.books ?? []).map((b) => [asBookId(b.id), b.state] as const),
   );
@@ -350,6 +365,7 @@ export function bookViews(
         exoState,
         haltReasons,
         reconAlert,
+        d1Only: d1None.has(bookId) && !named.has(bookId),
       };
     });
 }

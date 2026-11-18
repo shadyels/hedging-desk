@@ -4,12 +4,13 @@ Design system for the monitoring UI. Product context: `PRODUCT.md`. Implementati
 
 ## Principles
 
-1. **Dark-first desktop terminal.** Dark is the default theme; light uses the same token names. Desktop only, minimum width 1280 px, no mobile layouts.
+1. **Dark-first desktop terminal.** Dark is the default theme; light uses the same token names. Desktop only, designed for 1280 px and up (a design floor, not a CSS `min-width`: see Spacing), no mobile layouts.
 2. **Dense tables.** Monospace tabular numerals, row height 24 px (22 px compact), spacing on a 4 px grid.
 3. **Colour is reserved for limit and health state.** Four hues (OK, WARN, HARD, halted), nowhere else. Surfaces, text, bars, sparklines, order status, and sign of a number are neutral.
 4. **No state is colour alone.** Every state has a glyph, a text label, and a border/fill shape that survive colour-blind viewing and greyscale (see State matrix).
 5. **Flat.** No shadow, no gradient, no glow, no icon library, no decorative shape, no animation on value change. Separation is a one-step tone change or a 1 px line.
 6. **System fonts.** No webfont and no dependency; the desk may be offline.
+7. **Footnotes are legends.** A visible footnote says only what a glyph, bar or column means. NATS subject patterns, ADR citations and wire field names live in `title` tooltips (panel title, footnote, cell), never as running text.
 
 ## Surfaces, text, borders
 
@@ -97,7 +98,7 @@ Health states reuse the same cues. A health fault (`ok=false`, `last_error`, `fa
 
 `disconnected` (board) > `waiting` > `halted` > `stale` > limit level `HARD` > `WARN` > `OK`.
 
-Book rows (Books table) apply the ladder with one reading: a book that `exo.health` or a recon alert names as halted has reported, so HALTED shows even before its first valuation, rather than WAITING hiding the halt. A book's halt state comes from `exo.health` `book.<id>.state` (`halted:recon`, `halted:no-snapshot`) and falls back to the latest `exo.alerts.recon` only when exo.health carries no state for it. A book named by any source (valuations, `exo.health` book keys, `d1.health` `limits.book.<id>.*`, recon alerts) but with no valuation yet reads WAITING.
+Book rows (Books table) apply the ladder with one reading: a book that `exo.health` or a recon alert names as halted has reported, so HALTED shows even before its first valuation, rather than WAITING hiding the halt. A book's halt state comes from `exo.health` `book.<id>.state` (`halted:recon`, `halted:no-snapshot`) and falls back to the latest `exo.alerts.recon` only when exo.health carries no state for it. A book named by an EXO source (valuations, `exo.health` book keys, recon alerts) or by `d1.health` with any valuation token other than `none`, but with no valuation yet, reads WAITING. A book named **only** by `d1.health` with `limits.book.<id>.valuation = none` is never accepted or rejected, which is normal for a book EXO does not value (ADR-014 s3): it is not a row and never WAITING; the Books panel carries one neutral line, `no EXO valuation for books 6, 7 (normal)`.
 
 A cell shows one chip. When `waiting`, `halted` or `stale` outranks a limit level, the last known level is kept as a small trailing glyph (`▲` or `✕`) in `--text-3`, so a breach is never hidden by staleness. The lower-ranked states are also listed in the chip tooltip.
 
@@ -107,7 +108,7 @@ Stale threshold = 3 x the producer's cadence, mirroring Delta One's own rule (`v
 
 ## Type
 
-System stacks (`--font-sans`, `--font-mono`). Sentence case. The only uppercase text is a state label (OK, WARN, HARD, HALTED, STALE, WAITING, DISCONNECTED, FAULT), so it reads as a code.
+System stacks (`--font-sans`, `--font-mono`). Sentence case. The only uppercase text is a state label (OK, WARN, HARD, HALTED, STALE, WAITING, DISCONNECTED, FAULT) and a blotter kind or status code (ORDER, ALLOC, CROSS; NEW, FILLED, ...), so it reads as a code.
 
 | Token      | Size  | Use                                          |
 | ---------- | ----- | -------------------------------------------- |
@@ -134,9 +135,12 @@ Line height `--lh-tight` 16 px in single-line cells, `--lh-body` 20 px in prose.
 - 4 px grid: `--space-1` 4, `-2` 8, `-3` 12, `-4` 16, `-5` 20, `-6` 24, `-8` 32. `--space-half` (2 px) is for borders and glyph nudges only.
 - Row height `--row-h` 24 px; `--row-h-compact` 22 px is the only off-grid height and is a user density choice. Cell padding `--row-pad-x` 8 px. Dividers `--border-subtle`, 1 px. No zebra. Hover `--row-hover`; selected `--row-selected` plus a `--select-edge` inset left edge in `--text` (a non-colour selection cue).
 - Header row 24 px, `--surface-2`, sticky, `--text-2` 11 px.
-- Shell bar `--bar-h` 32 px: product name, four screen tabs (active tab in brackets in the wireframes; in the UI, `--text` plus a 2 px underline in `--text`), connection chip, UTC clock, theme. Page min width `--page-min-w` 1280 px, gutter `--gutter` 8 px, panel padding `--panel-pad` 8 px, 12 columns.
+- Shell bar `--bar-h` 32 px, sticky: product name (the page's `h1`), four screen tabs **Risk, Tracker, Blotter, Health** (active tab in brackets in the wireframes; in the UI, `--text` plus a 2 px underline in `--text`), the **data roll-up chip** (`Data` + the worst state across the screens, tooltip lists every non-OK finding), connection chip, UTC clock, theme button (shows the current theme; click switches). One screen is shown at a time, the active tab is in the URL hash (`#risk`, `#tracker`, `#blotter`, `#health`, default risk). Gutter `--gutter` 8 px, panel padding `--panel-pad` 8 px, 12 columns.
+- **No page-level `min-width`.** A 1280 px floor plus a classic 15 px scrollbar overflows the viewport and scrolls the whole page sideways. The page is fluid; the design target is 1280 px and up. Tables fit at 1280 px with the scrollbar (1265 px of viewport) by column sizing, not by clipping: panels stack full width on the risk screen, blotter columns are sized to their longest value, and the one free-text column (Detail, the reject reason) takes the leftover width and ellipsizes with the full text in a tooltip. A table that still overflows (a narrower window, a long value) is a horizontal scroller (`role="region"`, `aria-label` naming the table) that becomes focusable (`tabindex="0"`) only while it overflows, so a keyboard user can reach the hidden columns.
+- Heading order: `h1` the product name; `h2` the active screen (visually hidden, the tab is its label); `h3` panel and card titles; `h4` sub-sections inside a panel.
 - Panel = `--surface-1`, `--border` 1 px, radius `--radius` 2 px, 24 px title row. No shadow.
-- Focus: `--focus-ring` (2 px `--text`, offset `--focus-offset`) on every interactive element and on focusable rows. Tables are keyboard-navigable (arrow keys move the selected row).
+- Focus: `--focus-ring` (2 px `--text`, offset `--focus-offset`) on every interactive element and every focusable scroller, from one base rule in `tokens.css` (links, buttons, inputs, selects, anything with a `tabindex`). Scrollers draw it inside their edge so an overflow clip cannot hide it. Tables are keyboard-navigable (arrow keys move the selected row): not built yet.
+- Selection and scrollbars are themed from the tokens (`::selection` is `--bg` on `--text-2`; `scrollbar-color` is `--border-strong` on `--surface-2`), so both themes follow the toggle.
 
 ## Component rules (specified here so Slice 1 builds them once)
 
@@ -147,20 +151,22 @@ Line height `--lh-tight` 16 px in single-line cells, `--lh-body` 20 px in prose.
 - **Sparkline.** 1 px line in `--spark`, last N values of a ring buffer, no axes, no fill, no state hue. Stale: kept, `--text-3`. Waiting: dotted placeholder line.
 - **Tracker card.** `--surface-1` panel: book code (`--fs-lg`), benchmark, kind (ex-post), chip in the title row; TE as the `--fs-kpi` figure (weight 600), TD, cash drag and cash weight in `--fs-sm`; sparkline; window and freshness line. A stale card also carries a dashed-outline strip in `--text-2` at the top ("STALE 3m12s: last known values, last message 12:01:19Z") so it never reads as an inactive book; grey italics alone are not the cue. No tracker limits exist yet, so no limit colouring (Open questions).
 - **Alert ticker.** Newest first, one line per alert: UTC time, chip, `text` verbatim. Level changes only, so it can look empty on a healthy board: the panel status reads "none since connect 11:52:07Z" (event subject, no WAITING chip).
-- **Blotter row.** Row kinds: `CROSS` (first-class: buy book to sell book, qty, reference price, `px_policy_id`), `ORDER` (book 0 netting parent), `alloc` (book N). An `alloc` row is an `ExecutionReport` with `allocation = true` and shows its own `book_cum_qty_e2`, never the parent's cumulative (ADR-014 Amendment 1 s3). A CROSS links to its residual ORDER by `netting_cycle_id` together with the instrument id, never by the cycle id alone, because one cycle nets many instruments (ADR-014 Amendment 1 s4); `DIRECT` is a directed transfer with no parent. Allocation rows are indented `--space-4` under their parent, which has a `▾` / `▸` toggle. Order status (`NEW`, `PARTIALLY_FILLED`, `FILLED`, `CANCELED`, `REJECTED`, `PENDING_CANCEL`, `PENDING_REPLACE`) is plain neutral text; `REJECTED` and the `PENDING_*` pair carry the shape cues `✕` and `◇`, never a hue. List is virtualized with fixed row height; never more than a viewport of rows in the DOM.
+- **Blotter row.** Row kinds: `CROSS` (first-class: buy book to sell book, qty, reference price, `px_policy_id`), `ORDER` (book 0 netting parent), `ALLOC` (book N). An `ALLOC` row is an `ExecutionReport` with `allocation = true` and shows its own `book_cum_qty_e2`, never the parent's cumulative (ADR-014 Amendment 1 s3). A CROSS links to its residual ORDER by `netting_cycle_id` together with the instrument id, never by the cycle id alone, because one cycle nets many instruments (ADR-014 Amendment 1 s4); `DIRECT` is a directed transfer with no parent. Allocation rows are indented `--space-4` under their parent, which has a `▾` / `▸` toggle. Order status is neutral text with a distinct shape glyph in front of every value, never a hue: `+ NEW`, `◐ PARTIALLY_FILLED`, `✓ FILLED`, `∅ CANCELED`, `✕ REJECTED`, `◇ PENDING_CANCEL`, `◈ PENDING_REPLACE`. The kind column reads `ORDER`, `ALLOC`, `CROSS` (one casing). List is virtualized with fixed row height; never more than a viewport of rows in the DOM.
+- **Blotter filters.** A row above the table: Kind, Book, Instrument and Status selects built from the values in the ring (the current choice is always kept as an option), and a case-insensitive ClOrdID / CrossId text field. Filters AND together and apply row by row: an `ALLOC` row inherits its parent order's status for the Status filter, a `CROSS` matches a Book filter on either side and has no status, so any Status filter drops it. A collapsed parent hides its allocations only while the parent row is itself shown. Changing a filter returns to the top and clears the pause-scroll hold; rows the filter hides never count toward "N new, resume". Filter state is per mount: switching screens resets it. Clear and "N rows match" appear while a filter is active.
 - **Banner.** Disconnected banner and the git_sha mismatch strip: `--surface-2`, `--border-strong`, glyph + sentence. The mismatch strip uses the WARN cue.
 
 ## Accessibility
 
 - Contrast: all text at or above 4.5:1 in both themes (tables above). Non-text outlines at or above 3:1 (`--border-strong`).
 - State is never colour-only (matrix above). Glyphs are `aria-hidden`; labels are text.
+- Screens are a WAI-ARIA tablist (`role="tablist"`, `aria-selected`, `aria-controls`, one tab stop with arrow keys, Home and End moving between tabs) over one `role="tabpanel"`.
 - Status changes of the connection are announced through a polite live region; individual value changes are not.
-- `prefers-color-scheme` does not override the dark default; theme is `data-theme="dark" | "light"` on the root element. Where the toggle lives is Slice 1.
+- `prefers-color-scheme` does not override the dark default; theme is `data-theme="dark" | "light"` on the root element. The toggle is the shell bar's theme button; the choice is remembered per browser in `localStorage` (a convenience: blocked storage falls back to dark).
 - Respect `prefers-reduced-motion`: there is no animation to remove.
 
 ## Wireframes
 
-Illustrative values only (limits use the demo defaults in `delta-one/d1.toml`: vega warn 50k / hard 100k ccy per vol point, gamma warn 20k / hard 50k dDelta per 1%, rho warn 10k / hard 25k ccy per bp). Glyph key: `●` OK, `▲` WARN, `✕` HARD / rejected, `■` halted, `◔` stale, `○` waiting, `⊘` disconnected, `┈` dotted placeholder, `–` missing value. The shell bar is shared by all four screens; `[ ]` marks the active tab.
+Illustrative values only. Where a wireframe differs from the shipped layout, the rules above win: tabs read Risk, Tracker, Blotter, Health; the shell bar also carries the data roll-up chip; the Books and Target panels are stacked full width (side by side they cannot show their columns at 1280 px); filters are a row inside the blotter panel and the event counts sit beside them (limits use the demo defaults in `delta-one/d1.toml`: vega warn 50k / hard 100k ccy per vol point, gamma warn 20k / hard 50k dDelta per 1%, rho warn 10k / hard 25k ccy per bp). Glyph key: `●` OK, `▲` WARN, `✕` HARD / rejected, `■` halted, `◔` stale, `○` waiting, `⊘` disconnected, `┈` dotted placeholder, `–` missing value. The shell bar is shared by all four screens; `[ ]` marks the active tab.
 
 ### 1. Risk board
 
@@ -317,3 +323,5 @@ Questions 1, 2, 3 and 5 were open when this file was written, before the backend
 4. **No tracker limits exist** (`d1.toml [tracker]` has none; ADR-010 defines none), but `ui/CLAUDE.md` asks for "limit coloring" on TE, TD and cash drag. The cards stay neutral until a limit source exists.
 5. **The `d1.health` detail keys** are named in ADR-014 Amendment 1 s2: `nats`, `fix.session`, `posttrade`, `posttrade.send_failures`, `limits.unattributable_rejects`, `limits.book.<id>.rejects` and `limits.book.<id>.valuation`. There is no lag key and no halted key. The health screen shows "not published yet" for a missing item.
 6. **`ui/CLAUDE.md` lists the tracker scorecard as part of the risk board; the plan for this slice makes it its own screen.** Navigation follows the plan.
+7. **Books and Target stacked.** The wireframe puts them side by side; Books has 13 columns and does not fit in half of 1265 px. Stacked full width is the layout until Books loses columns (model, paths and seed are also on the Health screen) or a wider floor is agreed.
+8. **Arrow-key row selection** (Spacing, Focus) is specified but not built; no finding has asked for it yet.

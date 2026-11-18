@@ -3,23 +3,12 @@
 .tracker {
   margin-top: var(--gutter);
 }
-.tracker-title {
-  margin: 0 0 var(--space-1);
-  font-size: var(--fs-md);
-  font-weight: var(--fw-medium);
-}
-.tracker-title code {
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  font-weight: var(--fw-regular);
-  color: var(--text-3);
-}
 .tgrid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
   gap: var(--gutter);
 }
-.tcard h2 {
+.tcard h3 {
   display: flex;
   align-items: baseline;
   gap: var(--space-1);

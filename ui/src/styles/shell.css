@@ -1,5 +1,8 @@
-/* Shell styles for Slice 1: state chip, bar, banner, subject table. Tokens only (DESIGN.md); no literal colours. */
+/* Shell styles: bar and tabs, state chip, banner, subject table. Tokens only (DESIGN.md); no literal colours. */
 .bar {
+  position: sticky;
+  top: 0;
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: var(--space-4);
@@ -8,8 +11,53 @@
   background: var(--surface-1);
   border-bottom: var(--border-w) solid var(--border);
 }
-.bar-conn {
+.bar-name {
+  margin: 0;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-medium);
+}
+.tabs {
+  display: flex;
+  align-self: stretch;
+}
+.tab {
+  height: 100%;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-bottom: var(--space-half) solid transparent;
+  background: none;
+  color: var(--text-2);
+  font: inherit;
+  cursor: pointer;
+}
+.tab:hover {
+  background: var(--row-hover);
+}
+.tab[aria-selected="true"] {
+  color: var(--text);
+  border-bottom-color: var(--text);
+}
+.bar-trust {
   margin-left: auto;
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+}
+.bar-clock {
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+}
+.bar-theme {
+  padding: var(--space-half) var(--space-2);
+  border: var(--border-w) solid var(--border-strong);
+  border-radius: var(--radius);
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.bar-theme:hover {
+  background: var(--row-hover);
 }
 
 .banner {

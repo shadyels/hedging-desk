@@ -30,7 +30,7 @@ export function AlertTicker({ now }: { now: number }) {
       <PanelHead
         id="p-alerts"
         title="Limit alerts"
-        note={<code>d1.alerts.limits</code>}
+        hint="d1.alerts.limits: sent on level change only, no hysteresis"
         fresh={fresh}
         ageLabel="last event"
         event
@@ -55,8 +55,7 @@ export function AlertTicker({ now }: { now: number }) {
         </ul>
       )}
       <p className="foot">
-        Newest first, level changes only (no hysteresis). Time is when the UI
-        received the alert. Text is shown as published.
+        Newest first. Time is when the UI received the alert.
       </p>
     </section>
   );

@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { freshness, type Freshness } from "../bus/freshness";
 import { SUBJECTS } from "../bus/subjects";
 import { WireText } from "../components/WireText";
+import { XScroll } from "../components/XScroll";
 import { MISSING, formatE9, formatQtyE2 } from "../format";
 import type {
   RiskSnapshot_LimitLevel,
@@ -141,7 +142,7 @@ export function FirmTable({ now }: { now: number }) {
       <PanelHead
         id="p-firm"
         title="Firm net Greeks by underlying"
-        note={<code>d1.risk.firm</code>}
+        hint="d1.risk.firm: levels and caps come from Delta One (ADR-014 Amendment 1 s1)"
         fresh={fresh}
       />
       {snap === null ? (
@@ -152,46 +153,52 @@ export function FirmTable({ now }: { now: number }) {
           accepted EXO line, a non-zero firm position or a non-OK limit level.
         </p>
       ) : (
-        <table className="grid" aria-labelledby="p-firm">
-          <thead>
-            <tr>
-              <th scope="col">Underlying</th>
-              <th scope="col" className="r">
-                Delta qty
-              </th>
-              <th scope="col" className="r">
-                Notional ccy
-              </th>
-              <th scope="col" className="r">
-                Vega ccy/vol pt
-              </th>
-              <th scope="col" className="r">
-                Gamma dDelta/1%
-              </th>
-              <th scope="col" className="r">
-                Rho ccy/bp
-              </th>
-              <th scope="col" className="r">
-                Theta ccy/day
-              </th>
-              <th scope="col" className="r">
-                Div sens ccy/1%
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((g) => (
-              <Row key={g.underlying?.instrumentId ?? 0} g={g} fresh={fresh} />
-            ))}
-          </tbody>
-        </table>
+        <XScroll label="Firm net Greeks table">
+          <table className="grid" aria-labelledby="p-firm">
+            <thead>
+              <tr>
+                <th scope="col">Underlying</th>
+                <th scope="col" className="r">
+                  Delta qty
+                </th>
+                <th scope="col" className="r">
+                  Notional ccy
+                </th>
+                <th scope="col" className="r">
+                  Vega ccy/vol pt
+                </th>
+                <th scope="col" className="r">
+                  Gamma dDelta/1%
+                </th>
+                <th scope="col" className="r">
+                  Rho ccy/bp
+                </th>
+                <th scope="col" className="r">
+                  Theta ccy/day
+                </th>
+                <th scope="col" className="r">
+                  Div sens ccy/1%
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((g) => (
+                <Row
+                  key={g.underlying?.instrumentId ?? 0}
+                  g={g}
+                  fresh={fresh}
+                />
+              ))}
+            </tbody>
+          </table>
+        </XScroll>
       )}
-      <p className="foot">
-        Delta has no limit (ADR-014 s3): it is hedged against EXO targets, see
-        the target panel for each book&apos;s band. Theta and div sens are
-        monitored, no limit. Bar = |value| / hard limit, tick = warn, » = beyond
-        hard. * = MC std error above config max. Chip levels come from Delta
-        One.
+      <p
+        className="foot"
+        title="Delta has no limit (ADR-014 s3): it is hedged against EXO targets, see the target panel. Theta and div sens are monitored with no limit. * = greeks_flagged."
+      >
+        Bar = |value| / hard limit, tick = warn, » = beyond hard. * = MC std
+        error above config max. Delta, theta and div sens have no limit.
       </p>
     </section>
   );

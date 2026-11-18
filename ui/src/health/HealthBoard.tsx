@@ -3,6 +3,7 @@ import { freshness } from "../bus/freshness";
 import { SUBJECTS } from "../bus/subjects";
 import { StateChip } from "../components/StateChip";
 import { WireText } from "../components/WireText";
+import { XScroll } from "../components/XScroll";
 import { MISSING, formatFixed, formatUtcTime } from "../format";
 import { PanelHead, WaitingBody } from "../risk/parts";
 import { asValuation } from "../risk/model";
@@ -129,21 +130,24 @@ function OtherKeys({ pairs }: { pairs: readonly Pair[] }) {
   if (pairs.length === 0) return null;
   return (
     <>
-      <h3 className="sub">Other detail keys (not in the contract)</h3>
-      <table className="grid" aria-label="Other detail keys">
-        <tbody>
-          {pairs.map(([k, v], i) => (
-            <tr key={i}>
-              <th scope="row">
-                <WireText value={k} />
-              </th>
-              <td>
-                <WireText value={v} />
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <h4 className="sub">Other detail keys (not in the contract)</h4>
+      <XScroll label="Other detail keys table">
+        {" "}
+        <table className="grid" aria-label="Other detail keys">
+          <tbody>
+            {pairs.map(([k, v], i) => (
+              <tr key={i}>
+                <th scope="row">
+                  <WireText value={k} />
+                </th>
+                <td>
+                  <WireText value={v} />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </XScroll>
     </>
   );
 }
@@ -170,7 +174,7 @@ function D1Panels({ now }: { now: number }) {
         <PanelHead
           id="p-d1"
           title="Delta One"
-          note={<code>d1.health</code>}
+          hint="d1.health: detail keys per ADR-014 Amendment 1 s2"
           fresh={fresh}
           ageLabel="heartbeat"
         />
@@ -178,60 +182,68 @@ function D1Panels({ now }: { now: number }) {
           <WaitingBody what={<code>d1.health</code>} />
         ) : (
           <>
-            <table className="grid" aria-labelledby="p-d1">
-              <thead>
-                <tr>
-                  <th scope="col">Check</th>
-                  <th scope="col">State</th>
-                  <th scope="col">Published</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <th scope="row">Overall</th>
-                  <td>
-                    <CueView cue={okCue(h.ok)} />
-                  </td>
-                  <td>
-                    <code>ok</code> = {h.ok ? "true" : "false"}, component{" "}
-                    <WireText value={h.component} />
-                  </td>
-                </tr>
-                <TokenRow label="NATS" field="nats" kind="nats" raw={h.nats} />
-                <TokenRow
-                  label="FIX session"
-                  field="fix.session"
-                  kind="fix"
-                  raw={h.fix}
-                />
-                <TokenRow
-                  label="Post-trade"
-                  field="posttrade"
-                  kind="posttrade"
-                  raw={h.posttrade}
-                />
-                {h.posttrade === "disabled" ? null : (
-                  <CounterRow
-                    label="Post-trade send failures"
-                    field="posttrade.send_failures"
-                    raw={h.sendFailures}
+            <XScroll label="Delta One checks table">
+              {" "}
+              <table className="grid" aria-labelledby="p-d1">
+                <thead>
+                  <tr>
+                    <th scope="col">Check</th>
+                    <th scope="col">State</th>
+                    <th scope="col">Published</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <th scope="row">Overall</th>
+                    <td>
+                      <CueView cue={okCue(h.ok)} />
+                    </td>
+                    <td>
+                      <code>ok</code> = {h.ok ? "true" : "false"}, component{" "}
+                      <WireText value={h.component} />
+                    </td>
+                  </tr>
+                  <TokenRow
+                    label="NATS"
+                    field="nats"
+                    kind="nats"
+                    raw={h.nats}
                   />
-                )}
-                <CounterRow
-                  label="Unattributable rejects"
-                  field="limits.unattributable_rejects"
-                  raw={h.unattributable}
-                />
-              </tbody>
-            </table>
+                  <TokenRow
+                    label="FIX session"
+                    field="fix.session"
+                    kind="fix"
+                    raw={h.fix}
+                  />
+                  <TokenRow
+                    label="Post-trade"
+                    field="posttrade"
+                    kind="posttrade"
+                    raw={h.posttrade}
+                  />
+                  {h.posttrade === "disabled" ? null : (
+                    <CounterRow
+                      label="Post-trade send failures"
+                      field="posttrade.send_failures"
+                      raw={h.sendFailures}
+                    />
+                  )}
+                  <CounterRow
+                    label="Unattributable rejects"
+                    field="limits.unattributable_rejects"
+                    raw={h.unattributable}
+                  />
+                </tbody>
+              </table>
+            </XScroll>
             <OtherKeys pairs={h.other} />
           </>
         )}
-        <p className="foot">
-          ok is true only when the FIX session is logged on and post-trade is
-          disabled or running. Limit levels never change it (ADR-014 A1 s2).
-          There is no halted or kill-switch field on d1.health: that state
-          arrives with the P3.M2 commands.
+        <p
+          className="foot"
+          title="ok is true only when the FIX session is logged on and post-trade is disabled or running. Limit levels never change it (ADR-014 A1 s2). d1.health has no halted or kill-switch field: that state arrives with the P3.M2 commands."
+        >
+          Overall is Delta One&apos;s own ok flag.
         </p>
       </section>
 
@@ -243,7 +255,7 @@ function D1Panels({ now }: { now: number }) {
         <PanelHead
           id="p-d1-books"
           title="Books (Delta One view)"
-          note={<code>limits.book.&lt;id&gt;.*</code>}
+          hint="d1.health limits.book.<id>.*: Delta One's view of each book's latest EXO snapshot"
           fresh={fresh}
           ageLabel="heartbeat"
         />
@@ -255,47 +267,49 @@ function D1Panels({ now }: { now: number }) {
             book is configured, or none is published.
           </p>
         ) : (
-          <table className="grid" aria-labelledby="p-d1-books">
-            <thead>
-              <tr>
-                <th scope="col">Book</th>
-                <th scope="col">Valuation</th>
-                <th scope="col">Published</th>
-                <th scope="col" className="r">
-                  Rejects
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {h.books.map((b) => (
-                <tr key={b.id}>
-                  <th scope="row" className="num">
-                    book {b.id}
+          <XScroll label="Delta One books table">
+            {" "}
+            <table className="grid" aria-labelledby="p-d1-books">
+              <thead>
+                <tr>
+                  <th scope="col">Book</th>
+                  <th scope="col">Valuation</th>
+                  <th scope="col">Published</th>
+                  <th scope="col" className="r">
+                    Rejects
                   </th>
-                  <td>
-                    <CueView cue={cueFor("valuation", b.valuation)} />
-                  </td>
-                  <td>
-                    <Raw v={b.valuation} />
-                  </td>
-                  <td className="num r">
-                    {b.rejects === undefined ? (
-                      <span className="na">{MISSING}</span>
-                    ) : (
-                      <U64 raw={b.rejects} />
-                    )}
-                  </td>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {h.books.map((b) => (
+                  <tr key={b.id}>
+                    <th scope="row" className="num">
+                      book {b.id}
+                    </th>
+                    <td>
+                      <CueView cue={cueFor("valuation", b.valuation)} />
+                    </td>
+                    <td>
+                      <Raw v={b.valuation} />
+                    </td>
+                    <td className="num r">
+                      {b.rejects === undefined ? (
+                        <span className="na">{MISSING}</span>
+                      ) : (
+                        <U64 raw={b.rejects} />
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </XScroll>
         )}
-        <p className="foot">
-          Valuation is Delta One&apos;s view of the book&apos;s latest EXO
-          snapshot. NONE = never valued and never rejected, which is normal for
-          a book that has not published; it is not a fault. STALE and INVALID
-          force a WARN on the book&apos;s limits (ADR-014 s3). Book codes are
-          not on the bus.
+        <p
+          className="foot"
+          title="STALE and INVALID force a WARN on the book's limits (ADR-014 s3). Book codes are not on the bus."
+        >
+          NONE = never valued and never rejected: normal, not a fault.
         </p>
       </section>
     </div>
@@ -321,7 +335,7 @@ function ExoPanel({ now }: { now: number }) {
       <PanelHead
         id="p-exo"
         title="EXO"
-        note={<code>exo.health</code>}
+        hint="exo.health: detail keys per ADR-014 s12"
         fresh={fresh}
         ageLabel="heartbeat"
       />
@@ -329,148 +343,157 @@ function ExoPanel({ now }: { now: number }) {
         <WaitingBody what={<code>exo.health</code>} />
       ) : (
         <>
-          <table className="grid" aria-labelledby="p-exo">
-            <thead>
-              <tr>
-                <th scope="col">Check</th>
-                <th scope="col">State</th>
-                <th scope="col">Published</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <th scope="row">Overall</th>
-                <td>
-                  <CueView cue={okCue(h.ok)} />
-                </td>
-                <td>
-                  <code>ok</code> = {h.ok ? "true" : "false"}, component{" "}
-                  <WireText value={h.component} />
-                </td>
-              </tr>
-              <tr>
-                <th scope="row">git_sha</th>
-                <td>
-                  <span className="ntag">VERSION</span>
-                </td>
-                <td>
-                  <code>git_sha</code> = <Raw v={h.gitSha} />
-                </td>
-              </tr>
-              <TokenRow label="NATS" field="nats" kind="nats" raw={h.nats} />
-              <TokenRow
-                label="Publishing"
-                field="publish"
-                kind="publish"
-                raw={h.publish}
-              />
-              <TokenRow
-                label="Valuation"
-                field="valuation_in_flight"
-                kind="inFlight"
-                raw={h.inFlight}
-              />
-              <CounterRow
-                label="Rejected inbound"
-                field="rejected_total"
-                raw={h.rejectedTotal}
-              />
-              {h.fatal === undefined ? null : (
+          <XScroll label="EXO checks table">
+            {" "}
+            <table className="grid" aria-labelledby="p-exo">
+              <thead>
                 <tr>
-                  <th scope="row">Fatal</th>
+                  <th scope="col">Check</th>
+                  <th scope="col">State</th>
+                  <th scope="col">Published</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row">Overall</th>
                   <td>
-                    <CueView cue={okCue(false)} />
+                    <CueView cue={okCue(h.ok)} />
                   </td>
                   <td>
-                    <code>fatal</code> = <WireText value={h.fatal} />
+                    <code>ok</code> = {h.ok ? "true" : "false"}, component{" "}
+                    <WireText value={h.component} />
                   </td>
                 </tr>
-              )}
-            </tbody>
-          </table>
+                <tr>
+                  <th scope="row">git_sha</th>
+                  <td>
+                    <span className="ntag">VERSION</span>
+                  </td>
+                  <td>
+                    <code>git_sha</code> = <Raw v={h.gitSha} />
+                  </td>
+                </tr>
+                <TokenRow label="NATS" field="nats" kind="nats" raw={h.nats} />
+                <TokenRow
+                  label="Publishing"
+                  field="publish"
+                  kind="publish"
+                  raw={h.publish}
+                />
+                <TokenRow
+                  label="Valuation"
+                  field="valuation_in_flight"
+                  kind="inFlight"
+                  raw={h.inFlight}
+                />
+                <CounterRow
+                  label="Rejected inbound"
+                  field="rejected_total"
+                  raw={h.rejectedTotal}
+                />
+                {h.fatal === undefined ? null : (
+                  <tr>
+                    <th scope="row">Fatal</th>
+                    <td>
+                      <CueView cue={okCue(false)} />
+                    </td>
+                    <td>
+                      <code>fatal</code> = <WireText value={h.fatal} />
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </XScroll>
 
-          <h3 className="sub">Book state (EXO)</h3>
+          <h4 className="sub">Book state (EXO)</h4>
           {h.books.length === 0 ? (
             <p className="empty">
               exo.health carries no <code>book.&lt;id&gt;.*</code> keys.
             </p>
           ) : (
-            <table className="grid" aria-label="EXO book state">
-              <thead>
-                <tr>
-                  <th scope="col">Book</th>
-                  <th scope="col">State</th>
-                  <th scope="col">Published</th>
-                  <th scope="col">Last valuation</th>
-                  <th scope="col">Last error</th>
-                </tr>
-              </thead>
-              <tbody>
-                {h.books.map((b) => (
-                  <tr key={b.id}>
-                    <th scope="row" className="num">
-                      book {b.id}
-                    </th>
-                    <td>
-                      <CueView cue={cueFor("exoBook", b.state)} />
-                    </td>
-                    <td>
-                      <Raw v={b.state} />
-                    </td>
-                    <td>
-                      <NsTimeText raw={b.lastValuationNs} />
-                    </td>
-                    <td>
-                      <Raw v={b.lastError} />
-                    </td>
+            <XScroll label="EXO book state table">
+              {" "}
+              <table className="grid" aria-label="EXO book state">
+                <thead>
+                  <tr>
+                    <th scope="col">Book</th>
+                    <th scope="col">State</th>
+                    <th scope="col">Published</th>
+                    <th scope="col">Last valuation</th>
+                    <th scope="col">Last error</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {h.books.map((b) => (
+                    <tr key={b.id}>
+                      <th scope="row" className="num">
+                        book {b.id}
+                      </th>
+                      <td>
+                        <CueView cue={cueFor("exoBook", b.state)} />
+                      </td>
+                      <td>
+                        <Raw v={b.state} />
+                      </td>
+                      <td>
+                        <NsTimeText raw={b.lastValuationNs} />
+                      </td>
+                      <td>
+                        <Raw v={b.lastError} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </XScroll>
           )}
 
-          <h3 className="sub">Limit levels reported by EXO</h3>
+          <h4 className="sub">Limit levels reported by EXO</h4>
           {h.limits.length === 0 ? (
             <p className="empty">
               No <code>limit.*</code> keys: no limit alert is currently raised,
               or EXO has not seen one. An absent key means OK or unknown.
             </p>
           ) : (
-            <table className="grid" aria-label="EXO limit levels">
-              <thead>
-                <tr>
-                  <th scope="col">Instrument id</th>
-                  <th scope="col">Greek</th>
-                  <th scope="col">Level</th>
-                  <th scope="col">Published</th>
-                </tr>
-              </thead>
-              <tbody>
-                {h.limits.map((l) => (
-                  <tr key={`${l.instrumentId}.${l.greek}`}>
-                    <th scope="row" className="num">
-                      {l.instrumentId}
-                    </th>
-                    <td>{l.greek}</td>
-                    <td>
-                      <CueView cue={cueFor("limit", l.level)} />
-                    </td>
-                    <td>
-                      <WireText value={l.level} />
-                    </td>
+            <XScroll label="EXO limit levels table">
+              {" "}
+              <table className="grid" aria-label="EXO limit levels">
+                <thead>
+                  <tr>
+                    <th scope="col">Instrument id</th>
+                    <th scope="col">Greek</th>
+                    <th scope="col">Level</th>
+                    <th scope="col">Published</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {h.limits.map((l) => (
+                    <tr key={`${l.instrumentId}.${l.greek}`}>
+                      <th scope="row" className="num">
+                        {l.instrumentId}
+                      </th>
+                      <td>{l.greek}</td>
+                      <td>
+                        <CueView cue={cueFor("limit", l.level)} />
+                      </td>
+                      <td>
+                        <WireText value={l.level} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </XScroll>
           )}
           <OtherKeys pairs={h.other} />
         </>
       )}
-      <p className="foot">
-        ok is false when EXO is disconnected, refusing to publish, has a book
-        halted, or a book&apos;s latest valuation failed (ADR-014 s12). Limit
-        levels here are EXO&apos;s copy of the latest non-cleared alert; the
-        limit source is d1.alerts.limits.
+      <p
+        className="foot"
+        title="ok is false when EXO is disconnected, refusing to publish, has a book halted, or a book's latest valuation failed (ADR-014 s12). The limit source is d1.alerts.limits."
+      >
+        Limit levels here are EXO&apos;s copy of the latest non-cleared alert.
       </p>
     </section>
   );
@@ -541,11 +564,7 @@ function MetadataPanel({ now }: { now: number }) {
       <PanelHead
         id="p-meta"
         title="Valuation metadata"
-        note={
-          <>
-            <code>exo.valuations.&lt;book&gt;</code> (root invariant 7)
-          </>
-        }
+        hint="exo.valuations.<book>: model, params, seed, n_paths and git_sha make a number reproducible (root invariant 7)"
         fresh={fresh}
       />
       {rows.length === 0 ? (
@@ -553,71 +572,74 @@ function MetadataPanel({ now }: { now: number }) {
       ) : (
         <>
           {strip}
-          <table className="grid" aria-labelledby="p-meta">
-            <thead>
-              <tr>
-                <th scope="col">Book</th>
-                <th scope="col">Model</th>
-                <th scope="col" className="r">
-                  Seed
-                </th>
-                <th scope="col" className="r">
-                  n_paths
-                </th>
-                <th scope="col">git_sha</th>
-                <th scope="col">params_hash</th>
-                <th scope="col">As of (UTC)</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map(({ v, e }, i) => {
-                const f = freshness(SUBJECTS.valuations, e, conn, now);
-                const m = v.valuation;
-                return (
-                  <tr key={i} data-fresh={staleAttr(f.state)}>
-                    <th scope="row" className="num">
-                      book {v.bookId}
-                    </th>
-                    {m === undefined ? (
-                      <td colSpan={6}>
-                        <StateChip state="hard" label="NO METADATA" /> this
-                        valuation carries no ValuationMeta, so it is not
-                        reproducible
-                      </td>
-                    ) : (
-                      <>
-                        <td>
-                          <Raw v={m.modelId === "" ? undefined : m.modelId} />
+          <XScroll label="Valuation metadata table">
+            {" "}
+            <table className="grid" aria-labelledby="p-meta">
+              <thead>
+                <tr>
+                  <th scope="col">Book</th>
+                  <th scope="col">Model</th>
+                  <th scope="col" className="r">
+                    Seed
+                  </th>
+                  <th scope="col" className="r">
+                    n_paths
+                  </th>
+                  <th scope="col">git_sha</th>
+                  <th scope="col">params_hash</th>
+                  <th scope="col">As of (UTC)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map(({ v, e }, i) => {
+                  const f = freshness(SUBJECTS.valuations, e, conn, now);
+                  const m = v.valuation;
+                  return (
+                    <tr key={i} data-fresh={staleAttr(f.state)}>
+                      <th scope="row" className="num">
+                        book {v.bookId}
+                      </th>
+                      {m === undefined ? (
+                        <td colSpan={6}>
+                          <StateChip state="hard" label="NO METADATA" /> this
+                          valuation carries no ValuationMeta, so it is not
+                          reproducible
                         </td>
-                        <td className="num r">{m.seed.toString()}</td>
-                        <td className="num r">
-                          {formatFixed(BigInt(m.nPaths), 0, 0)}
-                        </td>
-                        <td>
-                          <Raw v={m.gitSha === "" ? undefined : m.gitSha} />
-                        </td>
-                        <td className="hash">
-                          <Raw
-                            v={m.paramsHash === "" ? undefined : m.paramsHash}
-                          />
-                        </td>
-                        <td>
-                          <NsTime ns={v.asOfNs} />
-                        </td>
-                      </>
-                    )}
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                      ) : (
+                        <>
+                          <td>
+                            <Raw v={m.modelId === "" ? undefined : m.modelId} />
+                          </td>
+                          <td className="num r">{m.seed.toString()}</td>
+                          <td className="num r">
+                            {formatFixed(BigInt(m.nPaths), 0, 0)}
+                          </td>
+                          <td>
+                            <Raw v={m.gitSha === "" ? undefined : m.gitSha} />
+                          </td>
+                          <td className="hash">
+                            <Raw
+                              v={m.paramsHash === "" ? undefined : m.paramsHash}
+                            />
+                          </td>
+                          <td>
+                            <NsTime ns={v.asOfNs} />
+                          </td>
+                        </>
+                      )}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </XScroll>
         </>
       )}
-      <p className="foot">
-        git_sha compares exo.health with every book&apos;s valuation, verbatim
-        (&quot;-dirty&quot; included). d1.risk.firm carries no git_sha, so Delta
-        One is not part of this check. A mismatch can be transient around an EXO
-        restart on a new commit, until each book is revalued.
+      <p
+        className="foot"
+        title="d1.risk.firm carries no git_sha, so Delta One is not part of this check. A mismatch can be transient around an EXO restart on a new commit, until each book is revalued."
+      >
+        git_sha is compared verbatim, &quot;-dirty&quot; included.
       </p>
     </section>
   );

@@ -272,14 +272,156 @@ const STATUS: Partial<Record<OrdStatus, string>> = {
 export const statusLabel = (s: OrdStatus): string =>
   STATUS[s] ?? (s === OrdStatus.ORD_STATUS_UNSPECIFIED ? MISSING : "UNKNOWN");
 
-/** Shape cue only, never a hue (DESIGN.md "Blotter row"). */
-export const statusGlyph = (s: OrdStatus): string =>
-  s === OrdStatus.ORD_STATUS_REJECTED
-    ? "✕"
-    : s === OrdStatus.ORD_STATUS_PENDING_CANCEL ||
-        s === OrdStatus.ORD_STATUS_PENDING_REPLACE
-      ? "◇"
-      : "";
+/** Shape cue only, never a hue (DESIGN.md "Blotter row"). One distinct glyph per status; the label is always beside it. */
+const GLYPH: Partial<Record<OrdStatus, string>> = {
+  [OrdStatus.ORD_STATUS_NEW]: "+",
+  [OrdStatus.ORD_STATUS_PARTIALLY_FILLED]: "◐",
+  [OrdStatus.ORD_STATUS_FILLED]: "✓",
+  [OrdStatus.ORD_STATUS_CANCELED]: "∅",
+  [OrdStatus.ORD_STATUS_REJECTED]: "✕",
+  [OrdStatus.ORD_STATUS_PENDING_CANCEL]: "◇",
+  [OrdStatus.ORD_STATUS_PENDING_REPLACE]: "◈",
+};
+export const statusGlyph = (s: OrdStatus): string => GLYPH[s] ?? "";
+
+/** Status labels in OrdStatus enum order, for the filter select. */
+export const STATUS_LABELS: readonly string[] = Object.values(STATUS).filter(
+  (l): l is string => l !== undefined,
+);
 
 export const sideLabel = (s: Side): string =>
   s === Side.SIDE_BUY ? "BUY" : s === Side.SIDE_SELL ? "SELL" : MISSING;
+
+// ---- Filters -----------------------------------------------------------------------------------
+// Pure predicates over one display row. "" = no constraint on that field. Rows are tested one by one: an allocation
+// inherits its parent order's status (it shows none of its own), a cross has no status so any status filter drops it.
+
+export const KINDS = ["ORDER", "ALLOC", "CROSS"] as const;
+export type KindLabel = (typeof KINDS)[number];
+export const kindLabel = (r: FlatRow): KindLabel =>
+  r.kind === "order" ? "ORDER" : r.kind === "alloc" ? "ALLOC" : "CROSS";
+
+export interface BlotterFilter {
+  kind: "" | KindLabel;
+  /** Book id as text ("0" = the firm netting parent). */
+  book: string;
+  /** Symbol, or the instrument id when the symbol is empty. */
+  instrument: string;
+  /** A statusLabel(), e.g. "FILLED". */
+  status: string;
+  /** Case-insensitive substring of the ClOrdID (orders, allocations) or CrossId (crosses). */
+  text: string;
+}
+export const NO_FILTER: BlotterFilter = {
+  kind: "",
+  book: "",
+  instrument: "",
+  status: "",
+  text: "",
+};
+export const isFiltered = (f: BlotterFilter): boolean =>
+  Object.values(f).some((v) => v !== "");
+
+export const instrumentLabel = (i: InstrumentRef | undefined): string =>
+  i ? i.symbol || String(i.instrumentId) : "";
+
+/** Every book a row touches: a cross connects two. */
+export const rowBooks = (r: FlatRow): number[] =>
+  r.kind === "cross" ? [r.buyBookId, r.sellBookId] : [r.bookId];
+
+export const matchKind = (r: FlatRow, kind: string): boolean =>
+  kind === "" || kindLabel(r) === kind;
+export const matchBook = (r: FlatRow, book: string): boolean =>
+  book === "" || rowBooks(r).some((b) => String(b) === book);
+export const matchInstrument = (r: FlatRow, instrument: string): boolean =>
+  instrument === "" || instrumentLabel(r.instrument) === instrument;
+/** `status` is the row's own, or the parent's for an allocation; undefined for a cross. */
+export const matchStatus = (
+  status: OrdStatus | undefined,
+  want: string,
+): boolean =>
+  want === "" || (status !== undefined && statusLabel(status) === want);
+export const matchText = (r: FlatRow, text: string): boolean => {
+  const q = text.trim().toLowerCase();
+  if (q === "") return true;
+  const id = r.kind === "cross" ? r.crossId : r.clOrdId;
+  return id.toLowerCase().includes(q);
+};
+
+export function rowMatches(
+  r: FlatRow,
+  parentStatus: OrdStatus | undefined,
+  f: BlotterFilter,
+): boolean {
+  const status =
+    r.kind === "order"
+      ? r.status
+      : r.kind === "alloc"
+        ? parentStatus
+        : undefined;
+  return (
+    matchKind(r, f.kind) &&
+    matchBook(r, f.book) &&
+    matchInstrument(r, f.instrument) &&
+    matchStatus(status, f.status) &&
+    matchText(r, f.text)
+  );
+}
+
+/**
+ * `flatten` with a filter. Each row stands on its own, so an allocation can show without its parent. Collapse only
+ * hides allocations under a parent that is itself shown (otherwise nothing could expand them again).
+ */
+export function flattenFiltered(
+  items: readonly TopRow[],
+  collapsed: ReadonlySet<string>,
+  f: BlotterFilter,
+): FlatRow[] {
+  if (!isFiltered(f)) return flatten(items, collapsed);
+  const out: FlatRow[] = [];
+  for (const it of items) {
+    const parentShown = rowMatches(it, undefined, f);
+    if (parentShown) out.push(it);
+    if (it.kind !== "order") continue;
+    if (parentShown && collapsed.has(it.key)) continue;
+    for (const a of it.allocs) if (rowMatches(a, it.status, f)) out.push(a);
+  }
+  return out;
+}
+
+export interface FilterOptions {
+  books: number[];
+  instruments: string[];
+  statuses: string[];
+}
+
+/** The values present in the ring, so every option selects something. Always includes the current choice. */
+export function filterOptions(
+  items: readonly TopRow[],
+  current: BlotterFilter = NO_FILTER,
+): FilterOptions {
+  const books = new Set<number>();
+  const instruments = new Set<string>();
+  const statuses = new Set<string>();
+  for (const it of items) {
+    for (const b of rowBooks(it)) books.add(b);
+    instruments.add(instrumentLabel(it.instrument));
+    if (it.kind === "order") {
+      statuses.add(statusLabel(it.status));
+      for (const a of it.allocs) books.add(a.bookId);
+    }
+  }
+  if (current.book !== "") books.add(Number(current.book));
+  if (current.instrument !== "") instruments.add(current.instrument);
+  if (current.status !== "") statuses.add(current.status);
+  instruments.delete("");
+  const order = new Map(STATUS_LABELS.map((l, i) => [l, i]));
+  return {
+    books: [...books].sort((a, b) => a - b),
+    instruments: [...instruments].sort(),
+    statuses: [...statuses].sort(
+      (a, b) =>
+        (order.get(a) ?? 99) - (order.get(b) ?? 99) || a.localeCompare(b),
+    ),
+  };
+}

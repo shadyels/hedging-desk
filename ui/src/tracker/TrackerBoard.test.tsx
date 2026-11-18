@@ -5,7 +5,7 @@ import { TrackerAnalytics, TrackerAnalytics_Kind } from "../gen/live";
 import { busSink, flushBus, resetBus } from "../store";
 import { ink, loadCss, token } from "../testCss";
 import { useNow } from "../useNow";
-import { PRICE_ONLY_NOTE } from "./model";
+import { PRICE_ONLY_NOTE, PRICE_ONLY_SHORT } from "./model";
 import { TrackerBoard } from "./TrackerBoard";
 
 let seq = 0;
@@ -87,11 +87,19 @@ describe("tracker scorecard", () => {
     expect(c).toContain("38.2 bps");
     expect(c).toContain("−12.4 bps");
     expect(c).toContain("0.80 %");
-    expect(c).toContain("n_obs 250");
-    expect(c).toContain("sampling_interval_s 60");
+    expect(c).toContain("250 obs");
+    expect(c).toContain("every 60 s");
+    expect(cards[1]?.querySelector('[title="n_obs"]')).not.toBeNull();
+    expect(
+      cards[1]?.querySelector('[title="sampling_interval_s"]'),
+    ).not.toBeNull();
     expect(c).toContain("window 4m00s");
     expect(c).toContain("DEMO");
-    expect(c).toContain(PRICE_ONLY_NOTE);
+    expect(c).toContain(PRICE_ONLY_SHORT);
+    expect(c).not.toContain("ADR-010"); // the citation is a tooltip
+    expect(cards[1]?.querySelector(".tnote")?.getAttribute("title")).toBe(
+      PRICE_ONLY_NOTE,
+    );
     expect(c).toContain("updated 0s ago");
     expect(cards[1]?.querySelector("svg[role=img]")).not.toBeNull();
   });
