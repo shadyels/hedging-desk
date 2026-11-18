@@ -265,9 +265,9 @@ One card per tracker book. Left to right: live, stale, waiting.
 │   many instruments; ADR-014 Amendment 1 s4). Status column: residual <ClOrdID> | transfer (DIRECT) | no residual | no link.      │
 │ Status is plain text: no state colour. ✕ and ◇ are shape cues only. Newest first; the list does not auto-scroll while a row is   │
 │   selected.                                                                                                                      │
-│ Empty: status "none since connect 11:52:07Z"  (never "no orders": exec messages are a stream, there is no snapshot to   │
+│ Empty: status "none since connect 11:52:07Z"  (never "no orders": exec messages are a stream, there is no snapshot to            │
 │   prove it)                                                                                                                      │
-│ Before the first d1.exec message: "none since connect 11:52:07Z" as plain text (event subject: no WAITING chip, no clock).      │
+│ Before the first d1.exec message: "none since connect 11:52:07Z" as plain text (event subject: no WAITING chip, no clock).       │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
