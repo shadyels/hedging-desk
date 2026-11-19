@@ -1,0 +1,185 @@
+/* Order and execution blotter (P3.M1 Slice 5). Tokens only. Status is neutral text: no --state-* colour here
+   (colour is reserved for limit and health, DESIGN.md). Row height is --row-h, which BlotterBoard.tsx reads for the virtualizer. */
+.blotter {
+  margin-top: var(--gutter);
+}
+.blotter .panel {
+  position: relative;
+}
+/* Filters left, counts right; wraps below 1280 px rather than clipping. */
+.bl-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-1) var(--space-4);
+  margin-bottom: var(--space-2);
+}
+.bl-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  font-size: var(--fs-sm);
+}
+.bl-filters label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--text-2);
+}
+.bl-filters select,
+.bl-filters input,
+.bl-clear {
+  height: var(--space-6);
+  box-sizing: border-box;
+  padding: 0 var(--space-1);
+  border: var(--border-w) solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+}
+.bl-filters input {
+  width: 18ch;
+}
+.bl-clear {
+  padding: 0 var(--space-2);
+  cursor: pointer;
+}
+.bl-clear:hover {
+  background: var(--surface-3);
+}
+.bl-count {
+  color: var(--text-2);
+}
+.bl-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-4);
+  margin: 0;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+.bl-foot {
+  margin: var(--space-2) 0 0;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+}
+.bl-table {
+  position: relative;
+  font-size: var(--fs-sm);
+  font-family: var(--font-mono);
+  font-variant-numeric: var(--num-variant);
+  font-feature-settings: var(--num-features);
+}
+.bl-cols {
+  display: grid;
+  /* Every column is sized to its longest value: ClOrdID / CrossId 36ch (a cross id is a 36-character UUID; an order's
+     is 20 digits + " (net)"), Status / link 29ch ("residual " + a 20-digit ClOrdID). Detail (the reject reason)
+     takes all the leftover width, so the table fills the panel. The header and every row share this one list; the
+     table is wider than a 1280 px panel, so its .xscroll region scrolls (header and rows together). */
+  grid-template-columns:
+    var(--space-6) 9ch 6ch 36ch 15ch 8ch 5ch 11ch 9ch 29ch 15ch 11ch
+    minmax(8ch, 1fr);
+  align-items: center;
+  column-gap: var(--space-2);
+  padding: 0 var(--row-pad-x);
+  height: var(--row-h);
+  box-sizing: border-box;
+}
+.bl-cols > * {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+/* .c-full cells (a cross's id and its residual link) hold values that must be read whole: no ellipsis. */
+.bl-cols > :not(.c-full) {
+  text-overflow: ellipsis;
+}
+.bl-cols .r {
+  text-align: right;
+}
+.bl-head {
+  overflow: hidden;
+  scrollbar-gutter: stable;
+  background: var(--surface-2);
+  border-bottom: var(--border-w) solid var(--border);
+  color: var(--text-2);
+}
+/* The labels use the small sans face, but the grid itself keeps the table's mono size so every ch track is
+   the same width in the header as in the rows (a header track in 11px sans ch drifted left of its column). */
+.bl-head .bl-cols > * {
+  font-family: var(--font-sans);
+  font-size: var(--fs-xs);
+}
+.bl-scroll {
+  height: calc(var(--row-h) * 20);
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+}
+/* Wider than the panel only when the columns' minimums do not fit: the region then scrolls and takes focus. */
+.xscroll > .bl-table {
+  min-width: min-content;
+}
+.bl-body {
+  position: relative;
+  width: 100%;
+}
+.bl-body .bl-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  border-bottom: var(--border-w) solid var(--border-subtle);
+}
+.bl-body .bl-row:hover {
+  background: var(--row-hover);
+}
+.bl-body .bl-row.is-selected {
+  background: var(--row-selected);
+  box-shadow: inset var(--select-edge) 0 0 var(--text); /* a non-colour cue (DESIGN.md "Spacing") */
+}
+.bl-row[data-kind="alloc"] {
+  color: var(--text-2);
+}
+.c-alloc {
+  padding-left: var(--space-4);
+}
+.c-status,
+.c-detail {
+  color: inherit;
+}
+.c-detail {
+  color: var(--text-2);
+}
+.bl-tog {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--space-5);
+  height: var(--space-5);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-2);
+  font: inherit;
+  cursor: pointer;
+}
+.bl-resume {
+  position: absolute;
+  top: calc(var(--row-h) + var(--space-2));
+  right: var(--space-6);
+  padding: var(--space-1) var(--space-3);
+  border: var(--border-w) solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.bl-resume:hover {
+  background: var(--surface-3);
+}
