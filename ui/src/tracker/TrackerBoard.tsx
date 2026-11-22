@@ -1,0 +1,233 @@
+import { useMemo } from "react";
+import { freshness } from "../bus/freshness";
+import { SUBJECTS } from "../bus/subjects";
+import { Instrument } from "../components/Instrument";
+import {
+  MISSING,
+  formatAge,
+  formatBpsE9,
+  formatPctE9,
+  formatUtcTime,
+} from "../format";
+import type { TrackerAnalytics } from "../gen/live";
+import { benchmarkFor } from "../refdata";
+import { PanelHead, WaitingBody } from "../risk/parts";
+import { useBus, type Entry } from "../store";
+import {
+  DEMO_TITLE,
+  PRICE_ONLY_NOTE,
+  PRICE_ONLY_SHORT,
+  TRACKER_BASIS_IS_DEMO,
+  asTracker,
+  kindLabel,
+  pointsAttr,
+  sparkPoints,
+  teSeries,
+  windowSpanMs,
+} from "./model";
+
+const W = 200;
+const H = 28;
+
+/** TE trend from the bounded ring. 1 px neutral line (DESIGN.md "Sparkline"); the x axis is arrival time. */
+function Sparkline({ ring }: { ring: readonly Entry[] | undefined }) {
+  const s = teSeries(ring);
+  const pts = sparkPoints(s, W, H);
+  const first = s[0];
+  const last = s[s.length - 1];
+  const label =
+    first && last
+      ? `TE, ${s.length} sample${s.length === 1 ? "" : "s"} received ${formatUtcTime(first.t)} to ${formatUtcTime(last.t)}, scaled to its own min and max`
+      : "TE, no samples";
+  return (
+    <div className="spark">
+      <svg
+        className="spark-svg"
+        viewBox={`0 0 ${W} ${H}`}
+        width={W}
+        height={H}
+        role="img"
+        aria-label={label}
+      >
+        {pts.length === 0 ? (
+          <line
+            className="spark-empty"
+            x1="1"
+            x2={W - 1}
+            y1={H / 2}
+            y2={H / 2}
+          />
+        ) : pts.length === 1 ? (
+          <circle className="spark-dot" cx={pts[0]?.x} cy={pts[0]?.y} r="2" />
+        ) : (
+          <polyline className="spark-line" points={pointsAttr(pts)} />
+        )}
+      </svg>
+      <span className="spark-label">
+        TE ·{" "}
+        {first && last
+          ? `${s.length} received ${formatUtcTime(first.t)}–${formatUtcTime(last.t)}`
+          : MISSING}{" "}
+        · own min–max scale
+      </span>
+    </div>
+  );
+}
+
+function Row({
+  label,
+  field,
+  children,
+}: {
+  label: string;
+  field: string;
+  children: string;
+}) {
+  return (
+    <div className="trow">
+      <dt title={field}>{label}</dt>
+      <dd className="num tval">{children}</dd>
+    </div>
+  );
+}
+
+function TrackerCard({
+  id,
+  m,
+  entry,
+  ring,
+  now,
+}: {
+  id: string;
+  m: TrackerAnalytics;
+  entry: Entry;
+  ring: readonly Entry[] | undefined;
+  now: number;
+}) {
+  const conn = useBus((s) => s.conn);
+  const fresh = freshness(SUBJECTS.tracker, entry, conn, now);
+  const span = windowSpanMs(m);
+  const hid = `p-tracker-${id}`;
+  // The wire names the benchmark by id only; a missing id falls back to the book's benchmark in reference data.
+  const benchId =
+    m.benchmark?.instrumentId || benchmarkFor(m.bookId)?.instrumentId;
+  return (
+    <section
+      className="panel tcard"
+      aria-labelledby={hid}
+      data-fresh={fresh.state === "stale" ? "stale" : "ok"}
+    >
+      <PanelHead
+        id={hid}
+        title={
+          <>
+            book {m.bookId}
+            {" vs "}
+            {benchId === undefined ? (
+              "no benchmark in reference data"
+            ) : (
+              <Instrument id={benchId} />
+            )}{" "}
+            <span className="tkind">{kindLabel(m.kind)}</span>
+          </>
+        }
+        note={
+          TRACKER_BASIS_IS_DEMO ? (
+            <span className="demo-badge" title={DEMO_TITLE}>
+              DEMO
+            </span>
+          ) : undefined
+        }
+        hint="d1.tracker.<book>: ex-post ADR-010 values, neutral ink (no tracker limit exists)"
+        fresh={fresh}
+        ageLabel="updated"
+      />
+      {fresh.state === "stale" ? (
+        <p className="tstale num">
+          <span className="tstale-glyph" aria-hidden="true" /> STALE
+          {fresh.ageMs === null ? "" : ` ${formatAge(fresh.ageMs)}`}: last known
+          values, last message {formatUtcTime(entry.receivedAtMs)}
+        </p>
+      ) : null}
+      <dl className="tlist">
+        <div className="trow trow-kpi">
+          <dt title="tracking_error_ann_e9">Tracking error (ann.)</dt>
+          <dd className="num tval kpi">
+            {formatBpsE9(m.trackingErrorAnnE9)}{" "}
+            <span className="unit">bps</span>
+          </dd>
+        </div>
+        <Row label="Tracking difference" field="tracking_diff_e9">
+          {`${formatBpsE9(m.trackingDiffE9)} bps`}
+        </Row>
+        <Row label="Cash drag" field="cash_drag_e9">
+          {`${formatBpsE9(m.cashDragE9)} bps`}
+        </Row>
+        <Row label="Cash weight" field="cash_weight_e9">
+          {`${formatPctE9(m.cashWeightE9)} %`}
+        </Row>
+      </dl>
+      <Sparkline ring={ring} />
+      <p className="tmeta num">
+        <span title="n_obs">{m.nObs} obs</span>
+        {" · "}
+        <span title="sampling_interval_s">every {m.samplingIntervalS} s</span>
+        {" · "}
+        <span title="window_end_ns - window_start_ns, Delta One feed clock">
+          window {span === null ? MISSING : formatAge(span)}
+        </span>
+      </p>
+      <p className="tnote" title={PRICE_ONLY_NOTE}>
+        {PRICE_ONLY_SHORT}
+      </p>
+    </section>
+  );
+}
+
+/** Tracker scorecard (ui/CLAUDE.md screen 1, own screen per DESIGN.md Open questions 6): one card per d1.tracker.<book>. Values only. */
+export function TrackerBoard({ now }: { now: number }) {
+  const conn = useBus((s) => s.conn);
+  const st = useBus((s) => s.subjects.tracker);
+  const cards = useMemo(
+    () =>
+      Object.entries(st.latest)
+        .flatMap(([key, entry]) => {
+          const m = asTracker(entry.value);
+          return m ? [{ key, m, entry }] : [];
+        })
+        .sort((a, b) => a.m.bookId - b.m.bookId),
+    [st.latest],
+  );
+  const fresh = freshness(SUBJECTS.tracker, st.last, conn, now);
+  return (
+    <section className="tracker" aria-label="Tracker scorecard">
+      {cards.length === 0 ? (
+        <section className="panel" aria-label="Tracker waiting">
+          <PanelHead
+            id="p-tracker-wait"
+            title="Tracker books"
+            hint="d1.tracker.<book>"
+            fresh={fresh}
+          />
+          <WaitingBody
+            what={<code>d1.tracker.*</code>}
+            extra="The bus does not list which books are tracker books, so none can be shown as waiting individually."
+          />
+        </section>
+      ) : (
+        <div className="tgrid">
+          {cards.map((c) => (
+            <TrackerCard
+              key={c.key}
+              id={c.key}
+              m={c.m}
+              entry={c.entry}
+              ring={st.rings[c.key]}
+              now={now}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}

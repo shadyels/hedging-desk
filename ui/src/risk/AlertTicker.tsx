@@ -1,0 +1,62 @@
+import { useMemo } from "react";
+import { freshness } from "../bus/freshness";
+import { SUBJECTS } from "../bus/subjects";
+import { StateChip, type ChipState } from "../components/StateChip";
+import { WireText } from "../components/WireText";
+import { formatUtcTime } from "../format";
+import type { RiskLimitAlert } from "../gen/live";
+import { useBus } from "../store";
+import { asAlert } from "./model";
+import { NoneYetBody, PanelHead } from "./parts";
+
+/** cleared = back inside warn (OK); breached = hard; otherwise warn. */
+export const alertChipState = (a: RiskLimitAlert): ChipState =>
+  a.cleared ? "ok" : a.breached ? "hard" : "warn";
+
+export function AlertTicker({ now }: { now: number }) {
+  const conn = useBus((s) => s.conn);
+  const st = useBus((s) => s.subjects.limitAlerts);
+  const ring = st.rings[""];
+  // Newest first, capped at the registry ring size (the store already bounds the ring to it).
+  const rows = useMemo(
+    () =>
+      (ring ?? []).slice().reverse().slice(0, SUBJECTS.limitAlerts.ringSize),
+    [ring],
+  );
+  // Event-driven subject: freshness never returns "stale", only waiting / ok (age) / disconnected.
+  const fresh = freshness(SUBJECTS.limitAlerts, st.last, conn, now);
+  return (
+    <section className="panel" aria-labelledby="p-alerts">
+      <PanelHead
+        id="p-alerts"
+        title="Limit alerts"
+        hint="d1.alerts.limits: sent on level change only, no hysteresis"
+        fresh={fresh}
+        ageLabel="last event"
+        event
+      />
+      {rows.length === 0 ? (
+        <NoneYetBody>
+          Alerts are sent on level change only, so a healthy board stays empty.
+        </NoneYetBody>
+      ) : (
+        <ul className="ticker">
+          {rows.map((e) => {
+            const a = asAlert(e.value);
+            if (!a) return null;
+            return (
+              <li key={`${e.receivedAtMs}:${e.value.meta?.msgId ?? ""}`}>
+                <span className="num">{formatUtcTime(e.receivedAtMs)}</span>
+                <StateChip state={alertChipState(a)} />
+                <WireText value={a.text} />
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      <p className="foot">
+        Newest first. Time is when the UI received the alert.
+      </p>
+    </section>
+  );
+}
