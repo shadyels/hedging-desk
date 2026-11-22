@@ -35,4 +35,5 @@ End every report with a `LESSONS:` block: 0-3 short, GENERALIZABLE lessons that 
 - Before appending a requested phrase to a ledger cell, open the code it describes — 'capped' and 'rejected' are different claims, and the brief's wording can be the wrong one.
 - When a marker's text names an upgrade, a row labelled no-trigger is stale: reclassify it, recompute the headline's no-trigger count, and update every cluster/summary section that lists the same markers — a headline-only update leaves them contradicting the table.
 - When renumbering several rows in one file, order the edits so no replacement creates a duplicate of a still-pending old string (move 46->48 before 44->46), and classify grep hits as marker definitions vs prose cross-references before adding rows.
+- Verify a brief's operational caveat ('X refuses to run', 'needs Y first') against the script or code the command invokes, not the task-runner line, and when rewriting an example list check each example still illustrates the rule (examples that now exist no longer show 'may not exist yet').
 <!-- END learned-lessons -->
