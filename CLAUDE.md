@@ -21,19 +21,19 @@ Monorepo, five phases:
 | `protocol/nats-subjects.md` | publishing or subscribing to any NATS subject |
 | `protocol/refdata/universe.json` | using any instrument_id, book_id, or market convention |
 | `docs/GLOSSARY.md` | when a trading term in a task is unclear |
-| `scripts/README.md` | implementing or debugging any `scripts/*.sh` (they are stubs; that file is their contract) |
+| `scripts/README.md` | implementing or debugging any `scripts/*.sh` (that file is their contract) |
 | `deploy/docker-compose.yml` + `deploy/nats.conf` | changing local infra, ports, or NATS/Kafka/Schema-Registry config |
 | `docs/PONYTAIL-DEBT.md` | planning Slice 2/3 feature work or any milestone implementation; catalogs deliberate shortcuts and their phase-gated upgrade paths |
 
 If a task matches a row above and the file hasn't been read this session, read it first. When docs and code disagree, flag it — do not silently pick one.
 
-## Repo status: SCAFFOLD (read this before assuming a file exists)
+## Repo status (read this before assuming a file exists)
 
-This repo currently contains contracts, schemas, configs and docs — almost no implementation. Concretely:
+Phases 1 (Delta One) and 2 (EXO) are implemented and met per `docs/ROADMAP.md`. P3.M1 (Monitoring) is in progress; P3.M2 (Actions) and Phases 4–5 are not built. Concretely:
 
-- `scripts/*.sh` are failing stubs; their behavior contract is `scripts/README.md`.
-- Rust crates (`delta-one/crates/*`, including the `sim` binary crate — sim's Rust code lives in the delta-one workspace per ADR-007, while `/sim/` holds its CLAUDE.md, scenarios and golden files) contain placeholder sources.
-- Files referenced by component CLAUDE.md files as homes for specific logic (e.g. `exo/src/exo/bus/convert.py`, `ui/src/format.ts`, generated protobuf code) may not exist yet: they are contracts naming where that logic MUST live when you implement it, not files to search for. If a referenced file is missing, create it at exactly that path.
+- `scripts/*.sh` are implemented; their behavior contract is `scripts/README.md`.
+- Rust crates (`delta-one/crates/*`, including the `sim` binary crate — sim's Rust code lives in the delta-one workspace per ADR-007, while `/sim/` holds its CLAUDE.md, scenarios and golden files) contain real code.
+- Files referenced by component CLAUDE.md files as homes for specific logic may not exist yet: they are contracts naming where that logic MUST live when you implement it, not files to search for. If a referenced file is missing, create it at exactly that path.
 - Build order for implementation work is `docs/ROADMAP.md`; do not implement ahead of the current milestone.
 
 ## System topology (authoritative summary)

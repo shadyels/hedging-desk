@@ -46,8 +46,8 @@ echo "scripts/demo.sh: waiting for NATS on 127.0.0.1:4222..."
 # curl against the monitoring port (deploy/docker-compose.yml: 8222) rather
 # than a raw TCP probe of 4222 -- bash's /dev/tcp redirection isn't available
 # in every shell build (observed: absent in one dev sandbox), while curl is
-# universally present here and elsewhere in these scripts (none exist yet,
-# but it's the obvious portable choice over a bash-only feature).
+# universally present here and elsewhere in these scripts (schema-check.sh
+# uses it too).
 nats_up=0
 for _ in $(seq 1 50); do
   if curl -sf http://127.0.0.1:8222/varz >/dev/null 2>&1; then
